@@ -305,10 +305,7 @@ CustomKernelFunction metal_kernel(
                 << "```" << std::endl;
     }
 
-    return array::make_arrays(
-        std::move(output_shapes),
-        std::move(output_dtypes),
-        std::make_shared<CustomKernel>(
+    auto prim = std::make_shared<CustomKernel>(
             s,
             std::move(kernel_name),
             std::move(kernel_source),
@@ -319,8 +316,13 @@ CustomKernelFunction metal_kernel(
             init_value,
             std::vector<ScalarArg>{},
             false,
-            0),
-        std::move(inputs));
+            0);
+        prim->set_output_shapes(output_shapes);
+        return array::make_arrays(
+            std::move(output_shapes),
+            std::move(output_dtypes),
+            std::move(prim),
+            std::move(inputs));
   };
 }
 

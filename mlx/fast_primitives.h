@@ -411,6 +411,11 @@ class CustomKernel : public Primitive {
         shared_memory_);
   }
 
+  void set_output_shapes(std::vector<Shape> shapes) { output_shapes_ = std::move(shapes); }
+  std::vector<Shape> output_shapes(const std::vector<array>&) override {
+    return output_shapes_;
+  }
+
  private:
   std::string name_;
   std::string source_;
@@ -422,6 +427,7 @@ class CustomKernel : public Primitive {
   std::vector<ScalarArg> scalar_arguments_;
   bool is_precompiled_;
   int shared_memory_;
+  std::vector<Shape> output_shapes_;
 };
 
 } // namespace mlx::core::fast

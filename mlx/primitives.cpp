@@ -3681,6 +3681,18 @@ std::vector<array> GatherQMM::jvp(
   throw std::runtime_error("GatherQMM::jvp NYI");
 }
 
+
+std::vector<Shape> GatherQMM::output_shapes(const std::vector<array>& inputs) {
+  auto& x = inputs[0];
+  auto& w = inputs[1];
+  int w_outer_dims = transpose_ ? w.shape(-2) : w.shape(-1) * 32 / bits_;
+  int idx_pos = (mode_ == QuantizationMode::Affine) ? 4 : 3;
+  auto out_shape = inputs[idx_pos].shape();
+  out_shape.push_back(x.shape(-2));
+  out_shape.push_back(w_outer_dims);
+  return {out_shape};
+}
+
 bool GatherQMM::is_equivalent(const Primitive& other) const {
   const GatherQMM& qm_other = static_cast<const GatherQMM&>(other);
   return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_ &&
