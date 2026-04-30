@@ -7,7 +7,11 @@
 
 #include <mach/vm_page_size.h>
 #include <unistd.h>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <execinfo.h>
+#include <mutex>
 
 namespace mlx::core {
 
@@ -101,10 +105,85 @@ size_t MetalAllocator::set_wired_limit(size_t limit) {
   return limit;
 };
 
+// 2026-04-30 (osaurus stability work): env-gated tracer for large
+// allocations. Bug 2 (over-cap hybrid prompt → 154 GB metal::malloc on
+// some hosts) needs a way to pin the *exact* call site of an
+// over-sized allocation request before designing a clamp. Set
+// OSAURUS_MLX_MALLOC_TRACE=1 to log every malloc whose requested size
+// is >= OSAURUS_MLX_MALLOC_TRACE_BYTES (default 1 GiB) along with a
+// symbolicated C++ backtrace to stderr. Off by default — the wrapper
+// adds nothing to the hot path when the env is unset (single
+// once-per-process getenv read, then a cheap size compare). The
+// backtrace is written under a static mutex so concurrent decode
+// threads don't interleave frames mid-line.
+namespace {
+struct MallocTraceConfig {
+  bool enabled = false;
+  size_t threshold_bytes = 1024ull * 1024ull * 1024ull; // 1 GiB
+};
+
+const MallocTraceConfig& malloc_trace_config() {
+  static MallocTraceConfig cfg = []() {
+    MallocTraceConfig c;
+    if (const char* v = std::getenv("OSAURUS_MLX_MALLOC_TRACE")) {
+      c.enabled = (v[0] == '1');
+    }
+    if (const char* v = std::getenv("OSAURUS_MLX_MALLOC_TRACE_BYTES")) {
+      char* end = nullptr;
+      unsigned long long n = std::strtoull(v, &end, 10);
+      if (end != v && n > 0) {
+        c.threshold_bytes = static_cast<size_t>(n);
+      }
+    }
+    if (c.enabled) {
+      std::fprintf(
+          stderr,
+          "[osaurus.malloc-trace] enabled, threshold=%zu bytes\n",
+          c.threshold_bytes);
+    }
+    return c;
+  }();
+  return cfg;
+}
+
+void log_large_alloc(size_t size) {
+  static std::mutex log_mu;
+  std::lock_guard<std::mutex> lk(log_mu);
+  std::fprintf(
+      stderr,
+      "[osaurus.malloc-trace] metal::malloc requested %.2f GiB (%zu bytes)\n",
+      static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0),
+      size);
+  void* frames[32];
+  int n = ::backtrace(frames, 32);
+  if (n > 0) {
+    char** syms = ::backtrace_symbols(frames, n);
+    if (syms) {
+      // Skip frame 0 (this function) and frame 1 (caller inside MetalAllocator::malloc).
+      for (int i = 2; i < n; ++i) {
+        std::fprintf(stderr, "[osaurus.malloc-trace]   #%-2d %s\n", i - 2, syms[i]);
+      }
+      std::free(syms);
+    }
+  }
+  std::fflush(stderr);
+}
+} // namespace
+
 Buffer MetalAllocator::malloc(size_t size) {
   // Metal doesn't like empty buffers
   if (size == 0) {
     return Buffer{nullptr};
+  }
+
+  // 2026-04-30 (osaurus stability work): trace large allocations when
+  // OSAURUS_MLX_MALLOC_TRACE=1. See the header comment on
+  // malloc_trace_config above for details. Zero overhead when env unset.
+  {
+    const auto& cfg = malloc_trace_config();
+    if (cfg.enabled && size >= cfg.threshold_bytes) {
+      log_large_alloc(size);
+    }
   }
 
   // More helpful message if maximum buffer length is exceeded
