@@ -367,6 +367,37 @@ void CustomKernel::eval_gpu(
     if (auto it = kernel_cache.libraries.find(name_);
         it != kernel_cache.libraries.end()) {
       if (it->second != source_) {
+        // 2026-04-30 trace (osaurus stability): when env
+        // OSAURUS_MLX_CLEAR_LIBRARY_TRACE=1 is set, log every
+        // time this branch fires + the byte index where the old
+        // and new sources first diverge. The eviction itself is
+        // safe (see device.cpp clear_library), but knowing
+        // WHICH kernel triggers eviction characterises Bug 1's
+        // exact root cause.
+        static const bool trace =
+            []() {
+              const char* v = std::getenv("OSAURUS_MLX_CLEAR_LIBRARY_TRACE");
+              return v && std::string(v) == "1";
+            }();
+        if (trace) {
+          const auto& a = it->second;
+          const auto& b = source_;
+          const size_t n = std::min(a.size(), b.size());
+          size_t diff_at = 0;
+          while (diff_at < n && a[diff_at] == b[diff_at]) ++diff_at;
+          std::fprintf(stderr,
+              "[mlx clear_library] kernel=%s old_len=%zu new_len=%zu first_diff=%zu\n",
+              name_.c_str(), a.size(), b.size(), diff_at);
+          if (diff_at < n) {
+            const size_t ctx_start = (diff_at > 30) ? diff_at - 30 : 0;
+            const size_t ctx_len = std::min<size_t>(80, a.size() - ctx_start);
+            std::fprintf(stderr, "  old: ...%.*s...\n",
+                static_cast<int>(ctx_len), a.c_str() + ctx_start);
+            const size_t ctx_len_b = std::min<size_t>(80, b.size() - ctx_start);
+            std::fprintf(stderr, "  new: ...%.*s...\n",
+                static_cast<int>(ctx_len_b), b.c_str() + ctx_start);
+          }
+        }
         auto& d = metal::device(s.device);
         d.clear_library(name_);
         it->second = source_;
