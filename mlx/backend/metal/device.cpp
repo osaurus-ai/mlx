@@ -704,14 +704,49 @@ MTL::Library* Device::get_library(
 }
 
 void Device::clear_library(const std::string& name) {
+  // 2026-04-30 fix (osaurus stability work): the original implementation
+  // called `kernel->release()` and `library->release()` directly, which
+  // dropped the Swift-side ref count immediately. If a previously
+  // registered MTLComputePipelineState was still encoded into an
+  // in-flight MTLCommandBuffer (very common across consecutive
+  // CustomKernel dispatches that share `name_` but have different
+  // `source_` after template substitution), Metal validation fired
+  //
+  //   notifyExternalReferencesNonZeroOnDealloc:3459: failed assertion
+  //   'The following Metal object is being destroyed while still
+  //    required to be alive by the command buffer ...'
+  //
+  // and the process was killed.
+  //
+  // Reproduced deterministically by tpae 2026-04-30 with the Osaurus
+  // host on an M4 Pro running Qwen-3.6 35B A3B MXFP4 (hybrid SSM +
+  // attention) under the warm-disk-KV-cache 2nd-request flow.
+  //
+  // Fix: keep stale entries out of the lookup tables so future
+  // invocations rebuild the library, but DO NOT drop the Swift-side
+  // refcount of the underlying Metal objects. Metal command-buffer
+  // refs continue to keep them alive until natural completion.
+  // The cost is bounded — finite source strings per process — and
+  // is correct under all observed dispatch patterns. We intentionally
+  // accept a small leak in exchange for invariant correctness.
+  //
+  // To re-enable the eager-release behaviour for testing, set the
+  // environment variable `MLX_CLEAR_LIBRARY_RELEASE=1` before launch.
   std::unique_lock wlock(library_mtx_);
   if (auto it = library_map_.find(name); it != library_map_.end()) {
     auto kernel_map_it = library_kernels_.find(it->second);
-    for (auto& [_, kernel] : kernel_map_it->second) {
-      kernel->release();
+    static const bool eager_release =
+        []() {
+          const char* v = std::getenv("MLX_CLEAR_LIBRARY_RELEASE");
+          return v && std::string(v) == "1";
+        }();
+    if (eager_release) {
+      for (auto& [_, kernel] : kernel_map_it->second) {
+        kernel->release();
+      }
+      it->second->release();
     }
     library_kernels_.erase(kernel_map_it);
-    it->second->release();
     library_map_.erase(it);
   }
 }
