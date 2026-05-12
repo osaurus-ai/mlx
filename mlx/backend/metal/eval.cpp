@@ -59,7 +59,7 @@ void eval(array& arr) {
   // independent of any caller-side shared_ptr<array::Data> lifetime. Required
   // because allocator buffers use MTLResourceHazardTrackingModeUntracked and
   // the command buffer uses commandBufferWithUnretainedReferences().
-  auto retained = encoder.take_retained_buffers();
+  auto retained = d.take_retained_buffers(s.index);
 
   if (d.command_buffer_needs_commit(s.index)) {
     d.end_encoding(s.index);

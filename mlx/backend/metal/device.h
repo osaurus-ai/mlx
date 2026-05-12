@@ -187,6 +187,7 @@ class MLX_API Device {
   bool command_buffer_needs_commit(int index);
   void commit_command_buffer(int index);
   CommandEncoder& get_command_encoder(int index);
+  std::vector<MTL::Buffer*> take_retained_buffers(int index);
   void end_encoding(int index);
 
   MTL::Library* get_library(

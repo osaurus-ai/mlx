@@ -534,6 +534,14 @@ CommandEncoder& Device::get_command_encoder(int index) {
   return *stream.encoder;
 }
 
+std::vector<MTL::Buffer*> Device::take_retained_buffers(int index) {
+  auto& stream = get_stream_(index);
+  if (stream.encoder == nullptr) {
+    return {};
+  }
+  return stream.encoder->take_retained_buffers();
+}
+
 MTL::Library* Device::get_library(
     const std::string& name,
     const std::string& path /* = "" */) {
