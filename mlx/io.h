@@ -4,6 +4,7 @@
 
 #include <unordered_map>
 #include <variant>
+#include <cstdint>
 
 #include "mlx/api.h"
 #include "mlx/array.h"
@@ -39,6 +40,15 @@ MLX_API SafetensorsLoad
 load_safetensors(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s = {});
 MLX_API SafetensorsLoad
 load_safetensors(const std::string& file, StreamOrDevice s = {});
+
+MLX_API int64_t safetensors_mmap_advise_routed(
+    int32_t advice,
+    int32_t cold_pct);
+MLX_API int64_t safetensors_mmap_advise_experts(
+    int32_t advice,
+    const int32_t* layers,
+    const int32_t* experts,
+    int64_t count);
 
 MLX_API void save_safetensors(
     std::shared_ptr<io::Writer> in_stream,
