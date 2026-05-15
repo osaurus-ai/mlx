@@ -49,6 +49,16 @@ MLX_API int64_t safetensors_mmap_advise_experts(
     const int32_t* layers,
     const int32_t* experts,
     int64_t count);
+MLX_API int64_t safetensors_mmap_advise_layer(
+    int32_t advice,
+    int32_t layer);
+MLX_API int64_t safetensors_mmap_tracked_buffer_bytes();
+MLX_API array mmap_file_region(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype);
 
 MLX_API void save_safetensors(
     std::shared_ptr<io::Writer> in_stream,

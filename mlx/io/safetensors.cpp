@@ -3,9 +3,11 @@
 #include <json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -142,9 +144,103 @@ bool mmap_safetensors_enabled() {
       env_truthy("VMLINUX_MMAP_SAFETENSORS");
 }
 
+bool mmap_debug_enabled() {
+  return env_truthy("MLX_SAFETENSORS_MMAP_DEBUG") ||
+      env_truthy("VMLINUX_MMAP_SAFETENSORS_DEBUG");
+}
+
+std::optional<std::string> env_lower(const char* key) {
+  auto raw = std::getenv(key);
+  if (!raw) {
+    return std::nullopt;
+  }
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+bool mmap_tensor_buffers_enabled() {
+  return env_truthy("MLX_SAFETENSORS_MMAP_TENSOR_BUFFERS") ||
+      env_truthy("VMLINUX_MMAP_SAFETENSORS_TENSOR_BUFFERS") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS_TENSOR_BUFFERS");
+}
+
+int32_t env_int_clamped(
+    const char* key,
+    int32_t default_value,
+    int32_t min_value,
+    int32_t max_value) {
+  auto raw = std::getenv(key);
+  if (!raw) {
+    return default_value;
+  }
+  char* end = nullptr;
+  const auto parsed = std::strtol(raw, &end, 10);
+  if (end == raw) {
+    return default_value;
+  }
+  return std::max<int32_t>(
+      min_value,
+      std::min<int32_t>(max_value, static_cast<int32_t>(parsed)));
+}
+
+bool mmap_start_cold_enabled() {
+  return env_truthy("MLX_SAFETENSORS_MMAP_START_COLD") ||
+      env_truthy("VMLINUX_MMAP_SAFETENSORS_START_COLD");
+}
+
+int32_t mmap_start_cold_pct() {
+  if (std::getenv("MLX_SAFETENSORS_MMAP_COLD_PCT")) {
+    return env_int_clamped("MLX_SAFETENSORS_MMAP_COLD_PCT", 70, 0, 100);
+  }
+  return env_int_clamped("VMLINUX_MMAP_SAFETENSORS_COLD_PCT", 70, 0, 100);
+}
+
+enum class MmapColdAdvice {
+  dont_need,
+  page_out,
+  invalidate,
+};
+
+MmapColdAdvice mmap_cold_advice() {
+  auto value = env_lower("MLX_SAFETENSORS_MMAP_COLD_ADVICE");
+  if (!value) {
+    value = env_lower("VMLINUX_MMAP_SAFETENSORS_COLD_ADVICE");
+  }
+  if (!value) {
+    return MmapColdAdvice::dont_need;
+  }
+  std::replace(value->begin(), value->end(), '-', '_');
+  if (*value == "pageout" || *value == "page_out") {
+    return MmapColdAdvice::page_out;
+  }
+  if (*value == "force" || *value == "invalidate" ||
+      *value == "msync" || *value == "msync_invalidate") {
+    return MmapColdAdvice::invalidate;
+  }
+  return MmapColdAdvice::dont_need;
+}
+
+int mmap_cold_madvise_value(MmapColdAdvice advice) {
+  switch (advice) {
+    case MmapColdAdvice::page_out:
+#ifdef MADV_PAGEOUT
+      return MADV_PAGEOUT;
+#else
+      return MADV_DONTNEED;
+#endif
+    case MmapColdAdvice::invalidate:
+    case MmapColdAdvice::dont_need:
+      return MADV_DONTNEED;
+  }
+}
+
 struct MmapShard {
   void* base{nullptr};
   size_t size{0};
+  size_t tracked_buffer_bytes{0};
   std::string path;
 
   MmapShard(void* base, size_t size, std::string path)
@@ -201,6 +297,9 @@ std::optional<ParsedRoutedName> match_routed_name(const std::string& name) {
           R"(layers\.(\d+)\.mlp\.switch_mlp\.(?:gate|up|down)_proj\.(?:tq_packed|tq_norms)$)"),
       std::regex(
           "^" + vl_prefix +
+          R"(layers\.(\d+)\.(?:mlp\.)?zaya_block\.experts\.switch_mlp\.(?:gate|up|down)_proj\.(?:tq_packed|tq_norms)$)"),
+      std::regex(
+          "^" + vl_prefix +
           R"(layers\.(\d+)\.switch_mlp\.(?:gate|up|down)_proj\.(?:weight|scales|biases|tq_packed|tq_norms)$)"),
       std::regex(
           "^" + vl_prefix +
@@ -228,6 +327,16 @@ std::optional<ParsedRoutedName> match_routed_name(const std::string& name) {
           0,
           true};
     }
+  }
+  return std::nullopt;
+}
+
+std::optional<int32_t> match_layer_name(const std::string& name) {
+  static const std::regex layer_regex(
+      R"(^(?:(?:model|language_model)\.)*layers\.(\d+)\.)");
+  std::smatch match;
+  if (std::regex_search(name, match, layer_regex) && match.size() >= 2) {
+    return static_cast<int32_t>(std::stoi(match[1].str()));
   }
   return std::nullopt;
 }
@@ -264,6 +373,16 @@ class SafetensorsMmapRegistry {
     std::lock_guard<std::mutex> lock(mutex_);
     regions_.push_back(MmapTensorRegion{
         std::weak_ptr<MmapShard>(shard), layer, expert, offset, length});
+  }
+
+  void register_layer_region(
+      const std::shared_ptr<MmapShard>& shard,
+      int32_t layer,
+      size_t offset,
+      size_t length) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    layer_regions_.push_back(MmapTensorRegion{
+        std::weak_ptr<MmapShard>(shard), layer, -1, offset, length});
   }
 
   int64_t advise_routed(int32_t advice, int32_t cold_pct) {
@@ -341,6 +460,37 @@ class SafetensorsMmapRegistry {
     return advise_regions(selected, advice);
   }
 
+  int64_t advise_layer(int32_t advice, int32_t layer) {
+    std::vector<LiveMmapTensorRegion> selected;
+    for (auto& region : live_layer_regions()) {
+      if (region.layer == layer) {
+        selected.push_back(std::move(region));
+      }
+    }
+    return advise_regions(selected, advice);
+  }
+
+  int64_t tracked_buffer_bytes() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int64_t total = 0;
+    std::unordered_set<const MmapShard*> seen;
+    auto visit = [&](std::vector<MmapTensorRegion>& regions) {
+      auto write = regions.begin();
+      for (auto read = regions.begin(); read != regions.end(); ++read) {
+        if (auto shard = read->shard.lock()) {
+          if (seen.insert(shard.get()).second) {
+            total += static_cast<int64_t>(shard->tracked_buffer_bytes);
+          }
+          *write++ = *read;
+        }
+      }
+      regions.erase(write, regions.end());
+    };
+    visit(regions_);
+    visit(layer_regions_);
+    return total;
+  }
+
  private:
   static int64_t pair_key(int32_t layer, int32_t expert) {
     return (static_cast<int64_t>(layer) << 32) ^
@@ -364,6 +514,26 @@ class SafetensorsMmapRegistry {
       }
     }
     regions_.erase(write, regions_.end());
+    return live;
+  }
+
+  std::vector<LiveMmapTensorRegion> live_layer_regions() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<LiveMmapTensorRegion> live;
+    live.reserve(layer_regions_.size());
+    auto write = layer_regions_.begin();
+    for (auto read = layer_regions_.begin(); read != layer_regions_.end(); ++read) {
+      if (auto shard = read->shard.lock()) {
+        live.push_back(LiveMmapTensorRegion{
+            std::move(shard),
+            read->layer,
+            read->expert,
+            read->offset,
+            read->length});
+        *write++ = *read;
+      }
+    }
+    layer_regions_.erase(write, layer_regions_.end());
     return live;
   }
 
@@ -392,11 +562,31 @@ class SafetensorsMmapRegistry {
     if (aligned_end <= aligned_start) {
       return 0;
     }
-    const auto os_advice = advice == 1 ? MADV_WILLNEED : MADV_DONTNEED;
+    void* const aligned_address = reinterpret_cast<void*>(aligned_start);
+    const auto aligned_length = aligned_end - aligned_start;
+    if (advice == 1) {
+      if (madvise(aligned_address, aligned_length, MADV_WILLNEED) != 0) {
+        return 0;
+      }
+      return static_cast<int64_t>(clamped_length);
+    }
+
+    const auto cold_advice = mmap_cold_advice();
+    if (cold_advice == MmapColdAdvice::invalidate) {
+#if defined(MS_INVALIDATE) && defined(MS_ASYNC)
+      if (msync(aligned_address, aligned_length, MS_INVALIDATE | MS_ASYNC) != 0) {
+        return 0;
+      }
+      return static_cast<int64_t>(clamped_length);
+#else
+      return 0;
+#endif
+    }
+
     if (madvise(
-            reinterpret_cast<void*>(aligned_start),
-            aligned_end - aligned_start,
-            os_advice) != 0) {
+            aligned_address,
+            aligned_length,
+            mmap_cold_madvise_value(cold_advice)) != 0) {
       return 0;
     }
     return static_cast<int64_t>(clamped_length);
@@ -404,25 +594,50 @@ class SafetensorsMmapRegistry {
 
   std::mutex mutex_;
   std::vector<MmapTensorRegion> regions_;
+  std::vector<MmapTensorRegion> layer_regions_;
 };
 
 std::optional<SafetensorsLoad> load_safetensors_mmap(
     const std::string& file,
     StreamOrDevice) {
+  const bool debug = mmap_debug_enabled();
+  const bool tensor_buffers = mmap_tensor_buffers_enabled();
+  auto log = [&](const char* message) {
+    if (debug) {
+      std::fprintf(
+          stderr,
+          "[mlx.safetensors.mmap] %s file=%s\n",
+          message,
+          file.c_str());
+      std::fflush(stderr);
+    }
+  };
   int fd = open(file.c_str(), O_RDONLY | O_BINARY);
   if (fd < 0) {
+    log("open-failed");
     return std::nullopt;
   }
+  auto close_fd = [&]() {
+    if (fd >= 0) {
+      close(fd);
+      fd = -1;
+    }
+  };
   struct stat st {};
   if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-    close(fd);
+    close_fd();
+    log("stat-failed");
     return std::nullopt;
   }
   const auto file_size = static_cast<size_t>(st.st_size);
   void* raw = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-  close(fd);
   if (raw == MAP_FAILED) {
+    close_fd();
+    log("mmap-failed");
     return std::nullopt;
+  }
+  if (!tensor_buffers) {
+    close_fd();
   }
 
   auto unmap_on_failure = [&]() {
@@ -430,10 +645,12 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       munmap(raw, file_size);
       raw = nullptr;
     }
+    close_fd();
   };
 
   if (file_size < 8) {
     unmap_on_failure();
+    log("header-too-short");
     return std::nullopt;
   }
 
@@ -445,6 +662,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       json_header_length >= kMaxJsonHeaderLength ||
       8 + json_header_length > file_size) {
     unmap_on_failure();
+    log("invalid-header-length");
     return std::nullopt;
   }
 
@@ -453,28 +671,34 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     metadata = json::parse(base + 8, base + 8 + json_header_length);
   } catch (...) {
     unmap_on_failure();
+    log("json-parse-failed");
     return std::nullopt;
   }
   if (!metadata.is_object()) {
     unmap_on_failure();
+    log("metadata-not-object");
     return std::nullopt;
   }
 
-  auto buffer = allocator::make_buffer(raw, file_size);
-  if (buffer.ptr() == nullptr) {
-    unmap_on_failure();
-    return std::nullopt;
+  std::shared_ptr<MmapShard> shard;
+  std::optional<array> base_array;
+  if (!tensor_buffers) {
+    shard = std::make_shared<MmapShard>(raw, file_size, file);
+    raw = nullptr;
+    auto buffer = allocator::make_buffer(shard->base, file_size);
+    if (buffer.ptr() == nullptr) {
+      log("make-buffer-failed");
+      return std::nullopt;
+    }
+    shard->tracked_buffer_bytes = file_size;
+    base_array.emplace(
+        buffer,
+        Shape{1},
+        uint8,
+        [shard](allocator::Buffer buffer) {
+          allocator::release(buffer);
+        });
   }
-
-  auto shard = std::make_shared<MmapShard>(raw, file_size, file);
-  raw = nullptr;
-  array base_array(
-      buffer,
-      Shape{1},
-      uint8,
-      [shard](allocator::Buffer buffer) {
-        allocator::release(buffer);
-      });
 
   const size_t data_start = static_cast<size_t>(json_header_length) + 8;
   std::unordered_map<std::string, array> res;
@@ -492,6 +716,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     const std::vector<size_t>& data_offsets = item.value().at("data_offsets");
     if (data_offsets.size() != 2 || data_offsets[1] < data_offsets[0]) {
       unmap_on_failure();
+      log("invalid-data-offsets");
       return std::nullopt;
     }
 
@@ -499,9 +724,11 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     const auto tensor_offset = data_start + data_offsets[0];
     const auto tensor_length = data_offsets[1] - data_offsets[0];
     if (tensor_offset > file_size || tensor_length > file_size - tensor_offset) {
+      log("tensor-out-of-bounds");
       return std::nullopt;
     }
     if (tensor_offset % size_of(type) != 0) {
+      log("tensor-offset-unaligned");
       return std::nullopt;
     }
 
@@ -510,26 +737,125 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
         shape,
         type,
         [](allocator::Buffer) {});
-    tensor.copy_shared_buffer(
-        base_array,
-        tensor.strides(),
-        tensor.flags(),
-        tensor.size(),
-        static_cast<int64_t>(tensor_offset / size_of(type)));
-    res.insert({item.key(), tensor});
+    if (tensor_buffers) {
+      const auto page = static_cast<size_t>(getpagesize());
+      const auto aligned_start = tensor_offset & ~(page - 1);
+      const auto aligned_end = tensor_offset + tensor_length;
+      if (aligned_end <= aligned_start || aligned_end > file_size) {
+        log("tensor-buffer-span-invalid");
+        unmap_on_failure();
+        return std::nullopt;
+      }
+      const auto span = aligned_end - aligned_start;
+      void* tensor_raw = mmap(
+          nullptr,
+          span,
+          PROT_READ,
+          MAP_SHARED,
+          fd,
+          static_cast<off_t>(aligned_start));
+      if (tensor_raw == MAP_FAILED) {
+        log("tensor-buffer-mmap-failed");
+        unmap_on_failure();
+        return std::nullopt;
+      }
+      auto tensor_shard = std::make_shared<MmapShard>(tensor_raw, span, file);
+      auto buffer = allocator::make_buffer(tensor_shard->base, span);
+      if (buffer.ptr() == nullptr) {
+        tensor_shard.reset();
+        log("tensor-buffer-make-buffer-failed");
+        unmap_on_failure();
+        return std::nullopt;
+      }
+      tensor_shard->tracked_buffer_bytes = span;
+      array tensor_base(
+          buffer,
+          Shape{1},
+          uint8,
+          [tensor_shard](allocator::Buffer buffer) {
+            allocator::release(buffer);
+          });
+      tensor.copy_shared_buffer(
+          tensor_base,
+          tensor.strides(),
+          tensor.flags(),
+          tensor.size(),
+          static_cast<int64_t>((tensor_offset - aligned_start) / size_of(type)));
 
-    if (auto routed = match_routed_name(item.key())) {
-      if (routed->stacked && !shape.empty() && shape[0] > 1) {
-        const auto experts = static_cast<size_t>(shape[0]);
-        if (experts > 0 && tensor_length % experts == 0) {
-          const auto per_expert = tensor_length / experts;
-          for (size_t expert = 0; expert < experts; ++expert) {
+      if (auto layer = match_layer_name(item.key())) {
+        SafetensorsMmapRegistry::instance().register_layer_region(
+            tensor_shard,
+            *layer,
+            tensor_offset - aligned_start,
+            tensor_length);
+      }
+
+      if (auto routed = match_routed_name(item.key())) {
+        if (routed->stacked && !shape.empty() && shape[0] > 1) {
+          const auto experts = static_cast<size_t>(shape[0]);
+          if (experts > 0 && tensor_length % experts == 0) {
+            const auto per_expert = tensor_length / experts;
+            for (size_t expert = 0; expert < experts; ++expert) {
+              SafetensorsMmapRegistry::instance().register_region(
+                  tensor_shard,
+                  routed->layer,
+                  static_cast<int32_t>(expert),
+                  tensor_offset - aligned_start + expert * per_expert,
+                  per_expert);
+            }
+          } else {
+            SafetensorsMmapRegistry::instance().register_region(
+                tensor_shard,
+                routed->layer,
+                routed->expert,
+                tensor_offset - aligned_start,
+                tensor_length);
+          }
+        } else {
+          SafetensorsMmapRegistry::instance().register_region(
+              tensor_shard,
+              routed->layer,
+              routed->expert,
+              tensor_offset - aligned_start,
+              tensor_length);
+        }
+      }
+    } else {
+      tensor.copy_shared_buffer(
+          *base_array,
+          tensor.strides(),
+          tensor.flags(),
+          tensor.size(),
+          static_cast<int64_t>(tensor_offset / size_of(type)));
+
+      if (auto layer = match_layer_name(item.key())) {
+        SafetensorsMmapRegistry::instance().register_layer_region(
+            shard,
+            *layer,
+            tensor_offset,
+            tensor_length);
+      }
+
+      if (auto routed = match_routed_name(item.key())) {
+        if (routed->stacked && !shape.empty() && shape[0] > 1) {
+          const auto experts = static_cast<size_t>(shape[0]);
+          if (experts > 0 && tensor_length % experts == 0) {
+            const auto per_expert = tensor_length / experts;
+            for (size_t expert = 0; expert < experts; ++expert) {
+              SafetensorsMmapRegistry::instance().register_region(
+                  shard,
+                  routed->layer,
+                  static_cast<int32_t>(expert),
+                  tensor_offset + expert * per_expert,
+                  per_expert);
+            }
+          } else {
             SafetensorsMmapRegistry::instance().register_region(
                 shard,
                 routed->layer,
-                static_cast<int32_t>(expert),
-                tensor_offset + expert * per_expert,
-                per_expert);
+                routed->expert,
+                tensor_offset,
+                tensor_length);
           }
         } else {
           SafetensorsMmapRegistry::instance().register_region(
@@ -539,16 +865,33 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
               tensor_offset,
               tensor_length);
         }
-      } else {
-        SafetensorsMmapRegistry::instance().register_region(
-            shard,
-            routed->layer,
-            routed->expert,
-            tensor_offset,
-            tensor_length);
       }
     }
+    res.insert({item.key(), tensor});
   }
+
+  if (mmap_start_cold_enabled()) {
+    SafetensorsMmapRegistry::instance().advise_routed(0, mmap_start_cold_pct());
+  }
+
+  if (tensor_buffers) {
+    if (raw && raw != MAP_FAILED) {
+      munmap(raw, file_size);
+      raw = nullptr;
+    }
+    close_fd();
+  }
+
+  if (debug) {
+    std::fprintf(
+        stderr,
+        "[mlx.safetensors.mmap] loaded file=%s bytes=%zu tensors=%zu\n",
+        file.c_str(),
+        file_size,
+        res.size());
+    std::fflush(stderr);
+  }
+
   return SafetensorsLoad{std::move(res), std::move(metadata_map)};
 }
 
@@ -573,6 +916,124 @@ int64_t safetensors_mmap_advise_experts(
       advice, layers, experts, count);
 #else
   return 0;
+#endif
+}
+
+int64_t safetensors_mmap_advise_layer(int32_t advice, int32_t layer) {
+#ifndef _WIN32
+  return SafetensorsMmapRegistry::instance().advise_layer(advice, layer);
+#else
+  return 0;
+#endif
+}
+
+int64_t safetensors_mmap_tracked_buffer_bytes() {
+#ifndef _WIN32
+  return SafetensorsMmapRegistry::instance().tracked_buffer_bytes();
+#else
+  return 0;
+#endif
+}
+
+array mmap_file_region(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype) {
+#ifndef _WIN32
+  if (length == 0) {
+    throw std::runtime_error("[mmap_file_region] length must be non-zero.");
+  }
+  size_t expected_length = size_of(dtype);
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("[mmap_file_region] shape contains negative dim.");
+    }
+    expected_length *= static_cast<size_t>(dim);
+  }
+  if (expected_length != length) {
+    throw std::runtime_error("[mmap_file_region] shape byte count mismatch.");
+  }
+
+  int fd = open(file.c_str(), O_RDONLY | O_BINARY);
+  if (fd < 0) {
+    throw std::runtime_error("[mmap_file_region] open failed: " + file);
+  }
+  auto close_fd = [&]() {
+    if (fd >= 0) {
+      close(fd);
+      fd = -1;
+    }
+  };
+
+  struct stat st {};
+  if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+    close_fd();
+    throw std::runtime_error("[mmap_file_region] stat failed: " + file);
+  }
+  const auto file_size = static_cast<uint64_t>(st.st_size);
+  if (offset > file_size || length > file_size - offset) {
+    close_fd();
+    throw std::runtime_error("[mmap_file_region] region out of bounds: " + file);
+  }
+
+  const auto item_size = static_cast<uint64_t>(size_of(dtype));
+  const auto page = static_cast<uint64_t>(getpagesize());
+  const auto aligned_start = offset & ~(page - 1);
+  const auto offset_delta = offset - aligned_start;
+  if (offset_delta % item_size != 0) {
+    close_fd();
+    throw std::runtime_error("[mmap_file_region] dtype-unaligned offset.");
+  }
+  const auto span = offset_delta + static_cast<uint64_t>(length);
+  if (span > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    close_fd();
+    throw std::runtime_error("[mmap_file_region] span too large.");
+  }
+
+  void* raw = mmap(
+      nullptr,
+      static_cast<size_t>(span),
+      PROT_READ,
+      MAP_SHARED,
+      fd,
+      static_cast<off_t>(aligned_start));
+  close_fd();
+  if (raw == MAP_FAILED) {
+    throw std::runtime_error("[mmap_file_region] mmap failed: " + file);
+  }
+
+  auto shard = std::make_shared<MmapShard>(
+      raw,
+      static_cast<size_t>(span),
+      file);
+  auto buffer = allocator::make_buffer(shard->base, static_cast<size_t>(span));
+  if (buffer.ptr() == nullptr) {
+    throw std::runtime_error("[mmap_file_region] make_buffer failed: " + file);
+  }
+  shard->tracked_buffer_bytes = static_cast<size_t>(span);
+  array base(
+      buffer,
+      Shape{static_cast<ShapeElem>(span)},
+      uint8,
+      [shard](allocator::Buffer buffer) {
+        allocator::release(buffer);
+      });
+  array tensor(
+      allocator::Buffer(nullptr),
+      shape,
+      dtype,
+      [](allocator::Buffer) {});
+  tensor.copy_shared_buffer(
+      base,
+      tensor.strides(),
+      tensor.flags(),
+      tensor.size(),
+      static_cast<int64_t>(offset_delta / item_size));
+  return tensor;
+#else
+  throw std::runtime_error("[mmap_file_region] unsupported on Windows.");
 #endif
 }
 
@@ -638,6 +1099,13 @@ SafetensorsLoad load_safetensors(const std::string& file, StreamOrDevice s) {
   if (mmap_safetensors_enabled()) {
     if (auto loaded = load_safetensors_mmap(file, s)) {
       return *std::move(loaded);
+    }
+    if (mmap_debug_enabled()) {
+      std::fprintf(
+          stderr,
+          "[mlx.safetensors.mmap] fallback-to-reader file=%s\n",
+          file.c_str());
+      std::fflush(stderr);
     }
   }
 #endif
