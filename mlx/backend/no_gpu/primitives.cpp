@@ -1,4 +1,4 @@
-// Copyright © 2023-2024 Apple Inc.
+// Copyright © 2023-2026 Apple Inc.
 
 #include "mlx/primitives.h"
 #include "mlx/distributed/primitives.h"
@@ -34,6 +34,10 @@ bool fast::ScaledDotProductAttention::use_fallback(
     bool output_logsumexp,
     bool force_fused,
     Stream s) {
+  // Use native CPU kernel for inference (handles causal, array mask, sinks)
+  if (s.device == Device::cpu && !output_logsumexp) {
+    return false;
+  }
   if (force_fused) {
     throw std::invalid_argument(
         "[scaled_dot_product_attention] force_fused=True but no fused "
@@ -172,11 +176,23 @@ NO_GPU(MaskedScatter)
 namespace fast {
 NO_GPU_USE_FALLBACK(CrossEntropy)
 NO_GPU_MULTI(CrossEntropyVJP)
-NO_GPU_USE_FALLBACK(LayerNorm)
+// LayerNorm and RMSNorm have native CPU implementations (norms.cpp)
+// so don't use fallback on CPU
+bool LayerNorm::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(LayerNorm)
 NO_GPU_MULTI(LayerNormVJP)
-NO_GPU_USE_FALLBACK(RMSNorm)
+bool RMSNorm::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(RMSNorm)
 NO_GPU_MULTI(RMSNormVJP)
-NO_GPU_USE_FALLBACK(RoPE)
+// RoPE has native CPU implementation (rope.cpp)
+bool RoPE::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(RoPE)
 NO_GPU_MULTI(ScaledDotProductAttention)
 NO_GPU_MULTI(ScaledDotProductAttentionVJP)
 NO_GPU_MULTI(ConvertFP8)
