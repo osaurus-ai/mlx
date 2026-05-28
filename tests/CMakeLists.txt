@@ -35,6 +35,7 @@ target_sources(
           einsum_tests.cpp
           export_import_tests.cpp
           eval_tests.cpp
+          fast_tests.cpp
           fft_tests.cpp
           load_tests.cpp
           metal_buffer_lifetime_tests.cpp
@@ -45,6 +46,7 @@ target_sources(
           utils_tests.cpp
           vmap_tests.cpp
           linalg_tests.cpp
+          thread_pool_tests.cpp
           ${GPU_TEST_SOURCES})
 
 target_link_libraries(tests PRIVATE mlx doctest)
