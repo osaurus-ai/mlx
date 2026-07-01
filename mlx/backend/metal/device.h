@@ -224,6 +224,16 @@ class MLX_API Device {
 
  private:
   DeviceStream& get_stream_(int index) {
+    // Guard only the map lookup: a concurrent new_queue() emplace can rehash
+    // stream_map_ while another thread's find() traverses it, corrupting the
+    // bucket list -> EXC_BAD_ACCESS in get_command_buffer / end_encoding
+    // (osaurus Sentry Device::end_encoding / get_command_buffer clusters).
+    // unordered_map keeps element references stable across insert/rehash, so
+    // the returned DeviceStream& stays valid after the shared lock is dropped
+    // and per-stream encoding (already serialized by the caller) is not held
+    // under this lock -> no GPU serialization, no deadlock. Mirrors the
+    // existing kernel_mtx_ / library_mtx_ hardening.
+    std::shared_lock lk(stream_map_mtx_);
     return stream_map_.find(index)->second;
   }
   MTL::Library* get_library_cache_(const std::string& name);
@@ -260,6 +270,10 @@ class MLX_API Device {
 
   MTL::Device* device_;
   std::unordered_map<int32_t, DeviceStream> stream_map_;
+  // Guards structural access to stream_map_ (find / emplace / clear) so a
+  // concurrent new_queue rehash cannot corrupt an in-flight find. Element
+  // references remain stable, so this never wraps GPU encoding.
+  mutable std::shared_mutex stream_map_mtx_;
 
   std::shared_mutex kernel_mtx_;
   std::shared_mutex library_mtx_;

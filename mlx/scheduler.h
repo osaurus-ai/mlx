@@ -80,6 +80,13 @@ class Scheduler {
   Scheduler& operator=(Scheduler&&) = delete;
 
   Stream new_stream(const Device& d) {
+    // Guard the stream containers: they are read concurrently by
+    // get_default_stream / get_stream on other threads. Without this lock a
+    // concurrent emplace_back reallocation corrupts the map/vector mid-read,
+    // producing EXC_BAD_ACCESS in mlx::core::default_stream (osaurus Sentry
+    // APPLE-MACOS default_stream cluster). Separate from `mtx` (which guards
+    // only n_active_tasks_) so this cannot deadlock with enqueue/notify_*.
+    std::lock_guard<std::mutex> lk(streams_mtx_);
     streams_.emplace_back(streams_.size(), d);
     if (d == Device::gpu) {
       threads_.push_back(nullptr);
@@ -94,16 +101,20 @@ class Scheduler {
   void enqueue(const Stream& stream, F&& f);
 
   Stream get_default_stream(const Device& d) const {
+    std::lock_guard<std::mutex> lk(streams_mtx_);
     return default_streams_.at(d.type);
   }
   Stream get_stream(int index) const {
+    std::lock_guard<std::mutex> lk(streams_mtx_);
     return streams_.at(index);
   }
   std::vector<Stream> get_streams() const {
+    std::lock_guard<std::mutex> lk(streams_mtx_);
     return streams_;
   }
 
   void set_default_stream(const Stream& s) {
+    std::lock_guard<std::mutex> lk(streams_mtx_);
     default_streams_.at(s.device.type) = s;
   }
 
@@ -159,6 +170,10 @@ class Scheduler {
   std::unordered_map<Device::DeviceType, Stream> default_streams_;
   std::condition_variable completion_cv;
   std::mutex mtx;
+  // Guards streams_ / default_streams_ / threads_ against concurrent
+  // new_stream / get_default_stream / set_default_stream access. `mutable`
+  // so the const getters can lock it.
+  mutable std::mutex streams_mtx_;
 };
 
 template <typename F>

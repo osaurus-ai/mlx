@@ -405,7 +405,13 @@ void Device::new_queue(int index) {
     throw std::runtime_error(
         "[metal::Device] Failed to make new command queue.");
   }
-  stream_map_.emplace(index, q);
+  {
+    // Exclusive lock around the structural mutation so a concurrent
+    // get_stream_() find() on another thread cannot observe a half-rehashed
+    // bucket list. See get_stream_ in device.h.
+    std::unique_lock lk(stream_map_mtx_);
+    stream_map_.emplace(index, q);
+  }
   if (residency_set_ != nullptr) {
     q->addResidencySet(residency_set_);
   }
