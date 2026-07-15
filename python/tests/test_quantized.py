@@ -8,6 +8,47 @@ import mlx_tests
 
 
 class TestQuantized(mlx_tests.MLXTestCase):
+    @unittest.skipUnless(mx.metal.is_available(), "Metal is not available")
+    def test_affine_one_bit_metal(self):
+        group_size = 128
+        packed_pattern = 0xAAAAAAAA
+
+        def make_weights(n, k):
+            w_q = mx.full((n, k // 32), packed_pattern, dtype=mx.uint32)
+            scales = mx.full((n, k // group_size), 2.0, dtype=mx.float32)
+            biases = mx.full((n, k // group_size), -1.0, dtype=mx.float32)
+            expected = mx.tile(mx.array([-1.0, 1.0], dtype=mx.float32), (n, k // 2))
+            return w_q, scales, biases, expected
+
+        w_q, scales, biases, expected = make_weights(8, 1024)
+        actual = mx.dequantize(
+            w_q,
+            scales,
+            biases,
+            group_size=group_size,
+            bits=1,
+            stream=mx.gpu,
+        )
+        self.assertTrue(mx.array_equal(actual, expected))
+
+        # Exercise the unaligned QMV, optimized 1024-wide QMV, and QMM paths.
+        for m, n, k in [(1, 7, 256), (1, 8, 1024), (8, 16, 256)]:
+            with self.subTest(shape=(m, n, k)):
+                w_q, scales, biases, expected = make_weights(n, k)
+                x = mx.arange(m * k, dtype=mx.float32).reshape(m, k) / k
+                y_q = mx.quantized_matmul(
+                    x,
+                    w_q,
+                    scales,
+                    biases,
+                    transpose=True,
+                    group_size=group_size,
+                    bits=1,
+                    stream=mx.gpu,
+                )
+                y = x @ expected.T
+                self.assertTrue(mx.allclose(y_q, y, rtol=1e-5, atol=1e-5))
+
     def test_quantize_dequantize(self):
         w = mx.random.normal(shape=(128, 512))
         for gs in [32, 64, 128]:
