@@ -256,7 +256,10 @@ void qmv(
   std::string kname;
   kname.reserve(64);
   std::string type_string = get_type_string(x.dtype());
-  bool fast = N % bn == 0 && K % 512 == 0;
+  // Affine-1 exposes 32 values per uint32 and therefore uses a 1024-value
+  // fast tile. Other supported widths retain the existing 512 alignment.
+  bool fast = N % bn == 0 &&
+      ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
 
   concatenate(
       kname,
@@ -887,7 +890,8 @@ void gather_qmv(
   std::string kname;
   kname.reserve(64);
   std::string type_string = get_type_string(x.dtype());
-  bool fast = N % bn == 0 && K % 512 == 0;
+  bool fast = N % bn == 0 &&
+      ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
   concatenate(
       kname,
       mode + (fast ? "_gather_qmv_fast_" : "_gather_qmv_"),
