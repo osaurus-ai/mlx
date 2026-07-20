@@ -703,6 +703,51 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
   const size_t data_start = static_cast<size_t>(json_header_length) + 8;
   std::unordered_map<std::string, array> res;
   std::unordered_map<std::string, std::string> metadata_map;
+  size_t realigned_tensor_count = 0;
+  size_t realigned_tensor_bytes = 0;
+  auto tensor_from_mmap = [&](const array& byte_base,
+                              const Shape& shape,
+                              Dtype type,
+                              size_t byte_offset,
+                              size_t byte_length) {
+    if (byte_offset % size_of(type) == 0) {
+      array tensor(
+          allocator::Buffer(nullptr), shape, type, [](allocator::Buffer) {});
+      tensor.copy_shared_buffer(
+          byte_base,
+          tensor.strides(),
+          tensor.flags(),
+          tensor.size(),
+          static_cast<int64_t>(byte_offset / size_of(type)));
+      return tensor;
+    }
+
+    // Safetensors only guarantees that each tensor's relative data offset is
+    // valid; it does not require the absolute file offset (header + relative
+    // offset) to be naturally aligned for the tensor dtype.  JANG affine
+    // shards commonly interleave F16 metadata and U32 packed weights, so an
+    // otherwise valid shard can contain U32 payloads at offsets congruent to
+    // 2 mod 4.  Rejecting one such tensor used to discard the mmap path for
+    // the entire multi-gigabyte shard and silently materialize every tensor
+    // through the resident reader.
+    //
+    // Metal typed-buffer reads require natural alignment.  Copy only this
+    // tensor into an aligned MLX buffer; all naturally aligned tensors in the
+    // same shard remain zero-copy mmap-backed.  This bounds the unavoidable
+    // repair to malformed payloads instead of materializing the entire shard.
+    auto aligned = allocator::malloc(byte_length);
+    if (aligned.ptr() == nullptr || aligned.raw_ptr() == nullptr) {
+      throw std::runtime_error(
+          "[safetensor] failed to allocate aligned buffer for unaligned mmap tensor");
+    }
+    std::memcpy(
+        aligned.raw_ptr(),
+        byte_base.data<uint8_t>() + byte_offset,
+        byte_length);
+    realigned_tensor_count += 1;
+    realigned_tensor_bytes += byte_length;
+    return array(aligned, shape, type);
+  };
   for (const auto& item : metadata.items()) {
     if (item.key() == "__metadata__") {
       for (const auto& meta_item : item.value().items()) {
@@ -727,16 +772,8 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       log("tensor-out-of-bounds");
       return std::nullopt;
     }
-    if (tensor_offset % size_of(type) != 0) {
-      log("tensor-offset-unaligned");
-      return std::nullopt;
-    }
-
-    array tensor(
-        allocator::Buffer(nullptr),
-        shape,
-        type,
-        [](allocator::Buffer) {});
+    const bool tensor_is_mmap_backed = tensor_offset % size_of(type) == 0;
+    std::optional<array> tensor;
     if (tensor_buffers) {
       const auto page = static_cast<size_t>(getpagesize());
       const auto aligned_start = tensor_offset & ~(page - 1);
@@ -775,33 +812,42 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
           [tensor_shard](allocator::Buffer buffer) {
             allocator::release(buffer);
           });
-      tensor.copy_shared_buffer(
+      tensor = tensor_from_mmap(
           tensor_base,
-          tensor.strides(),
-          tensor.flags(),
-          tensor.size(),
-          static_cast<int64_t>((tensor_offset - aligned_start) / size_of(type)));
+          shape,
+          type,
+          tensor_offset - aligned_start,
+          tensor_length);
 
-      if (auto layer = match_layer_name(item.key())) {
-        SafetensorsMmapRegistry::instance().register_layer_region(
-            tensor_shard,
-            *layer,
-            tensor_offset - aligned_start,
-            tensor_length);
-      }
+      if (tensor_is_mmap_backed) {
+        if (auto layer = match_layer_name(item.key())) {
+          SafetensorsMmapRegistry::instance().register_layer_region(
+              tensor_shard,
+              *layer,
+              tensor_offset - aligned_start,
+              tensor_length);
+        }
 
-      if (auto routed = match_routed_name(item.key())) {
-        if (routed->stacked && !shape.empty() && shape[0] > 1) {
-          const auto experts = static_cast<size_t>(shape[0]);
-          if (experts > 0 && tensor_length % experts == 0) {
-            const auto per_expert = tensor_length / experts;
-            for (size_t expert = 0; expert < experts; ++expert) {
+        if (auto routed = match_routed_name(item.key())) {
+          if (routed->stacked && !shape.empty() && shape[0] > 1) {
+            const auto experts = static_cast<size_t>(shape[0]);
+            if (experts > 0 && tensor_length % experts == 0) {
+              const auto per_expert = tensor_length / experts;
+              for (size_t expert = 0; expert < experts; ++expert) {
+                SafetensorsMmapRegistry::instance().register_region(
+                    tensor_shard,
+                    routed->layer,
+                    static_cast<int32_t>(expert),
+                    tensor_offset - aligned_start + expert * per_expert,
+                    per_expert);
+              }
+            } else {
               SafetensorsMmapRegistry::instance().register_region(
                   tensor_shard,
                   routed->layer,
-                  static_cast<int32_t>(expert),
-                  tensor_offset - aligned_start + expert * per_expert,
-                  per_expert);
+                  routed->expert,
+                  tensor_offset - aligned_start,
+                  tensor_length);
             }
           } else {
             SafetensorsMmapRegistry::instance().register_region(
@@ -811,43 +857,41 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
                 tensor_offset - aligned_start,
                 tensor_length);
           }
-        } else {
-          SafetensorsMmapRegistry::instance().register_region(
-              tensor_shard,
-              routed->layer,
-              routed->expert,
-              tensor_offset - aligned_start,
-              tensor_length);
         }
       }
     } else {
-      tensor.copy_shared_buffer(
-          *base_array,
-          tensor.strides(),
-          tensor.flags(),
-          tensor.size(),
-          static_cast<int64_t>(tensor_offset / size_of(type)));
+      tensor = tensor_from_mmap(
+          *base_array, shape, type, tensor_offset, tensor_length);
 
-      if (auto layer = match_layer_name(item.key())) {
-        SafetensorsMmapRegistry::instance().register_layer_region(
-            shard,
-            *layer,
-            tensor_offset,
-            tensor_length);
-      }
+      if (tensor_is_mmap_backed) {
+        if (auto layer = match_layer_name(item.key())) {
+          SafetensorsMmapRegistry::instance().register_layer_region(
+              shard,
+              *layer,
+              tensor_offset,
+              tensor_length);
+        }
 
-      if (auto routed = match_routed_name(item.key())) {
-        if (routed->stacked && !shape.empty() && shape[0] > 1) {
-          const auto experts = static_cast<size_t>(shape[0]);
-          if (experts > 0 && tensor_length % experts == 0) {
-            const auto per_expert = tensor_length / experts;
-            for (size_t expert = 0; expert < experts; ++expert) {
+        if (auto routed = match_routed_name(item.key())) {
+          if (routed->stacked && !shape.empty() && shape[0] > 1) {
+            const auto experts = static_cast<size_t>(shape[0]);
+            if (experts > 0 && tensor_length % experts == 0) {
+              const auto per_expert = tensor_length / experts;
+              for (size_t expert = 0; expert < experts; ++expert) {
+                SafetensorsMmapRegistry::instance().register_region(
+                    shard,
+                    routed->layer,
+                    static_cast<int32_t>(expert),
+                    tensor_offset + expert * per_expert,
+                    per_expert);
+              }
+            } else {
               SafetensorsMmapRegistry::instance().register_region(
                   shard,
                   routed->layer,
-                  static_cast<int32_t>(expert),
-                  tensor_offset + expert * per_expert,
-                  per_expert);
+                  routed->expert,
+                  tensor_offset,
+                  tensor_length);
             }
           } else {
             SafetensorsMmapRegistry::instance().register_region(
@@ -857,17 +901,20 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
                 tensor_offset,
                 tensor_length);
           }
-        } else {
-          SafetensorsMmapRegistry::instance().register_region(
-              shard,
-              routed->layer,
-              routed->expert,
-              tensor_offset,
-              tensor_length);
         }
       }
     }
-    res.insert({item.key(), tensor});
+    res.insert({item.key(), std::move(*tensor)});
+  }
+
+  if (realigned_tensor_count > 0) {
+    std::fprintf(
+        stderr,
+        "[mlx.safetensors.mmap] realigned %zu unaligned tensor(s) (%zu bytes) without shard fallback file=%s\n",
+        realigned_tensor_count,
+        realigned_tensor_bytes,
+        file.c_str());
+    std::fflush(stderr);
   }
 
   if (mmap_start_cold_enabled()) {
