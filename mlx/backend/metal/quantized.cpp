@@ -1,5 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 
+#include <cstdlib>
+
 #include "mlx/backend/common/broadcasting.h"
 #include "mlx/backend/common/compiled.h"
 #include "mlx/backend/gpu/copy.h"
@@ -260,6 +262,59 @@ void qmv(
   // fast tile. Other supported widths retain the existing 512 alignment.
   bool fast = N % bn == 0 &&
       ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
+
+  // Multi-row fast path, OPT-IN (VMLX_QMV_MR=1) and measured a LOSS on
+  // M5 Max 2026-08-19: the plain qmv grid's concurrent row-slices already
+  // amortize weight tiles through L2 (lm_head M=2 costs 1.06x M=1, M=4
+  // 1.54x), and holding BM=4 rows per thread quadruples register
+  // pressure, costing more occupancy than the explicit amortization
+  // returns (measured M=2 1.52x, M=4 1.67x on the same shape). Kept as
+  // the experiment platform for a lower-pressure variant; exact-match
+  // correctness is gated in QuantizedSmallMScalingBenchTests.
+  constexpr int qmv_mr_rows = 4;
+  static const bool qmv_mr_enabled = []() {
+    const char* v = getenv("VMLX_QMV_MR");
+    return v != nullptr && v[0] == '1';
+  }();
+  if (qmv_mr_enabled && mode == "affine" && B == 1 && M >= 2 && fast &&
+      biases) {
+    MTL::Size grid_dims_mr(
+        (M + qmv_mr_rows - 1) / qmv_mr_rows, (N + bn - 1) / bn, 1);
+    std::string mr_name;
+    mr_name.reserve(64);
+    concatenate(
+        mr_name,
+        mode + "_qmv_fast_mr_",
+        type_string,
+        "_gs_",
+        group_size,
+        "_b_",
+        bits,
+        "_bm_",
+        qmv_mr_rows);
+    auto kernel = get_quantized_kernel_wrapped(
+        d,
+        mr_name,
+        "qmv_fast_mr",
+        mode,
+        type_string,
+        group_size,
+        bits,
+        qmv_mr_rows);
+    auto& compute_encoder = d.get_command_encoder(s.index);
+    compute_encoder.set_compute_pipeline_state(kernel);
+    int c = 0;
+    compute_encoder.set_input_array(w, c++);
+    compute_encoder.set_input_array(scales, c++);
+    compute_encoder.set_input_array(*biases, c++);
+    compute_encoder.set_input_array(x, c++);
+    compute_encoder.set_output_array(out, c++);
+    compute_encoder.set_bytes(K, c++);
+    compute_encoder.set_bytes(N, c++);
+    compute_encoder.set_bytes(M, c++);
+    compute_encoder.dispatch_threadgroups(grid_dims_mr, group_dims);
+    return;
+  }
 
   concatenate(
       kname,

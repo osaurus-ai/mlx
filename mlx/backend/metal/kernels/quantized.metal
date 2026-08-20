@@ -101,6 +101,18 @@
   instantiate_quantized_aligned_batched(affine_qmm_t, type, group_size, bits, false, 1) \
   instantiate_quantized_aligned_batched(affine_qmm_t, type, group_size, bits, false, 0)
 
+#define instantiate_quantized_mr(name, type, group_size, bits, bm)  \
+  instantiate_kernel(                                               \
+      #name "_" #type "_gs_" #group_size "_b_" #bits "_bm_" #bm,    \
+      name,                                                         \
+      type,                                                         \
+      group_size,                                                   \
+      bits,                                                         \
+      bm)
+
+#define instantiate_quantized_all_mr(type, group_size, bits) \
+  instantiate_quantized_mr(affine_qmv_fast_mr, type, group_size, bits, 4)
+
 #define instantiate_quantized_all_quad(type, group_size, bits)   \
   instantiate_quantized_quad(affine_qmv_quad, type, group_size, bits, 64, 1)   \
   instantiate_quantized_quad(affine_qmv_quad, type, group_size, bits, 64, 0)   \
@@ -118,6 +130,7 @@
 #define instantiate_quantized_funcs(type, group_size, bits) \
   instantiate_quantized_all_single(type, group_size, bits)  \
   instantiate_quantized_all_batched(type, group_size, bits) \
+  instantiate_quantized_all_mr(type, group_size, bits)      \
   instantiate_quantized_all_aligned(type, group_size, bits) \
   instantiate_quantized_all_quad(type, group_size, bits)    \
   instantiate_quantized_all_splitk(type, group_size, bits)  \
