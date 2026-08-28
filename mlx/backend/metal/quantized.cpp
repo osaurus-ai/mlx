@@ -1,6 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 
 #include <cstdlib>
+#include <cstdio>
 
 #include "mlx/backend/common/broadcasting.h"
 #include "mlx/backend/common/compiled.h"
@@ -262,6 +263,9 @@ void qmv(
   // fast tile. Other supported widths retain the existing 512 alignment.
   bool fast = N % bn == 0 &&
       ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
+  bool mixed_bf16_f16 = mode == "affine" && x.dtype() == bfloat16 &&
+      scales.dtype() == float16 && biases && biases->dtype() == float16 &&
+      group_size == 64 && (bits == 4 || bits == 8) && fast;
 
   // Multi-row fast path, OPT-IN (VMLX_QMV_MR=1) and measured a LOSS on
   // M5 Max 2026-08-19: the plain qmv grid's concurrent row-slices already
@@ -318,7 +322,9 @@ void qmv(
 
   concatenate(
       kname,
-      mode + (fast ? "_qmv_fast_" : "_qmv_"),
+      mode + (mixed_bf16_f16
+                  ? "_qmv_fast_bf16_f16_"
+                  : (fast ? "_qmv_fast_" : "_qmv_")),
       type_string,
       "_gs_",
       group_size,
@@ -328,12 +334,23 @@ void qmv(
   auto kernel = get_quantized_kernel_wrapped(
       d,
       kname,
-      (fast ? "qmv_fast" : "qmv"),
+      (mixed_bf16_f16
+           ? "qmv_fast_bf16_f16"
+           : (fast ? "qmv_fast" : "qmv")),
       mode,
       type_string,
       group_size,
       bits,
       B > 1);
+  if (mixed_bf16_f16) {
+    static const bool reported = []() {
+      std::fprintf(
+          stderr,
+          "[QuantizedMatmul] mixed_bf16_f16_qmv=active accumulator=float32\n");
+      return true;
+    }();
+    (void)reported;
+  }
 
   auto& compute_encoder = d.get_command_encoder(s.index);
   compute_encoder.set_compute_pipeline_state(kernel);
@@ -947,9 +964,14 @@ void gather_qmv(
   std::string type_string = get_type_string(x.dtype());
   bool fast = N % bn == 0 &&
       ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
+  bool mixed_bf16_f16 = mode == "affine" && x.dtype() == bfloat16 &&
+      scales.dtype() == float16 && biases && biases->dtype() == float16 &&
+      group_size == 64 && (bits == 4 || bits == 8) && fast;
   concatenate(
       kname,
-      mode + (fast ? "_gather_qmv_fast_" : "_gather_qmv_"),
+      mode + (mixed_bf16_f16
+                  ? "_gather_qmv_fast_bf16_f16_"
+                  : (fast ? "_gather_qmv_fast_" : "_gather_qmv_")),
       type_string,
       "_gs_",
       group_size,
@@ -959,11 +981,22 @@ void gather_qmv(
   auto kernel = get_quantized_kernel_wrapped(
       d,
       kname,
-      (fast ? "gather_qmv_fast" : "gather_qmv"),
+      (mixed_bf16_f16
+           ? "gather_qmv_fast_bf16_f16"
+           : (fast ? "gather_qmv_fast" : "gather_qmv")),
       mode,
       type_string,
       group_size,
       bits);
+  if (mixed_bf16_f16) {
+    static const bool reported = []() {
+      std::fprintf(
+          stderr,
+          "[GatherQMM] mixed_bf16_f16_qmv=active accumulator=float32\n");
+      return true;
+    }();
+    (void)reported;
+  }
 
   auto& compute_encoder = d.get_command_encoder(s.index);
   compute_encoder.set_compute_pipeline_state(kernel);

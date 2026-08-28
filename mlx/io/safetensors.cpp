@@ -599,9 +599,12 @@ class SafetensorsMmapRegistry {
 
 std::optional<SafetensorsLoad> load_safetensors_mmap(
     const std::string& file,
-    StreamOrDevice) {
+    StreamOrDevice,
+    const std::unordered_set<std::string>* excluded_keys = nullptr,
+    std::optional<bool> tensor_buffers_override = std::nullopt) {
   const bool debug = mmap_debug_enabled();
-  const bool tensor_buffers = mmap_tensor_buffers_enabled();
+  const bool tensor_buffers = tensor_buffers_override.value_or(
+      mmap_tensor_buffers_enabled());
   auto log = [&](const char* message) {
     if (debug) {
       std::fprintf(
@@ -753,6 +756,9 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       for (const auto& meta_item : item.value().items()) {
         metadata_map.insert({meta_item.key(), meta_item.value()});
       }
+      continue;
+    }
+    if (excluded_keys && excluded_keys->count(item.key()) != 0) {
       continue;
     }
 
@@ -1087,7 +1093,8 @@ array mmap_file_region(
 /** Load array from reader in safetensor format */
 SafetensorsLoad load_safetensors(
     std::shared_ptr<io::Reader> in_stream,
-    StreamOrDevice s) {
+    StreamOrDevice s,
+    const std::unordered_set<std::string>* excluded_keys) {
   ////////////////////////////////////////////////////////
   // Open and check file
   if (!in_stream->good() || !in_stream->is_open()) {
@@ -1125,6 +1132,9 @@ SafetensorsLoad load_safetensors(
       }
       continue;
     }
+    if (excluded_keys && excluded_keys->count(item.key()) != 0) {
+      continue;
+    }
     const std::string& dtype = item.value().at("dtype");
     const Shape& shape = item.value().at("shape");
     const std::vector<size_t>& data_offsets = item.value().at("data_offsets");
@@ -1139,6 +1149,12 @@ SafetensorsLoad load_safetensors(
              std::vector<array>{})});
   }
   return {res, metadata_map};
+}
+
+SafetensorsLoad load_safetensors(
+    std::shared_ptr<io::Reader> in_stream,
+    StreamOrDevice s) {
+  return load_safetensors(std::move(in_stream), s, nullptr);
 }
 
 SafetensorsLoad load_safetensors(const std::string& file, StreamOrDevice s) {
@@ -1157,6 +1173,52 @@ SafetensorsLoad load_safetensors(const std::string& file, StreamOrDevice s) {
   }
 #endif
   return load_safetensors(std::make_shared<io::ParallelFileReader>(file), s);
+}
+
+SafetensorsLoad load_safetensors_excluding(
+    const std::string& file,
+    const std::unordered_set<std::string>& excluded_keys,
+    StreamOrDevice s) {
+#ifndef _WIN32
+  if (mmap_safetensors_enabled()) {
+    if (auto loaded = load_safetensors_mmap(file, s, &excluded_keys)) {
+      return *std::move(loaded);
+    }
+    if (mmap_debug_enabled()) {
+      std::fprintf(
+          stderr,
+          "[mlx.safetensors.mmap] filtered-fallback-to-reader file=%s\n",
+          file.c_str());
+      std::fflush(stderr);
+    }
+  }
+#endif
+  return load_safetensors(
+      std::make_shared<io::ParallelFileReader>(file), s, &excluded_keys);
+}
+
+SafetensorsLoad load_safetensors_excluding(
+    const std::string& file,
+    const std::unordered_set<std::string>& excluded_keys,
+    bool exact_tensor_buffers,
+    StreamOrDevice s) {
+#ifndef _WIN32
+  if (mmap_safetensors_enabled()) {
+    if (auto loaded = load_safetensors_mmap(
+            file, s, &excluded_keys, exact_tensor_buffers)) {
+      return *std::move(loaded);
+    }
+    if (mmap_debug_enabled()) {
+      std::fprintf(
+          stderr,
+          "[mlx.safetensors.mmap] exact-filtered-fallback-to-reader file=%s\n",
+          file.c_str());
+      std::fflush(stderr);
+    }
+  }
+#endif
+  return load_safetensors(
+      std::make_shared<io::ParallelFileReader>(file), s, &excluded_keys);
 }
 
 void save_safetensors(

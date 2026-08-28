@@ -796,11 +796,11 @@ METAL_FUNC void qmv_quad_impl(
   }
 }
 
-template <typename T, int group_size, int bits>
+template <typename T, int group_size, int bits, typename S = T>
 METAL_FUNC void qmv_fast_impl(
     const device uint32_t* w,
-    const device T* scales,
-    const device T* biases,
+    const device S* scales,
+    const device S* biases,
     const device T* x,
     device T* y,
     const constant int& in_vec_size,
@@ -841,8 +841,8 @@ METAL_FUNC void qmv_fast_impl(
 
     for (int row = 0; row < results_per_simdgroup; row++) {
       auto wl = (const device uint8_t*)(ws + row * in_vec_size_w);
-      const device T* sl = scales + row * in_vec_size_g;
-      const device T* bl = biases + row * in_vec_size_g;
+      const device S* sl = scales + row * in_vec_size_g;
+      const device S* bl = biases + row * in_vec_size_g;
 
       U s = sl[0];
       U b = bl[0];
@@ -1491,12 +1491,12 @@ METAL_FUNC void qmm_n_impl(
   }
 }
 
-template <typename T>
+template <typename T, typename S>
 METAL_FUNC void adjust_matrix_offsets(
     const device T*& x,
     const device uint32_t*& w,
-    const device T*& scales,
-    const device T*& biases,
+    const device S*& scales,
+    const device S*& biases,
     device T*& y,
     int output_stride,
     const constant int& x_batch_ndims,
@@ -1530,12 +1530,12 @@ METAL_FUNC void adjust_matrix_offsets(
   y += tid.z * output_stride;
 }
 
-template <typename T>
+template <typename T, typename S>
 METAL_FUNC void adjust_matrix_offsets(
     const device T*& x,
     const device uint32_t*& w,
-    const device T*& scales,
-    const device T*& biases,
+    const device S*& scales,
+    const device S*& biases,
     const device uint32_t* lhs_indices,
     const device uint32_t* rhs_indices,
     device T*& y,
@@ -1686,6 +1686,43 @@ template <typename T, int group_size, int bits, bool batched>
       tid,
       simd_gid,
       simd_lid);
+}
+
+// BF16 compute with F16 affine metadata storage. Qwen4-exp checkpoints store
+// packed scales/zero-points as F16 while declaring a BF16 activation stream.
+// Keep the production qmv work mapping and FP32 accumulation, but load the
+// metadata through its actual storage type instead of promoting the whole
+// projection to F32 or materializing a second BF16 metadata bank.
+template <typename T, int group_size, int bits, bool batched>
+[[kernel]] void affine_qmv_fast_bf16_f16(
+    const device uint32_t* w [[buffer(0)]],
+    const device float16_t* scales [[buffer(1)]],
+    const device float16_t* biases [[buffer(2)]],
+    const device T* x [[buffer(3)]],
+    device T* y [[buffer(4)]],
+    const constant int& in_vec_size [[buffer(5)]],
+    const constant int& out_vec_size [[buffer(6)]],
+    const constant int& x_batch_ndims [[buffer(7)]],
+    const constant int* x_shape [[buffer(8)]],
+    const constant int64_t* x_strides [[buffer(9)]],
+    const constant int& w_batch_ndims [[buffer(10)]],
+    const constant int* w_shape [[buffer(11)]],
+    const constant int64_t* w_strides [[buffer(12)]],
+    const constant int64_t* s_strides [[buffer(13)]],
+    const constant int64_t* b_strides [[buffer(14)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]) {
+  if (batched) {
+    int M = x_shape[x_batch_ndims];
+    adjust_matrix_offsets<T>(
+        x, w, scales, biases, y, out_vec_size * M, x_batch_ndims,
+        x_shape, x_strides, w_batch_ndims, w_shape, w_strides,
+        s_strides, b_strides, tid);
+  }
+  qmv_fast_impl<T, group_size, bits, float16_t>(
+      w, scales, biases, x, y, in_vec_size, out_vec_size,
+      tid, simd_gid, simd_lid);
 }
 
 // Multi-row fast qmv. Non-batched (B == 1) only: the speculative-verify
@@ -2056,6 +2093,43 @@ template <typename T, int group_size, int bits>
       tid,
       simd_gid,
       simd_lid);
+}
+
+template <typename T, int group_size, int bits>
+[[kernel]] void affine_gather_qmv_fast_bf16_f16(
+    const device uint32_t* w [[buffer(0)]],
+    const device float16_t* scales [[buffer(1)]],
+    const device float16_t* biases [[buffer(2)]],
+    const device T* x [[buffer(3)]],
+    const device uint32_t* lhs_indices [[buffer(4)]],
+    const device uint32_t* rhs_indices [[buffer(5)]],
+    device T* y [[buffer(6)]],
+    const constant int& in_vec_size [[buffer(7)]],
+    const constant int& out_vec_size [[buffer(8)]],
+    const constant int& x_batch_ndims [[buffer(9)]],
+    const constant int* x_shape [[buffer(10)]],
+    const constant int64_t* x_strides [[buffer(11)]],
+    const constant int& w_batch_ndims [[buffer(12)]],
+    const constant int* w_shape [[buffer(13)]],
+    const constant int64_t* w_strides [[buffer(14)]],
+    const constant int64_t* s_strides [[buffer(15)]],
+    const constant int64_t* b_strides [[buffer(16)]],
+    const constant int& batch_ndims [[buffer(17)]],
+    const constant int* batch_shape [[buffer(18)]],
+    const constant int64_t* lhs_strides [[buffer(19)]],
+    const constant int64_t* rhs_strides [[buffer(20)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]) {
+  int M = x_shape[x_batch_ndims];
+  adjust_matrix_offsets<T>(
+      x, w, scales, biases, lhs_indices, rhs_indices, y,
+      out_vec_size * M, batch_ndims, batch_shape, lhs_strides,
+      rhs_strides, x_batch_ndims, x_shape, x_strides, w_batch_ndims,
+      w_shape, w_strides, s_strides, b_strides, tid);
+  qmv_fast_impl<T, group_size, bits, float16_t>(
+      w, scales, biases, x, y, in_vec_size, out_vec_size,
+      tid, simd_gid, simd_lid);
 }
 
 template <typename T, int group_size, int bits>

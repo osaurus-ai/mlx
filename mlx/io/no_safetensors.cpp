@@ -16,6 +16,25 @@ SafetensorsLoad load_safetensors(const std::string&, StreamOrDevice) {
       "to enable safetensors support.");
 }
 
+SafetensorsLoad load_safetensors_excluding(
+    const std::string&,
+    const std::unordered_set<std::string>&,
+    StreamOrDevice) {
+  throw std::runtime_error(
+      "[load_safetensors] Compile with MLX_BUILD_SAFETENSORS=ON "
+      "to use safetensors.");
+}
+
+SafetensorsLoad load_safetensors_excluding(
+    const std::string&,
+    const std::unordered_set<std::string>&,
+    bool,
+    StreamOrDevice) {
+  throw std::runtime_error(
+      "[load_safetensors] Compile with MLX_BUILD_SAFETENSORS=ON "
+      "to use safetensors.");
+}
+
 void save_safetensors(
     std::shared_ptr<io::Writer>,
     std::unordered_map<std::string, array>,

@@ -156,3 +156,14 @@
   instantiate_quantized_groups(8)
 
 instantiate_quantized_all() // clang-format on
+
+// Qwen4-exp BF16 compute / F16 affine-metadata decode kernels. Limit the
+// precompiled surface to the bundle's real gs64 4/8-bit projection formats.
+instantiate_quantized_batched_wrap(
+    affine_qmv_fast_bf16_f16, bfloat16_t, 64, 4)
+instantiate_quantized_batched_wrap(
+    affine_qmv_fast_bf16_f16, bfloat16_t, 64, 8)
+instantiate_quantized(
+    affine_gather_qmv_fast_bf16_f16, bfloat16_t, 64, 4)
+instantiate_quantized(
+    affine_gather_qmv_fast_bf16_f16, bfloat16_t, 64, 8)
