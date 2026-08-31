@@ -1189,27 +1189,60 @@ void save_safetensors(
     eval(std::move(to_eval));
   }
 
+  // Lay every tensor on an 8-byte boundary, and pad the header so the data section starts on one
+  // too. Both are needed: an aligned RELATIVE offset is only aligned ABSOLUTELY if the data section
+  // itself begins aligned, and an unpadded header starts it at 8 + strlen(json) — an arbitrary
+  // byte, which lands on a multiple of 8 roughly one time in eight.
+  //
+  // Without this, `load_safetensors`' mmap path cannot share the mapping for most tensors and falls
+  // back to copying them into freshly allocated aligned buffers (see `tensor_from_mmap`), which
+  // costs a second copy of the weights in memory at load. Eight bytes covers every dtype
+  // safetensors defines, so one constant serves them all; the cost is at most 7 bytes per tensor.
+  constexpr size_t kAlign = 8;
+  auto align_up = [](size_t n) { return (n + kAlign - 1) & ~(kAlign - 1); };
+
   size_t offset = 0;
+  std::vector<size_t> layout;
+  layout.reserve(a.size());
   for (auto& [key, arr] : a) {
     if (arr.nbytes() == 0) {
       throw std::invalid_argument(
           "[save_safetensors] cannot serialize an empty array key: " + key);
     }
 
+    offset = align_up(offset);
     json child;
     child["dtype"] = dtype_to_safetensor_str(arr.dtype());
     child["shape"] = arr.shape();
     child["data_offsets"] = std::vector<size_t>{offset, offset + arr.nbytes()};
     parent[key] = child;
+    layout.push_back(offset);
     offset += arr.nbytes();
   }
 
+  // Trailing spaces are valid JSON, and the format sanctions this explicitly: the reference
+  // implementation carries a test asserting that readers must tolerate a whitespace-padded header
+  // precisely so writers may align the data section. A padded file stays readable by every existing
+  // consumer.
   auto header = parent.dump();
+  header.append((kAlign - (8 + header.length()) % kAlign) % kAlign, ' ');
   uint64_t header_len = header.length();
   out_stream->write(reinterpret_cast<char*>(&header_len), 8);
   out_stream->write(header.c_str(), header_len);
+
+  // Emit the gaps the layout above reserved. Both loops walk `a` in the same order, which the
+  // previous code already relied on implicitly and which is now load-bearing.
+  static const char kPadding[kAlign] = {};
+  size_t written = 0;
+  size_t i = 0;
   for (auto& [key, arr] : a) {
+    if (layout[i] > written) {
+      out_stream->write(kPadding, layout[i] - written);
+      written = layout[i];
+    }
     out_stream->write(arr.data<char>(), arr.nbytes());
+    written += arr.nbytes();
+    i++;
   }
 }
 
