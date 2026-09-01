@@ -141,11 +141,13 @@ bool env_truthy(const char* key) {
 
 bool mmap_safetensors_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS");
 }
 
 bool mmap_debug_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP_DEBUG") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS_DEBUG") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS_DEBUG");
 }
 
@@ -188,12 +190,19 @@ int32_t env_int_clamped(
 
 bool mmap_start_cold_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP_START_COLD") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS_START_COLD") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS_START_COLD");
 }
 
 int32_t mmap_start_cold_pct() {
   if (std::getenv("MLX_SAFETENSORS_MMAP_COLD_PCT")) {
     return env_int_clamped("MLX_SAFETENSORS_MMAP_COLD_PCT", 70, 0, 100);
+  }
+  // Unlike the booleans above, this one RETURNS a value, so precedence is
+  // observable: the current spelling has to be consulted first or setting both
+  // would silently yield the legacy value.
+  if (std::getenv("VMLX_MMAP_SAFETENSORS_COLD_PCT")) {
+    return env_int_clamped("VMLX_MMAP_SAFETENSORS_COLD_PCT", 70, 0, 100);
   }
   return env_int_clamped("VMLINUX_MMAP_SAFETENSORS_COLD_PCT", 70, 0, 100);
 }
@@ -206,6 +215,9 @@ enum class MmapColdAdvice {
 
 MmapColdAdvice mmap_cold_advice() {
   auto value = env_lower("MLX_SAFETENSORS_MMAP_COLD_ADVICE");
+  if (!value) {
+    value = env_lower("VMLX_MMAP_SAFETENSORS_COLD_ADVICE");
+  }
   if (!value) {
     value = env_lower("VMLINUX_MMAP_SAFETENSORS_COLD_ADVICE");
   }
