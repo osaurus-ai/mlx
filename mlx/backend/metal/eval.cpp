@@ -18,6 +18,9 @@ void new_stream(Stream stream) {
 // Routes a command-buffer failure through the installed mlx-c error handler
 // (the same hook host apps install for `mlx_error`). Declared here because
 // mlx core doesn't include mlx-c headers; both compile into the same binary.
+// Linkage caveat: a build of this fork without mlx-c will fail to link this
+// file — acceptable for the fork, whose only consumer (Cmlx in vmlx-swift)
+// always compiles core and mlx-c together.
 extern "C" void _mlx_error(const char* file, int line, const char* fmt, ...);
 
 inline std::string error_message(MTL::CommandBuffer* cbuf) {
@@ -40,6 +43,9 @@ inline void check_error(MTL::CommandBuffer* cbuf) {
 // command buffer failing under memory pressure while loading a large model).
 // Report through the error handler instead; the default handler still exits,
 // preserving upstream behavior for hosts that never install one.
+// If a host installs a handler that returns, execution proceeds past the
+// failed buffer and downstream arrays contain garbage — a recovering handler
+// must abandon the in-flight generation, never log-and-continue it.
 inline void check_error_in_completion_handler(MTL::CommandBuffer* cbuf) {
   if (cbuf->status() == MTL::CommandBufferStatusError) {
     _mlx_error(__FILE__, __LINE__, "%s", error_message(cbuf).c_str());
