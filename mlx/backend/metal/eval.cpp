@@ -15,12 +15,34 @@ void new_stream(Stream stream) {
   }
 }
 
+// Routes a command-buffer failure through the installed mlx-c error handler
+// (the same hook host apps install for `mlx_error`). Declared here because
+// mlx core doesn't include mlx-c headers; both compile into the same binary.
+extern "C" void _mlx_error(const char* file, int line, const char* fmt, ...);
+
+inline std::string error_message(MTL::CommandBuffer* cbuf) {
+  std::ostringstream msg;
+  msg << "[METAL] Command buffer execution failed: "
+      << cbuf->error()->localizedDescription()->utf8String();
+  return msg.str();
+}
+
 inline void check_error(MTL::CommandBuffer* cbuf) {
   if (cbuf->status() == MTL::CommandBufferStatusError) {
-    std::ostringstream msg;
-    msg << "[METAL] Command buffer execution failed: "
-        << cbuf->error()->localizedDescription()->utf8String();
-    throw std::runtime_error(msg.str());
+    throw std::runtime_error(error_message(cbuf));
+  }
+}
+
+// Variant for MTLCommandBuffer completed handlers, which run on Metal's own
+// dispatch queue (com.Metal.CompletionQueueDispatch). A C++ exception thrown
+// there cannot unwind through the ObjC block / libdispatch frames, so `throw`
+// becomes std::terminate -> abort and kills the whole process (e.g. a GPU
+// command buffer failing under memory pressure while loading a large model).
+// Report through the error handler instead; the default handler still exits,
+// preserving upstream behavior for hosts that never install one.
+inline void check_error_in_completion_handler(MTL::CommandBuffer* cbuf) {
+  if (cbuf->status() == MTL::CommandBufferStatusError) {
+    _mlx_error(__FILE__, __LINE__, "%s", error_message(cbuf).c_str());
   }
 }
 
@@ -72,7 +94,7 @@ void eval(array& arr) {
             if (b)
               b->release();
           }
-          check_error(cbuf);
+          check_error_in_completion_handler(cbuf);
         });
     d.commit_command_buffer(s.index);
     d.get_command_buffer(s.index);
@@ -84,7 +106,7 @@ void eval(array& arr) {
             if (b)
               b->release();
           }
-          check_error(cbuf);
+          check_error_in_completion_handler(cbuf);
         });
   }
 }
@@ -94,7 +116,8 @@ void finalize(Stream s) {
   auto& d = metal::device(s.device);
   auto cb = d.get_command_buffer(s.index);
   d.end_encoding(s.index);
-  cb->addCompletedHandler([](MTL::CommandBuffer* cbuf) { check_error(cbuf); });
+  cb->addCompletedHandler(
+      [](MTL::CommandBuffer* cbuf) { check_error_in_completion_handler(cbuf); });
   d.commit_command_buffer(s.index);
   d.get_command_buffer(s.index);
 }
