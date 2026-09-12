@@ -163,7 +163,7 @@ instantiate_quantized_all() // clang-format on
 instantiate_quantized_batched_wrap(
     affine_qmv_fast_bf16_f16, bfloat16_t, 64, 4)
 instantiate_quantized_batched_wrap(
-    affine_qmv_fast_bf16_f16, bfloat16_t, 64, 6)
+    affine_qmv_fast_bf16_f16_f32, bfloat16_t, 64, 6)
 instantiate_quantized_batched_wrap(
     affine_qmv_fast_bf16_f16, bfloat16_t, 64, 8)
 instantiate_quantized(

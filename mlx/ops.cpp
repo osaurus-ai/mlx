@@ -4355,7 +4355,11 @@ array quantized_matmul(
       x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
-    dtype = mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), dtype);
+    // q6 preserves the original promoted output dtype. Consumers may use
+    // the F32 projection in residual arithmetic before rounding to BF16.
+    dtype = mixed_bf16_f16_qmv && bits != 6
+        ? x.dtype()
+        : promote_types(x.dtype(), dtype);
   } else {
     dtype = x.dtype();
   }

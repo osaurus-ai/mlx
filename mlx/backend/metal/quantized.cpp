@@ -323,7 +323,8 @@ void qmv(
   concatenate(
       kname,
       mode + (mixed_bf16_f16
-                  ? "_qmv_fast_bf16_f16_"
+                  ? (bits == 6 ? "_qmv_fast_bf16_f16_f32_"
+                               : "_qmv_fast_bf16_f16_")
                   : (fast ? "_qmv_fast_" : "_qmv_")),
       type_string,
       "_gs_",
@@ -335,7 +336,7 @@ void qmv(
       d,
       kname,
       (mixed_bf16_f16
-           ? "qmv_fast_bf16_f16"
+           ? (bits == 6 ? "qmv_fast_bf16_f16_f32" : "qmv_fast_bf16_f16")
            : (fast ? "qmv_fast" : "qmv")),
       mode,
       type_string,
@@ -348,7 +349,7 @@ void qmv(
         std::fprintf(
             stderr,
             "[QuantizedMatmul] mixed_q6=active input=bfloat16 metadata=float16 "
-            "accumulator=float32 output=bfloat16 bits=6 group_size=64\n");
+            "accumulator=float32 output=float32 bits=6 group_size=64\n");
         return true;
       }();
       (void)reported_q6;
