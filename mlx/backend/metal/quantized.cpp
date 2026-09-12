@@ -343,6 +343,16 @@ void qmv(
       bits,
       B > 1);
   if (mixed_bf16_f16) {
+    if (bits == 6) {
+      static const bool reported_q6 = []() {
+        std::fprintf(
+            stderr,
+            "[QuantizedMatmul] mixed_q6=active input=bfloat16 metadata=float16 "
+            "accumulator=float32 output=bfloat16 bits=6 group_size=64\n");
+        return true;
+      }();
+      (void)reported_q6;
+    }
     static const bool reported = []() {
       std::fprintf(
           stderr,
