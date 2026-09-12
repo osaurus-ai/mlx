@@ -265,7 +265,7 @@ void qmv(
       ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
   bool mixed_bf16_f16 = mode == "affine" && x.dtype() == bfloat16 &&
       scales.dtype() == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) && fast;
+      group_size == 64 && (bits == 4 || bits == 6 || bits == 8) && fast;
 
   // Multi-row fast path, OPT-IN (VMLX_QMV_MR=1) and measured a LOSS on
   // M5 Max 2026-08-19: the plain qmv grid's concurrent row-slices already

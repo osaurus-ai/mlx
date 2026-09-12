@@ -4342,7 +4342,8 @@ array quantized_matmul(
   const bool mixed_bf16_f16_qmv =
       qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
       dtype == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) &&
+      group_size == 64 &&
+      (bits == 4 || bits == 8 || (bits == 6 && to_stream(s).device == Device::gpu)) &&
       x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
