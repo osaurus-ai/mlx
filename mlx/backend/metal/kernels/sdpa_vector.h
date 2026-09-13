@@ -259,8 +259,52 @@ template <typename T, int D, int V = D>
     sum_exp_score = 1;
   }
 
+  // Pack the shared single-query boolean mask once per threadgroup. Keep
+  // every selected key in its original strided partition and chronological
+  // order; score/softmax/partial rounding and second-pass math stay unchanged.
+  // Other layouts and very long per-partition spans retain the original loop.
+  threadgroup uint packed_mask_words[32];
+  const int mask_word_count = (N + blocks * 32 - 1) / (blocks * 32);
+  bool use_packed_mask = false;
+  if (bool_mask) {
+    use_packed_mask = !do_causal && q_seq_len == 1 && mask_head_stride == 0 &&
+        mask_kv_seq_stride == 1 && N > 32768 && mask_word_count <= 32;
+    if (use_packed_mask) {
+      for (int word = tidtg.y; word < mask_word_count; word += gqa_factor) {
+        const int step = word * 32 + simd_lid;
+        const int key = block_idx + step * blocks;
+        uint bits =
+            uint(simd_vote::vote_t(simd_ballot(key < N && bmask[step * blocks])));
+        if (simd_lid == 0) {
+          packed_mask_words[word] = bits;
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+  int next_mask_word = 0;
+  uint active_mask_bits = 0;
+
   // For each key
   for (int i = block_idx; i < N; i += blocks) {
+    if (use_packed_mask) {
+      while (active_mask_bits == 0 && next_mask_word < mask_word_count) {
+        active_mask_bits = packed_mask_words[next_mask_word++];
+      }
+      if (active_mask_bits == 0) {
+        break;
+      }
+      const int next_key = block_idx +
+          ((next_mask_word - 1) * 32 + int(ctz(active_mask_bits))) * blocks;
+      active_mask_bits &= active_mask_bits - 1;
+      const int skipped = next_key - i;
+      keys += skipped * int(k_seq_stride);
+      values += skipped * int(v_seq_stride);
+      if (bool_mask) {
+        bmask += skipped * mask_kv_seq_stride;
+      }
+      i = next_key;
+    }
     bool use_key = true;
     if (do_causal) {
       use_key = i <= (N - q_seq_len + int(q_seq_idx));
