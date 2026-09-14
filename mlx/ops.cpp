@@ -4807,10 +4807,9 @@ array quantized_matmul(
     const char* value = std::getenv("VMLX_DISABLE_MIXED_Q6");
     return !(value && value[0] == '1' && value[1] == '\0');
   }();
-  const bool mixed_bf16_f16_qmv =
-      qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
-      dtype == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 &&
+  const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
+      transpose && x.dtype() == bfloat16 && dtype == float16 && biases &&
+      biases->dtype() == float16 && group_size == 64 &&
       (bits == 4 || bits == 8 ||
        (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu &&
         metal::is_available())) &&
@@ -4819,9 +4818,8 @@ array quantized_matmul(
   if (qmode == QuantizationMode::Affine) {
     // q6 preserves the original promoted output dtype. Consumers may use
     // the F32 projection in residual arithmetic before rounding to BF16.
-    dtype = mixed_bf16_f16_qmv && bits != 6
-        ? x.dtype()
-        : promote_types(x.dtype(), dtype);
+    dtype = mixed_bf16_f16_qmv && bits != 6 ? x.dtype()
+                                            : promote_types(x.dtype(), dtype);
   } else {
     dtype = x.dtype();
   }
@@ -4834,10 +4832,12 @@ array quantized_matmul(
   }
   std::vector<array> inputs;
   if (qmode == QuantizationMode::Affine) {
-    inputs = mixed_bf16_f16_qmv
-        ? std::vector<array>{x, w, scales, *biases}
-        : std::vector<array>{
-              astype(x, dtype), w, astype(scales, dtype), astype(*biases, dtype)};
+    inputs = mixed_bf16_f16_qmv ? std::vector<array>{x, w, scales, *biases}
+                                : std::vector<array>{
+                                      astype(x, dtype),
+                                      w,
+                                      astype(scales, dtype),
+                                      astype(*biases, dtype)};
   } else {
     inputs = {x, w, scales};
   }
@@ -5602,16 +5602,14 @@ array gather_qmm(
       quantization_params_from_mode(qmode, group_size_, bits_);
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "gather_qmm", x, w, scales, biases, transpose, group_size, bits);
-  const bool mixed_bf16_f16_qmv =
-      qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
-      out_type == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) &&
-      x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
+  const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
+      transpose && x.dtype() == bfloat16 && out_type == float16 && biases &&
+      biases->dtype() == float16 && group_size == 64 &&
+      (bits == 4 || bits == 8) && x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
-    out_type = mixed_bf16_f16_qmv
-        ? x.dtype()
-        : promote_types(x.dtype(), out_type);
+    out_type =
+        mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), out_type);
   } else {
     out_type = x.dtype();
   }
@@ -5636,9 +5634,8 @@ array gather_qmm(
   std::vector<array> inputs;
   if (qmode == QuantizationMode::Affine) {
     inputs = mixed_bf16_f16_qmv
-        ? std::vector<array>{
-              x, std::move(w), scales, *biases,
-              std::move(lhs_indices), std::move(rhs_indices)}
+        ? std::vector<
+              array>{x, std::move(w), scales, *biases, std::move(lhs_indices), std::move(rhs_indices)}
         : std::vector<array>{
               astype(x, out_type, s),
               std::move(w),

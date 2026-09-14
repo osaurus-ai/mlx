@@ -1,11 +1,11 @@
 // Copyright © 2023-2026 Apple Inc.
 
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 
-#include "mlx/backend/common/quantized.h"
 #include "mlx/backend/common/broadcasting.h"
 #include "mlx/backend/common/compiled.h"
+#include "mlx/backend/common/quantized.h"
 #include "mlx/backend/gpu/copy.h"
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/kernels.h"
@@ -498,7 +498,6 @@ void qmv(
       scales.dtype() == float16 && biases && biases->dtype() == float16 &&
       group_size == 64 && (bits == 4 || bits == 6 || bits == 8) && fast;
 
-
   // Multi-row fast path, OPT-IN (VMLX_QMV_MR=1) and measured a LOSS on
   // M5 Max 2026-08-19: the plain qmv grid's concurrent row-slices already
   // amortize weight tiles through L2 (lm_head M=2 costs 1.06x M=1, M=4
@@ -555,10 +554,10 @@ void qmv(
 
   concatenate(
       kname,
-      mode + (mixed_bf16_f16
-                  ? (bits == 6 ? "_qmv_fast_bf16_f16_f32_"
-                               : "_qmv_fast_bf16_f16_")
-                  : (fast ? "_qmv_fast_" : "_qmv_")),
+      mode +
+          (mixed_bf16_f16
+               ? (bits == 6 ? "_qmv_fast_bf16_f16_f32_" : "_qmv_fast_bf16_f16_")
+               : (fast ? "_qmv_fast_" : "_qmv_")),
       type_string,
       "_gs_",
       group_size,
@@ -1426,9 +1425,9 @@ void gather_qmv(
       group_size == 64 && (bits == 4 || bits == 8) && fast;
   concatenate(
       kname,
-      mode + (mixed_bf16_f16
-                  ? "_gather_qmv_fast_bf16_f16_"
-                  : (fast ? "_gather_qmv_fast_" : "_gather_qmv_")),
+      mode +
+          (mixed_bf16_f16 ? "_gather_qmv_fast_bf16_f16_"
+                          : (fast ? "_gather_qmv_fast_" : "_gather_qmv_")),
       type_string,
       "_gs_",
       group_size,
@@ -1439,9 +1438,8 @@ void gather_qmv(
   auto kernel = get_quantized_kernel_wrapped(
       d,
       kname,
-      (mixed_bf16_f16
-           ? "gather_qmv_fast_bf16_f16"
-           : (fast ? "gather_qmv_fast" : "gather_qmv")),
+      (mixed_bf16_f16 ? "gather_qmv_fast_bf16_f16"
+                      : (fast ? "gather_qmv_fast" : "gather_qmv")),
       mode,
       type_string,
       group_size,

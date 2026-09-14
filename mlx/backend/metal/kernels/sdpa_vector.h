@@ -273,8 +273,8 @@ template <typename T, int D, int V = D>
       for (int word = tidtg.y; word < mask_word_count; word += gqa_factor) {
         const int step = word * 32 + simd_lid;
         const int key = block_idx + step * blocks;
-        uint bits =
-            uint(simd_vote::vote_t(simd_ballot(key < N && bmask[step * blocks])));
+        uint bits = uint(
+            simd_vote::vote_t(simd_ballot(key < N && bmask[step * blocks])));
         if (simd_lid == 0) {
           packed_mask_words[word] = bits;
         }

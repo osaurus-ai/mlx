@@ -5,13 +5,13 @@
 #include "mlx/backend/metal/resident.h"
 #include "mlx/memory.h"
 
+#include <execinfo.h>
 #include <mach/vm_page_size.h>
 #include <unistd.h>
-#include <cstdio>
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <mutex>
 
 namespace mlx::core {
@@ -162,9 +162,11 @@ void log_large_alloc(size_t size) {
   if (n > 0) {
     char** syms = ::backtrace_symbols(frames, n);
     if (syms) {
-      // Skip frame 0 (this function) and frame 1 (caller inside MetalAllocator::malloc).
+      // Skip frame 0 (this function) and frame 1 (caller inside
+      // MetalAllocator::malloc).
       for (int i = 2; i < n; ++i) {
-        std::fprintf(stderr, "[osaurus.malloc-trace]   #%-2d %s\n", i - 2, syms[i]);
+        std::fprintf(
+            stderr, "[osaurus.malloc-trace]   #%-2d %s\n", i - 2, syms[i]);
       }
       std::free(syms);
     }

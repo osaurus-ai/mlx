@@ -485,7 +485,9 @@ class CustomKernel : public Primitive {
         compile_options_);
   }
 
-  void set_output_shapes(std::vector<Shape> shapes) { output_shapes_ = std::move(shapes); }
+  void set_output_shapes(std::vector<Shape> shapes) {
+    output_shapes_ = std::move(shapes);
+  }
   std::vector<Shape> output_shapes(const std::vector<array>&) override {
     return output_shapes_;
   }

@@ -270,10 +270,7 @@ std::vector<array> precompiled_cuda_kernel(
       shared_memory);
   primitive->set_output_shapes(output_shapes);
   return array::make_arrays(
-      output_shapes,
-      output_dtypes,
-      std::move(primitive),
-      inputs);
+      output_shapes, output_dtypes, std::move(primitive), inputs);
 }
 
 void CustomKernel::eval_gpu(

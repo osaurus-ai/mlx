@@ -3,8 +3,8 @@
 #include <json.hpp>
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -137,11 +137,11 @@ bool env_truthy(const char* key) {
     return false;
   }
   std::string value(raw);
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return value == "1" || value == "true" || value == "on" ||
-      value == "yes";
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+  return value == "1" || value == "true" || value == "on" || value == "yes";
 }
 
 bool mmap_safetensors_enabled() {
@@ -160,9 +160,10 @@ std::optional<std::string> env_lower(const char* key) {
     return std::nullopt;
   }
   std::string value(raw);
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
   return value;
 }
 
@@ -187,8 +188,7 @@ int32_t env_int_clamped(
     return default_value;
   }
   return std::max<int32_t>(
-      min_value,
-      std::min<int32_t>(max_value, static_cast<int32_t>(parsed)));
+      min_value, std::min<int32_t>(max_value, static_cast<int32_t>(parsed)));
 }
 
 bool mmap_start_cold_enabled() {
@@ -221,8 +221,8 @@ MmapColdAdvice mmap_cold_advice() {
   if (*value == "pageout" || *value == "page_out") {
     return MmapColdAdvice::page_out;
   }
-  if (*value == "force" || *value == "invalidate" ||
-      *value == "msync" || *value == "msync_invalidate") {
+  if (*value == "force" || *value == "invalidate" || *value == "msync" ||
+      *value == "msync_invalidate") {
     return MmapColdAdvice::invalidate;
   }
   return MmapColdAdvice::dont_need;
@@ -328,9 +328,7 @@ std::optional<ParsedRoutedName> match_routed_name(const std::string& name) {
   for (const auto& regex : stacked) {
     if (std::regex_match(name, match, regex) && match.size() >= 2) {
       return ParsedRoutedName{
-          static_cast<int32_t>(std::stoi(match[1].str())),
-          0,
-          true};
+          static_cast<int32_t>(std::stoi(match[1].str())), 0, true};
     }
   }
   return std::nullopt;
@@ -376,8 +374,9 @@ class SafetensorsMmapRegistry {
       size_t offset,
       size_t length) {
     std::lock_guard<std::mutex> lock(mutex_);
-    regions_.push_back(MmapTensorRegion{
-        std::weak_ptr<MmapShard>(shard), layer, expert, offset, length});
+    regions_.push_back(
+        MmapTensorRegion{
+            std::weak_ptr<MmapShard>(shard), layer, expert, offset, length});
   }
 
   void register_layer_region(
@@ -386,8 +385,9 @@ class SafetensorsMmapRegistry {
       size_t offset,
       size_t length) {
     std::lock_guard<std::mutex> lock(mutex_);
-    layer_regions_.push_back(MmapTensorRegion{
-        std::weak_ptr<MmapShard>(shard), layer, -1, offset, length});
+    layer_regions_.push_back(
+        MmapTensorRegion{
+            std::weak_ptr<MmapShard>(shard), layer, -1, offset, length});
   }
 
   int64_t advise_routed(int32_t advice, int32_t cold_pct) {
@@ -408,10 +408,11 @@ class SafetensorsMmapRegistry {
       return advise_regions(regions, advice);
     }
 
-    std::sort(regions.begin(), regions.end(), [](const auto& lhs, const auto& rhs) {
-      return std::tie(lhs.layer, lhs.expert, lhs.offset, lhs.length) <
-          std::tie(rhs.layer, rhs.expert, rhs.offset, rhs.length);
-    });
+    std::sort(
+        regions.begin(), regions.end(), [](const auto& lhs, const auto& rhs) {
+          return std::tie(lhs.layer, lhs.expert, lhs.offset, lhs.length) <
+              std::tie(rhs.layer, rhs.expert, rhs.offset, rhs.length);
+        });
 
     std::unordered_map<int32_t, std::vector<int32_t>> experts_by_layer;
     for (const auto& region : regions) {
@@ -498,8 +499,7 @@ class SafetensorsMmapRegistry {
 
  private:
   static int64_t pair_key(int32_t layer, int32_t expert) {
-    return (static_cast<int64_t>(layer) << 32) ^
-        static_cast<uint32_t>(expert);
+    return (static_cast<int64_t>(layer) << 32) ^ static_cast<uint32_t>(expert);
   }
 
   std::vector<LiveMmapTensorRegion> live_regions() {
@@ -509,12 +509,13 @@ class SafetensorsMmapRegistry {
     auto write = regions_.begin();
     for (auto read = regions_.begin(); read != regions_.end(); ++read) {
       if (auto shard = read->shard.lock()) {
-        live.push_back(LiveMmapTensorRegion{
-            std::move(shard),
-            read->layer,
-            read->expert,
-            read->offset,
-            read->length});
+        live.push_back(
+            LiveMmapTensorRegion{
+                std::move(shard),
+                read->layer,
+                read->expert,
+                read->offset,
+                read->length});
         *write++ = *read;
       }
     }
@@ -527,14 +528,16 @@ class SafetensorsMmapRegistry {
     std::vector<LiveMmapTensorRegion> live;
     live.reserve(layer_regions_.size());
     auto write = layer_regions_.begin();
-    for (auto read = layer_regions_.begin(); read != layer_regions_.end(); ++read) {
+    for (auto read = layer_regions_.begin(); read != layer_regions_.end();
+         ++read) {
       if (auto shard = read->shard.lock()) {
-        live.push_back(LiveMmapTensorRegion{
-            std::move(shard),
-            read->layer,
-            read->expert,
-            read->offset,
-            read->length});
+        live.push_back(
+            LiveMmapTensorRegion{
+                std::move(shard),
+                read->layer,
+                read->expert,
+                read->offset,
+                read->length});
         *write++ = *read;
       }
     }
@@ -552,8 +555,11 @@ class SafetensorsMmapRegistry {
     return advised;
   }
 
-  static int64_t advise_region(const LiveMmapTensorRegion& region, int32_t advice) {
-    if (!region.shard || region.length == 0 || region.offset >= region.shard->size) {
+  static int64_t advise_region(
+      const LiveMmapTensorRegion& region,
+      int32_t advice) {
+    if (!region.shard || region.length == 0 ||
+        region.offset >= region.shard->size) {
       return 0;
     }
     const auto clamped_length =
@@ -579,7 +585,8 @@ class SafetensorsMmapRegistry {
     const auto cold_advice = mmap_cold_advice();
     if (cold_advice == MmapColdAdvice::invalidate) {
 #if defined(MS_INVALIDATE) && defined(MS_ASYNC)
-      if (msync(aligned_address, aligned_length, MS_INVALIDATE | MS_ASYNC) != 0) {
+      if (msync(aligned_address, aligned_length, MS_INVALIDATE | MS_ASYNC) !=
+          0) {
         return 0;
       }
       return static_cast<int64_t>(clamped_length);
@@ -608,15 +615,12 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     const std::unordered_set<std::string>* excluded_keys = nullptr,
     std::optional<bool> tensor_buffers_override = std::nullopt) {
   const bool debug = mmap_debug_enabled();
-  const bool tensor_buffers = tensor_buffers_override.value_or(
-      mmap_tensor_buffers_enabled());
+  const bool tensor_buffers =
+      tensor_buffers_override.value_or(mmap_tensor_buffers_enabled());
   auto log = [&](const char* message) {
     if (debug) {
       std::fprintf(
-          stderr,
-          "[mlx.safetensors.mmap] %s file=%s\n",
-          message,
-          file.c_str());
+          stderr, "[mlx.safetensors.mmap] %s file=%s\n", message, file.c_str());
       std::fflush(stderr);
     }
   };
@@ -631,7 +635,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       fd = -1;
     }
   };
-  struct stat st {};
+  struct stat st{};
   if (fstat(fd, &st) != 0 || st.st_size <= 0) {
     close_fd();
     log("stat-failed");
@@ -666,8 +670,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
   uint64_t json_header_length = 0;
   std::memcpy(&json_header_length, base, sizeof(json_header_length));
   constexpr uint64_t kMaxJsonHeaderLength = 100000000;
-  if (json_header_length == 0 ||
-      json_header_length >= kMaxJsonHeaderLength ||
+  if (json_header_length == 0 || json_header_length >= kMaxJsonHeaderLength ||
       8 + json_header_length > file_size) {
     unmap_on_failure();
     log("invalid-header-length");
@@ -700,10 +703,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     }
     shard->tracked_buffer_bytes = file_size;
     base_array.emplace(
-        buffer,
-        Shape{1},
-        uint8,
-        [shard](allocator::Buffer buffer) {
+        buffer, Shape{1}, uint8, [shard](allocator::Buffer buffer) {
           allocator::release(buffer);
         });
   }
@@ -779,7 +779,8 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
     Dtype type = dtype_from_safetensor_str(dtype);
     const auto tensor_offset = data_start + data_offsets[0];
     const auto tensor_length = data_offsets[1] - data_offsets[0];
-    if (tensor_offset > file_size || tensor_length > file_size - tensor_offset) {
+    if (tensor_offset > file_size ||
+        tensor_length > file_size - tensor_offset) {
       log("tensor-out-of-bounds");
       return std::nullopt;
     }
@@ -817,10 +818,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       }
       tensor_shard->tracked_buffer_bytes = span;
       array tensor_base(
-          buffer,
-          Shape{1},
-          uint8,
-          [tensor_shard](allocator::Buffer buffer) {
+          buffer, Shape{1}, uint8, [tensor_shard](allocator::Buffer buffer) {
             allocator::release(buffer);
           });
       tensor = tensor_from_mmap(
@@ -877,10 +875,7 @@ std::optional<SafetensorsLoad> load_safetensors_mmap(
       if (tensor_is_mmap_backed) {
         if (auto layer = match_layer_name(item.key())) {
           SafetensorsMmapRegistry::instance().register_layer_region(
-              shard,
-              *layer,
-              tensor_offset,
-              tensor_length);
+              shard, *layer, tensor_offset, tensor_length);
         }
 
         if (auto routed = match_routed_name(item.key())) {
@@ -1006,7 +1001,8 @@ array mmap_file_region(
   size_t expected_length = size_of(dtype);
   for (auto dim : shape) {
     if (dim < 0) {
-      throw std::runtime_error("[mmap_file_region] shape contains negative dim.");
+      throw std::runtime_error(
+          "[mmap_file_region] shape contains negative dim.");
     }
     expected_length *= static_cast<size_t>(dim);
   }
@@ -1025,7 +1021,7 @@ array mmap_file_region(
     }
   };
 
-  struct stat st {};
+  struct stat st{};
   if (fstat(fd, &st) != 0 || st.st_size <= 0) {
     close_fd();
     throw std::runtime_error("[mmap_file_region] stat failed: " + file);
@@ -1033,7 +1029,8 @@ array mmap_file_region(
   const auto file_size = static_cast<uint64_t>(st.st_size);
   if (offset > file_size || length > file_size - offset) {
     close_fd();
-    throw std::runtime_error("[mmap_file_region] region out of bounds: " + file);
+    throw std::runtime_error(
+        "[mmap_file_region] region out of bounds: " + file);
   }
 
   const auto item_size = static_cast<uint64_t>(size_of(dtype));
@@ -1062,10 +1059,8 @@ array mmap_file_region(
     throw std::runtime_error("[mmap_file_region] mmap failed: " + file);
   }
 
-  auto shard = std::make_shared<MmapShard>(
-      raw,
-      static_cast<size_t>(span),
-      file);
+  auto shard =
+      std::make_shared<MmapShard>(raw, static_cast<size_t>(span), file);
   auto buffer = allocator::make_buffer(shard->base, static_cast<size_t>(span));
   if (buffer.ptr() == nullptr) {
     throw std::runtime_error("[mmap_file_region] make_buffer failed: " + file);
@@ -1075,14 +1070,9 @@ array mmap_file_region(
       buffer,
       Shape{static_cast<ShapeElem>(span)},
       uint8,
-      [shard](allocator::Buffer buffer) {
-        allocator::release(buffer);
-      });
+      [shard](allocator::Buffer buffer) { allocator::release(buffer); });
   array tensor(
-      allocator::Buffer(nullptr),
-      shape,
-      dtype,
-      [](allocator::Buffer) {});
+      allocator::Buffer(nullptr), shape, dtype, [](allocator::Buffer) {});
   tensor.copy_shared_buffer(
       base,
       tensor.strides(),

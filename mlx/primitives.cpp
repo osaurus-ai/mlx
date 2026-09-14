@@ -3843,7 +3843,6 @@ std::vector<array> GatherQMM::jvp(
   throw std::runtime_error("GatherQMM::jvp NYI");
 }
 
-
 bool GatherQMM::is_equivalent(const Primitive& other) const {
   const GatherQMM& qm_other = static_cast<const GatherQMM&>(other);
   return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_ &&

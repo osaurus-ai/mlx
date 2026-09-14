@@ -1822,8 +1822,13 @@ template <
 // Keep the production qmv work mapping and FP32 accumulation, but load the
 // metadata through its actual storage type instead of promoting the whole
 // projection to F32 or materializing a second BF16 metadata bank.
-template <typename T, int group_size, int bits, bool batched,
-          bool has_global_scale = false, int results_per_simdgroup = 4>
+template <
+    typename T,
+    int group_size,
+    int bits,
+    bool batched,
+    bool has_global_scale = false,
+    int results_per_simdgroup = 4>
 [[kernel]] void affine_qmv_fast_bf16_f16(
     const device uint32_t* w [[buffer(0)]],
     const device float16_t* scales [[buffer(1)]],
@@ -1843,25 +1848,51 @@ template <typename T, int group_size, int bits, bool batched,
     uint3 tid [[threadgroup_position_in_grid]],
     uint simd_gid [[simdgroup_index_in_threadgroup]],
     uint simd_lid [[thread_index_in_simdgroup]]) {
-  static_assert(!has_global_scale && results_per_simdgroup == 4,
-                "Mixed affine QMV requires the four-result affine layout");
+  static_assert(
+      !has_global_scale && results_per_simdgroup == 4,
+      "Mixed affine QMV requires the four-result affine layout");
   if (batched) {
     int M = x_shape[x_batch_ndims];
     adjust_matrix_offsets<T>(
-        x, w, scales, biases, y, out_vec_size * M, x_batch_ndims,
-        x_shape, x_strides, w_batch_ndims, w_shape, w_strides,
-        s_strides, b_strides, tid);
+        x,
+        w,
+        scales,
+        biases,
+        y,
+        out_vec_size * M,
+        x_batch_ndims,
+        x_shape,
+        x_strides,
+        w_batch_ndims,
+        w_shape,
+        w_strides,
+        s_strides,
+        b_strides,
+        tid);
   }
   qmv_fast_impl<T, group_size, bits, float16_t>(
-      w, scales, biases, x, y, in_vec_size, out_vec_size,
-      tid, simd_gid, simd_lid);
+      w,
+      scales,
+      biases,
+      x,
+      y,
+      in_vec_size,
+      out_vec_size,
+      tid,
+      simd_gid,
+      simd_lid);
 }
 
 // Mixed-input q6 keeps the public promoted-F32 output contract. Loading the
 // input and metadata in their storage types must not move the consumer's
 // rounding boundary (for example, a hyper-connection residual multiply/add).
-template <typename T, int group_size, int bits, bool batched,
-          bool has_global_scale = false, int results_per_simdgroup = 4>
+template <
+    typename T,
+    int group_size,
+    int bits,
+    bool batched,
+    bool has_global_scale = false,
+    int results_per_simdgroup = 4>
 [[kernel]] void affine_qmv_fast_bf16_f16_f32(
     const device uint32_t* w [[buffer(0)]],
     const device float16_t* scales [[buffer(1)]],
@@ -1881,18 +1912,39 @@ template <typename T, int group_size, int bits, bool batched,
     uint3 tid [[threadgroup_position_in_grid]],
     uint simd_gid [[simdgroup_index_in_threadgroup]],
     uint simd_lid [[thread_index_in_simdgroup]]) {
-  static_assert(!has_global_scale && results_per_simdgroup == 4,
-                "Mixed affine QMV requires the four-result affine layout");
+  static_assert(
+      !has_global_scale && results_per_simdgroup == 4,
+      "Mixed affine QMV requires the four-result affine layout");
   if (batched) {
     int M = x_shape[x_batch_ndims];
     adjust_matrix_offsets<T>(
-        x, w, scales, biases, y, out_vec_size * M, x_batch_ndims,
-        x_shape, x_strides, w_batch_ndims, w_shape, w_strides,
-        s_strides, b_strides, tid);
+        x,
+        w,
+        scales,
+        biases,
+        y,
+        out_vec_size * M,
+        x_batch_ndims,
+        x_shape,
+        x_strides,
+        w_batch_ndims,
+        w_shape,
+        w_strides,
+        s_strides,
+        b_strides,
+        tid);
   }
   qmv_fast_impl<T, group_size, bits, float16_t, float>(
-      w, scales, biases, x, y, in_vec_size, out_vec_size,
-      tid, simd_gid, simd_lid);
+      w,
+      scales,
+      biases,
+      x,
+      y,
+      in_vec_size,
+      out_vec_size,
+      tid,
+      simd_gid,
+      simd_lid);
 }
 
 // Multi-row fast qmv. Non-batched (B == 1) only: the speculative-verify
@@ -2443,13 +2495,38 @@ template <typename T, int group_size, int bits, bool has_global_scale = false>
   static_assert(!has_global_scale, "Mixed gathered QMV is affine only");
   int M = x_shape[x_batch_ndims];
   adjust_matrix_offsets<T>(
-      x, w, scales, biases, lhs_indices, rhs_indices, y,
-      out_vec_size * M, batch_ndims, batch_shape, lhs_strides,
-      rhs_strides, x_batch_ndims, x_shape, x_strides, w_batch_ndims,
-      w_shape, w_strides, s_strides, b_strides, tid);
+      x,
+      w,
+      scales,
+      biases,
+      lhs_indices,
+      rhs_indices,
+      y,
+      out_vec_size * M,
+      batch_ndims,
+      batch_shape,
+      lhs_strides,
+      rhs_strides,
+      x_batch_ndims,
+      x_shape,
+      x_strides,
+      w_batch_ndims,
+      w_shape,
+      w_strides,
+      s_strides,
+      b_strides,
+      tid);
   qmv_fast_impl<T, group_size, bits, float16_t>(
-      w, scales, biases, x, y, in_vec_size, out_vec_size,
-      tid, simd_gid, simd_lid);
+      w,
+      scales,
+      biases,
+      x,
+      y,
+      in_vec_size,
+      out_vec_size,
+      tid,
+      simd_gid,
+      simd_lid);
 }
 
 template <typename T, int group_size, int bits, bool has_global_scale = false>

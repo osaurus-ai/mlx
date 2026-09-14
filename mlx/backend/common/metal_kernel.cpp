@@ -356,24 +356,21 @@ CustomKernelFunction metal_kernel(
     }
 
     auto primitive = std::make_shared<CustomKernel>(
-            s,
-            std::move(kernel_name),
-            std::move(kernel_source),
-            grid,
-            threadgroup,
-            shape_infos,
-            ensure_row_contiguous,
-            init_value,
-            std::vector<ScalarArg>{},
-            false,
-            0,
-            compile_options.serialize());
+        s,
+        std::move(kernel_name),
+        std::move(kernel_source),
+        grid,
+        threadgroup,
+        shape_infos,
+        ensure_row_contiguous,
+        init_value,
+        std::vector<ScalarArg>{},
+        false,
+        0,
+        compile_options.serialize());
     primitive->set_output_shapes(output_shapes);
     return array::make_arrays(
-        output_shapes,
-        output_dtypes,
-        std::move(primitive),
-        std::move(inputs));
+        output_shapes, output_dtypes, std::move(primitive), std::move(inputs));
   };
 }
 
