@@ -240,6 +240,7 @@ int mmap_cold_madvise_value(MmapColdAdvice advice) {
     case MmapColdAdvice::dont_need:
       return MADV_DONTNEED;
   }
+  throw std::invalid_argument("[safetensors] Invalid cold-memory advice.");
 }
 
 struct MmapShard {
