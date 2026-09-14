@@ -265,7 +265,7 @@ void qmv(
       ((bits == 1 && K % 1024 == 0) || (bits != 1 && K % 512 == 0));
   bool mixed_bf16_f16 = mode == "affine" && x.dtype() == bfloat16 &&
       scales.dtype() == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) && fast;
+      group_size == 64 && (bits == 4 || bits == 6 || bits == 8) && fast;
 
   // Multi-row fast path, OPT-IN (VMLX_QMV_MR=1) and measured a LOSS on
   // M5 Max 2026-08-19: the plain qmv grid's concurrent row-slices already
@@ -323,7 +323,8 @@ void qmv(
   concatenate(
       kname,
       mode + (mixed_bf16_f16
-                  ? "_qmv_fast_bf16_f16_"
+                  ? (bits == 6 ? "_qmv_fast_bf16_f16_f32_"
+                               : "_qmv_fast_bf16_f16_")
                   : (fast ? "_qmv_fast_" : "_qmv_")),
       type_string,
       "_gs_",
@@ -335,7 +336,7 @@ void qmv(
       d,
       kname,
       (mixed_bf16_f16
-           ? "qmv_fast_bf16_f16"
+           ? (bits == 6 ? "qmv_fast_bf16_f16_f32" : "qmv_fast_bf16_f16")
            : (fast ? "qmv_fast" : "qmv")),
       mode,
       type_string,
@@ -343,6 +344,16 @@ void qmv(
       bits,
       B > 1);
   if (mixed_bf16_f16) {
+    if (bits == 6) {
+      static const bool reported_q6 = []() {
+        std::fprintf(
+            stderr,
+            "[QuantizedMatmul] mixed_q6=active input=bfloat16 metadata=float16 "
+            "accumulator=float32 output=float32 bits=6 group_size=64\n");
+        return true;
+      }();
+      (void)reported_q6;
+    }
     static const bool reported = []() {
       std::fprintf(
           stderr,
