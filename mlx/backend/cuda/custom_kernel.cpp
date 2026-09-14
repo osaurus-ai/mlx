@@ -21,8 +21,6 @@ constexpr const char* default_header = R"(
 
 #include <cooperative_groups.h>
 
-#define inf cuda::std::numeric_limits<float>::infinity()
-
 )";
 
 std::string template_arguments_hash(
@@ -222,21 +220,23 @@ CustomKernelFunction cuda_kernel(
                 << "```" << std::endl;
     }
 
+    auto primitive = std::make_shared<CustomKernel>(
+        s,
+        std::move(kernel_name),
+        std::move(kernel_source),
+        grid,
+        threadgroup,
+        shape_infos,
+        ensure_row_contiguous,
+        init_value,
+        std::vector<ScalarArg>{},
+        false,
+        shared_memory);
+    primitive->set_output_shapes(output_shapes);
     return array::make_arrays(
         std::move(output_shapes),
         std::move(output_dtypes),
-        std::make_shared<CustomKernel>(
-            s,
-            std::move(kernel_name),
-            std::move(kernel_source),
-            grid,
-            threadgroup,
-            shape_infos,
-            ensure_row_contiguous,
-            init_value,
-            std::vector<ScalarArg>{},
-            false,
-            shared_memory),
+        std::move(primitive),
         std::move(inputs));
   };
 }
@@ -256,21 +256,23 @@ std::vector<array> precompiled_cuda_kernel(
     StreamOrDevice s) {
   std::vector<std::tuple<bool, bool, bool>> shape_infos(
       inputs.size(), {false, false, false});
+  auto primitive = std::make_shared<CustomKernel>(
+      to_stream(s),
+      name,
+      compiled_source,
+      grid,
+      threadgroup,
+      shape_infos,
+      ensure_row_contiguous,
+      init_value,
+      scalars,
+      true,
+      shared_memory);
+  primitive->set_output_shapes(output_shapes);
   return array::make_arrays(
       output_shapes,
       output_dtypes,
-      std::make_shared<CustomKernel>(
-          to_stream(s),
-          name,
-          compiled_source,
-          grid,
-          threadgroup,
-          shape_infos,
-          ensure_row_contiguous,
-          init_value,
-          scalars,
-          true,
-          shared_memory),
+      std::move(primitive),
       inputs);
 }
 
@@ -312,9 +314,11 @@ void CustomKernel::eval_gpu(
   // Compile the custom kernel
   std::string kernel_name =
       (is_precompiled_) ? name_ : "mlx::core::cu::" + name_;
+  std::string module_name =
+      fmt::format("{}_{:x}", name_, std::hash<std::string>{}(source_));
   cu::JitModule& mod = cu::get_jit_module(
-      s.device,
-      name_,
+      encoder.device(),
+      module_name,
       [&]() {
         return std::make_tuple(
             is_precompiled_, source_, std::vector{kernel_name});
