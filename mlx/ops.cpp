@@ -4834,10 +4834,10 @@ array quantized_matmul(
   if (qmode == QuantizationMode::Affine) {
     inputs = mixed_bf16_f16_qmv ? std::vector<array>{x, w, scales, *biases}
                                 : std::vector<array>{
-                                      astype(x, dtype),
+                                      astype(x, dtype, s),
                                       w,
-                                      astype(scales, dtype),
-                                      astype(*biases, dtype)};
+                                      astype(scales, dtype, s),
+                                      astype(*biases, dtype, s)};
   } else {
     inputs = {x, w, scales};
   }
