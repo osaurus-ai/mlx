@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <set>
 #include <sstream>
@@ -4339,14 +4340,26 @@ array quantized_matmul(
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "quantized_matmul", x, w, scales, biases, transpose, group_size, bits);
 
+  // Process-level diagnostic control for matched old/new execution in one
+  // binary. Normal eligibility still comes from the tensor layout below.
+  static const bool mixed_q6_enabled = []() {
+    const char* value = std::getenv("VMLX_DISABLE_MIXED_Q6");
+    return !(value && value[0] == '1' && value[1] == '\0');
+  }();
   const bool mixed_bf16_f16_qmv =
       qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
       dtype == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) &&
+      group_size == 64 &&
+      (bits == 4 || bits == 8 ||
+       (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu)) &&
       x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
-    dtype = mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), dtype);
+    // q6 preserves the original promoted output dtype. Consumers may use
+    // the F32 projection in residual arithmetic before rounding to BF16.
+    dtype = mixed_bf16_f16_qmv && bits != 6
+        ? x.dtype()
+        : promote_types(x.dtype(), dtype);
   } else {
     dtype = x.dtype();
   }
