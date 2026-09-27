@@ -6,6 +6,7 @@
 #include "mlx/backend/cpu/gemm.h"
 #include "mlx/backend/cpu/gemms/simd_gemm.h"
 #include "mlx/backend/cpu/lapack.h"
+#include "mlx/backend/cpu/scratch.h"
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/threading/common.h"
 
@@ -17,14 +18,12 @@ namespace mlx::core::detail {
 
 constexpr int LOWP_MIN_BATCHES_PER_THREAD = 4;
 
-// Thread-local scratch buffer for low-precision <-> f32 conversion.
-// Avoids mmap/munmap cycles and page faults from repeated large allocations.
-inline float* lowp_gemm_scratch(size_t n) {
+// Thread-local scratch buffer for low-precision <-> f32 conversion, borrowed
+// through ScratchLease. Avoids mmap/munmap cycles and page faults from repeated
+// large allocations.
+inline std::vector<float>& lowp_gemm_buffer() {
   thread_local std::vector<float> buf;
-  if (buf.size() < n) {
-    buf.resize(n);
-  }
-  return buf.data();
+  return buf;
 }
 
 template <typename T>
@@ -108,7 +107,8 @@ void lowp_gemv(
     }
   } else {
     // B is [K][N]: accumulate outer products a[k] * B[k][:].
-    float* accum = lowp_gemm_scratch(N);
+    cpu::ScratchLease accum_scratch(lowp_gemm_buffer(), N);
+    float* accum = accum_scratch.data();
     if (beta != 0) {
       for (size_t n = 0; n < N; n++) {
         accum[n] = beta * static_cast<float>(out[n]);
@@ -182,7 +182,8 @@ void lowp_gemv_threaded(
 
       constexpr int W = simd::max_size<T>;
       size_t n_len = n_end - n_start;
-      float* accum = lowp_gemm_scratch(n_len);
+      cpu::ScratchLease accum_scratch(lowp_gemm_buffer(), n_len);
+      float* accum = accum_scratch.data();
       if (beta != 0) {
         for (size_t n = 0; n < n_len; n++) {
           accum[n] = beta * static_cast<float>(out[n_start + n]);
@@ -287,7 +288,8 @@ void matmul_lowp(
       size_t buf_size = a_elems + b_elems + out_elems;
 
       pool.parallel_for(n_threads, [&](int tid, int nth) {
-        float* base = lowp_gemm_scratch(buf_size);
+        cpu::ScratchLease batch_scratch(lowp_gemm_buffer(), buf_size);
+        float* base = batch_scratch.data();
         float* a_f32 = base;
         float* b_f32 = base + a_elems;
         float* out_f32 = base + a_elems + b_elems;
@@ -298,7 +300,9 @@ void matmul_lowp(
         run_batches(start, end, a_f32, b_f32, out_f32);
       });
     } else {
-      float* scratch = lowp_gemm_scratch(a_elems + b_elems + out_elems);
+      cpu::ScratchLease batch_scratch(
+          lowp_gemm_buffer(), a_elems + b_elems + out_elems);
+      float* scratch = batch_scratch.data();
       run_batches(
           0,
           batch_size,
@@ -322,7 +326,9 @@ void matmul_lowp(
         size_t b_elems = b_rows * ldb;
         size_t out_elems = M * ldc;
 
-        float* a_f32 = lowp_gemm_scratch(a_elems + b_elems + out_elems);
+        cpu::ScratchLease gemm_scratch(
+            lowp_gemm_buffer(), a_elems + b_elems + out_elems);
+        float* a_f32 = gemm_scratch.data();
         float* b_f32 = a_f32 + a_elems;
         float* out_f32 = b_f32 + b_elems;
 

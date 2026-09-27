@@ -11,6 +11,7 @@
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/lapack.h"
+#include "mlx/backend/cpu/scratch.h"
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/threading/common.h"
 #include "mlx/backend/cpu/unary.h"
@@ -971,13 +972,11 @@ void _qmm_t_simd(
   }
 }
 
-// Thread-local scratch buffer for dequant+BLAS path.
-float* _qmm_get_scratch(size_t n) {
+// Thread-local scratch for the dequant+BLAS path, borrowed through
+// ScratchLease.
+std::vector<float>& _qmm_scratch_buffer() {
   thread_local std::vector<float> buf;
-  if (buf.size() < n) {
-    buf.resize(n);
-  }
-  return buf.data();
+  return buf;
 }
 
 // Dequantize a row of packed quantized weights to f32.
@@ -1049,7 +1048,9 @@ void _qmm_t_blas(
   size_t w_f32_size = (size_t)N * K;
   size_t x_f32_size = (size_t)M * K;
   size_t r_f32_size = (size_t)M * N;
-  float* w_f32 = _qmm_get_scratch(w_f32_size + x_f32_size + r_f32_size);
+  cpu::ScratchLease scratch(
+      _qmm_scratch_buffer(), w_f32_size + x_f32_size + r_f32_size);
+  float* w_f32 = scratch.data();
   float* x_f32 = w_f32 + w_f32_size;
   float* r_f32 = x_f32 + x_f32_size;
 

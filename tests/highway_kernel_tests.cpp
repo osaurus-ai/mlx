@@ -276,3 +276,28 @@ TEST_CASE("highway fp32 matmul splits short inputs by columns, exactly") {
     }
   }
 }
+
+#include "mlx/backend/cpu/scratch.h"
+
+TEST_CASE("highway scratch past 64 MiB is freed after its operation") {
+  // M >= 32 dequantizes W to float32 scratch. 9216 x 2048 floats are 75.5 MB on
+  // their own, above the 64 MiB the lease keeps, whatever else the path stages.
+  auto w = random::normal({9216, 2048}, float32, 0.0f, 0.02f, random::key(41));
+  auto q = quantize(w, 64, 4);
+  auto x = random::normal({64, 2048}, float32, 0.0f, 1.0f, random::key(42));
+  const size_t before = cpu::scratch_retained_bytes();
+  CHECK(
+      sum(quantized_matmul(x, q[0], q[1], q[2], true, 64, 4)).item<float>() !=
+      0.0f);
+  const size_t after_large = cpu::scratch_retained_bytes();
+  CHECK(after_large <= before);
+
+  // A small one keeps its buffer for the next call.
+  auto ws = random::normal({64, 256}, float32, 0.0f, 1.0f, random::key(43));
+  auto qs = quantize(ws, 64, 4);
+  auto xs = random::normal({32, 256}, float32, 0.0f, 1.0f, random::key(44));
+  CHECK(
+      sum(quantized_matmul(xs, qs[0], qs[1], qs[2], true, 64, 4))
+          .item<float>() != 0.0f);
+  CHECK(cpu::scratch_retained_bytes() > after_large);
+}
