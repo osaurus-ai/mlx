@@ -282,6 +282,10 @@ struct Simd {
     store(tmp);
     return tmp[idx];
   }
+
+  T& operator[](int idx) {
+    return reinterpret_cast<T*>(&value)[idx];
+  }
 };
 
 template <>
