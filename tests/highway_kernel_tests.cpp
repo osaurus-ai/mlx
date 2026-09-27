@@ -159,3 +159,26 @@ TEST_CASE("highway integer power with a negative exponent") {
     CHECK(slice(y, {i}, {i + 1}).item<int>() == expected[i]);
   }
 }
+
+TEST_CASE("highway fp16 sum keeps each thread's partial in float") {
+  // 2^18 + 3 elements of 2^-4, then -2^14: the sum is exactly 0.1875. Each
+  // thread's partial, rounded to float16, would lose its 2^-4 parts.
+  StreamOrDevice cpu = Device::cpu;
+  auto x = concatenate(
+      {full({(1 << 18) + 3}, 0.0625f, float16, cpu),
+       full({1}, -16384.0f, float16, cpu)},
+      cpu);
+  CHECK(astype(sum(x, cpu), float32, cpu).item<float>() == 0.1875f);
+}
+
+TEST_CASE("highway bf16 sum does not depend on the thread count") {
+  // 2^20 + 3 ones, then -2^20: the sum is exactly 3. Every thread's partial is
+  // exact in float; rounded to bf16 before they are combined, the total is
+  // never 3 for any pool of 2 to 64 threads (0 with 2, 4, 8, 16 or 32, 4096
+  // with 6, -8192 with 12). A plain count of ones is no test: at many pool
+  // sizes each partial happens to be exact in bf16. item<float> on a bf16 array
+  // would read four bytes of a two-byte buffer, so widen first.
+  auto x = concatenate(
+      {ones({(1 << 20) + 3}, bfloat16), full({1}, -1048576.0f, bfloat16)});
+  CHECK(astype(sum(x), float32).item<float>() == 3.0f);
+}
