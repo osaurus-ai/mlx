@@ -139,3 +139,23 @@ TEST_CASE("highway float64 elementwise math computes in double") {
     CHECK(slice(remainders, {i}, {i + 1}).item<double>() == r);
   }
 }
+
+TEST_CASE("highway integer power with a negative exponent") {
+  // base_simd.h's rule (hwy/base, lines 249-267): a signed integer to a
+  // negative power is 0, for every base, 1 included. #3019's facade looped
+  // forever here.
+  std::vector<int> bases = {
+      2, 3, -2, 5, 7, 1, 4, 6, 2, -3, 1, 0, 9, 2, -1, 3, 5};
+  std::vector<int> exponents = {
+      -1, -2, -3, 2, 0, -1, 3, -5, 10, 3, 7, 0, 2, -8, 5, 4, 1};
+  std::vector<int> expected = {
+      0, 0, 0, 25, 1, 0, 64, 0, 1024, -27, 1, 1, 81, 0, -1, 81, 5};
+  const int n = static_cast<int>(bases.size());
+  auto y = power(
+      array(bases.begin(), {n}, int32), array(exponents.begin(), {n}, int32));
+  for (int i = 0; i < n; ++i) {
+    CAPTURE(bases[i]);
+    CAPTURE(exponents[i]);
+    CHECK(slice(y, {i}, {i + 1}).item<int>() == expected[i]);
+  }
+}
