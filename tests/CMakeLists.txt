@@ -46,6 +46,7 @@ target_sources(
 if(MLX_USE_HIGHWAY)
   # The CPU thread pool exists only in builds with Highway kernels.
   target_sources(tests PRIVATE thread_pool_tests.cpp)
+  target_sources(tests PRIVATE highway_quantized_tests.cpp)
 endif()
 
 target_link_libraries(tests PRIVATE mlx doctest)

@@ -1180,9 +1180,14 @@ void _qmm_dispatch_transpose(
     // OpenBLAS SGEMM has ~2x better throughput than custom quantized kernel
     // due to superior micro-kernels and cache tiling. The dequantization
     // overhead is <2% for large M.
-    if (M >= QMM_BLAS_M_THRESHOLD) {
-      _qmm_t_blas<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
-      return;
+    // _qmm_t_blas's dequantizer reads 32 / bits values per uint32 word, which
+    // is how MLX packs 2, 4 and 8 bits. 3, 5 and 6 bits are packed as a byte
+    // stream, so they take the row kernels below at every M.
+    if constexpr (32 % bits == 0) {
+      if (M >= QMM_BLAS_M_THRESHOLD) {
+        _qmm_t_blas<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
+        return;
+      }
     }
 #if defined(MLX_USE_HIGHWAY_KERNELS)
     if constexpr (bits == 4 || bits == 8) {
