@@ -667,7 +667,7 @@ bool QmmTInt8HighwayTyped(
     int K) {
   constexpr int INT8_MAX_K = 16384;
   constexpr int STACK_GROUPS = 128;
-  if (!env::enable_tf32() || K > INT8_MAX_K) {
+  if (!cpu::quantized_int8() || K > INT8_MAX_K) {
     return false;
   }
 
