@@ -7,6 +7,7 @@
 // are emitted as one manually suffixed specialization.
 
 #include "mlx/backend/cpu/rope_highway.h"
+#include "mlx/backend/cpu/highway_info.h"
 
 #if !defined(MLX_HIGHWAY_MANUAL_TARGET)
 #undef HWY_TARGET_INCLUDE
@@ -178,6 +179,7 @@ void RopeTraditionalForward(
     const float* HWY_RESTRICT sin_t,
     int half_dims,
     int* HWY_RESTRICT processed) {
+  MLX_HIGHWAY_RECORD(Rope);
   *processed = rope_traditional_dispatch<true>(
       x_in, x_out, dtype, cos_t, sin_t, half_dims);
 }
@@ -190,6 +192,7 @@ void RopeTraditionalReverse(
     const float* HWY_RESTRICT sin_t,
     int half_dims,
     int* HWY_RESTRICT processed) {
+  MLX_HIGHWAY_RECORD(Rope);
   *processed = rope_traditional_dispatch<false>(
       x_in, x_out, dtype, cos_t, sin_t, half_dims);
 }
@@ -202,6 +205,7 @@ void RopeNonTraditionalForward(
     const float* HWY_RESTRICT sin_t,
     int half_dims,
     int* HWY_RESTRICT processed) {
+  MLX_HIGHWAY_RECORD(Rope);
   *processed = rope_non_traditional_dispatch<true>(
       x_in, x_out, dtype, cos_t, sin_t, half_dims);
 }
@@ -214,6 +218,7 @@ void RopeNonTraditionalReverse(
     const float* HWY_RESTRICT sin_t,
     int half_dims,
     int* HWY_RESTRICT processed) {
+  MLX_HIGHWAY_RECORD(Rope);
   *processed = rope_non_traditional_dispatch<false>(
       x_in, x_out, dtype, cos_t, sin_t, half_dims);
 }

@@ -8,6 +8,8 @@
 
 #include <cmath>
 
+#include "mlx/backend/cpu/highway_info.h"
+
 #if !defined(MLX_HIGHWAY_MANUAL_TARGET)
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "mlx/backend/cpu/norms_highway.cpp"
@@ -332,6 +334,7 @@ void RmsNormF32(
     int rows,
     float eps,
     int has_weight) {
+  MLX_HIGHWAY_RECORD(RmsNorm);
   for (int row = 0; row < rows; ++row) {
     rms_norm_row_f32(
         x + row * width, weight, out + row * width, width, eps, has_weight);
@@ -361,6 +364,7 @@ void RmsNormF16(
     int rows,
     float eps,
     int has_weight) {
+  MLX_HIGHWAY_RECORD(RmsNorm);
   RmsNormHalf(x, weight, out, width, rows, eps, has_weight);
 }
 
@@ -372,6 +376,7 @@ void RmsNormBF16(
     int rows,
     float eps,
     int has_weight) {
+  MLX_HIGHWAY_RECORD(RmsNorm);
   RmsNormHalf(x, weight, out, width, rows, eps, has_weight);
 }
 
@@ -385,6 +390,7 @@ void LayerNormF32(
     float eps,
     int has_weight,
     int has_bias) {
+  MLX_HIGHWAY_RECORD(LayerNorm);
   for (int row = 0; row < rows; ++row) {
     layer_norm_row_f32(
         x + row * width,
@@ -432,6 +438,7 @@ void LayerNormF16(
     float eps,
     int has_weight,
     int has_bias) {
+  MLX_HIGHWAY_RECORD(LayerNorm);
   LayerNormHalf(x, weight, bias, out, width, rows, eps, has_weight, has_bias);
 }
 
@@ -445,6 +452,7 @@ void LayerNormBF16(
     float eps,
     int has_weight,
     int has_bias) {
+  MLX_HIGHWAY_RECORD(LayerNorm);
   LayerNormHalf(x, weight, bias, out, width, rows, eps, has_weight, has_bias);
 }
 

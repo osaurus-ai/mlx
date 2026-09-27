@@ -10,6 +10,7 @@
 #include <cmath>
 #include <limits>
 
+#include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/sdpa_highway.h"
 #include "mlx/backend/cpu/threading/common.h"
 #include "mlx/types/half_types.h"
@@ -410,6 +411,7 @@ void SdpaHighway(
     bool has_mask,
     const void* HWY_RESTRICT sinks,
     bool has_sinks) {
+  MLX_HIGHWAY_RECORD(Sdpa);
   switch (dtype) {
     case SdpaHighwayDType::Float32:
       SdpaHighwayForDType(

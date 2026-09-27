@@ -9,6 +9,7 @@
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
+#include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/lapack.h"
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/threading/common.h"
@@ -1858,6 +1859,7 @@ void fp_qmm_dispatch_transpose(
           result, x, w, scales, M, N, K, scale_factor);
     }
   } else {
+    MLX_HIGHWAY_RECORD_FALLBACK(QmmFp);
     fp_qmm<T, group_size, bits>(result, x, w, scales, M, N, K, scale_factor);
   }
 }

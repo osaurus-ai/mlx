@@ -9,6 +9,8 @@
 #include <atomic>
 #include <stdexcept>
 
+#include "mlx/backend/cpu/highway_info.h"
+
 #if !defined(MLX_HIGHWAY_MANUAL_TARGET)
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "mlx/backend/cpu/quantized_highway.cpp"
@@ -331,6 +333,7 @@ void QuantizeActivationInt8(
     int8_t* HWY_RESTRICT x_q,
     float* HWY_RESTRICT x_scales,
     float* HWY_RESTRICT x_group_sums) {
+  MLX_HIGHWAY_RECORD(QmmAffineInt8);
   switch (dtype) {
     case QuantizedHighwayDType::Float32:
       QuantizeActivationInt8Typed(
@@ -513,6 +516,7 @@ void QmmTInt8Row(
     int n_start,
     int n_end,
     int K) {
+  MLX_HIGHWAY_RECORD(QmmAffineInt8);
   switch (dtype) {
     case QuantizedHighwayDType::Float32:
       QmmTInt8RowForDType(
@@ -670,6 +674,7 @@ bool QmmTInt8HighwayTyped(
   if (!cpu::quantized_int8() || K > INT8_MAX_K) {
     return false;
   }
+  MLX_HIGHWAY_RECORD(QmmAffineInt8);
 
   auto& pool = cpu::ThreadPool::instance();
   const int min_cols_per_thread = (M == 1) ? 128 : 64;
@@ -1212,6 +1217,7 @@ void FpQmmTHighwayRow(
     float scale_factor,
     const float* fp4_lut,
     const float* fp8_lut) {
+  MLX_HIGHWAY_RECORD(QmmFp);
   switch (dtype) {
     case QuantizedHighwayDType::Float32:
       FpQmmTHighwayRowForDType<float>(
@@ -1275,6 +1281,7 @@ void FpQmmTHighway(
     float scale_factor,
     const float* fp4_lut,
     const float* fp8_lut) {
+  MLX_HIGHWAY_RECORD(QmmFp);
   switch (dtype) {
     case QuantizedHighwayDType::Float32:
       FpQmmTHighwayForDType<float>(
@@ -1331,6 +1338,7 @@ void DequantRow4Bit(
     float* HWY_RESTRICT out,
     int group_size,
     int K) {
+  MLX_HIGHWAY_RECORD(QmmAffineDequant);
   dequant_row<4>(w_row, scales_row, biases_row, out, group_size, K);
 }
 
@@ -1341,6 +1349,7 @@ void DequantRow8Bit(
     float* HWY_RESTRICT out,
     int group_size,
     int K) {
+  MLX_HIGHWAY_RECORD(QmmAffineDequant);
   dequant_row<8>(w_row, scales_row, biases_row, out, group_size, K);
 }
 

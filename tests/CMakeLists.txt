@@ -48,6 +48,7 @@ if(MLX_USE_HIGHWAY)
   target_sources(tests PRIVATE thread_pool_tests.cpp)
   target_sources(tests PRIVATE highway_quantized_tests.cpp)
   target_sources(tests PRIVATE highway_kernel_tests.cpp)
+  target_sources(tests PRIVATE highway_info_tests.cpp)
 endif()
 
 target_link_libraries(tests PRIVATE mlx doctest)
