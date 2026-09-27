@@ -394,13 +394,17 @@ struct Simd<uint64_t, 8> {
 
 namespace highway_detail {
 
+template <typename T>
+using MapComputeT =
+    std::conditional_t<std::is_same_v<T, double>, double, float>;
+
 template <typename T, int N, typename Fn>
 Simd<T, N> map_unary(Simd<T, N> x, Fn fn) {
   alignas(64) T in[N];
   alignas(64) T out[N];
   x.store(in);
   for (int i = 0; i < N; ++i) {
-    out[i] = static_cast<T>(fn(static_cast<float>(in[i])));
+    out[i] = static_cast<T>(fn(static_cast<MapComputeT<T>>(in[i])));
   }
   return Simd<T, N>::load(out);
 }
@@ -414,7 +418,8 @@ Simd<T, N> map_binary(Simd<T, N> x, Simd<T, N> y, Fn fn) {
   y.store(in_y);
   for (int i = 0; i < N; ++i) {
     out[i] = static_cast<T>(
-        fn(static_cast<float>(in_x[i]), static_cast<float>(in_y[i])));
+        fn(static_cast<MapComputeT<T>>(in_x[i]),
+           static_cast<MapComputeT<T>>(in_y[i])));
   }
   return Simd<T, N>::load(out);
 }
@@ -814,8 +819,8 @@ inline Simd<T, N> remainder(Simd<T, N> a, Simd<T, N> b) {
       return r;
     });
   } else {
-    return highway_detail::map_binary(a, b, [](float x, float y) {
-      float r = std::fmod(x, y);
+    return highway_detail::map_binary(a, b, [](auto x, auto y) {
+      auto r = std::fmod(x, y);
       if (r != 0 && (std::signbit(r) != std::signbit(y))) {
         r += y;
       }
@@ -840,14 +845,14 @@ inline Simd<T, N> pow(Simd<T, N> base, Simd<T, N> exp) {
     });
   } else {
     return highway_detail::map_binary(
-        base, exp, [](float x, float y) { return std::pow(x, y); });
+        base, exp, [](auto x, auto y) { return std::pow(x, y); });
   }
 }
 
 template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> atan2(Simd<T, N> a, Simd<T, N> b) {
   return highway_detail::map_binary(
-      a, b, [](float x, float y) { return std::atan2(x, y); });
+      a, b, [](auto x, auto y) { return std::atan2(x, y); });
 }
 
 template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
@@ -925,11 +930,11 @@ inline bool all(Simd<T, N> x) {
   return all(!(!x));
 }
 
-#define MLX_HIGHWAY_TRANSCENDENTAL(name, std_name)                        \
-  template <typename T, int N, highway_detail::EnableIfVector<N> = 0>     \
-  inline Simd<T, N> name(Simd<T, N> x) {                                  \
-    return highway_detail::map_unary(                                     \
-        x, [](float v) { return static_cast<float>(std::std_name(v)); }); \
+#define MLX_HIGHWAY_TRANSCENDENTAL(name, std_name)                    \
+  template <typename T, int N, highway_detail::EnableIfVector<N> = 0> \
+  inline Simd<T, N> name(Simd<T, N> x) {                              \
+    return highway_detail::map_unary(                                 \
+        x, [](auto v) { return std::std_name(v); });                  \
   }
 
 MLX_HIGHWAY_TRANSCENDENTAL(acos, acos)
