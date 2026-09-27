@@ -123,9 +123,13 @@ void qmm_t_int8_cols(
   float bias_accum[NC] = {};
 
   for (int g = 0; g < groups_per_col; ++g) {
+    // On some targets (EMU128, NEON) ReorderWidenMulAccumulate puts part of
+    // the sum in its sum1 argument. RearrangeToOddPlusEven adds the two parts.
     hn::Vec<decltype(di32)> dot_acc[NC];
+    hn::Vec<decltype(di32)> dot_acc1[NC];
     for (int c = 0; c < NC; ++c) {
       dot_acc[c] = hn::Zero(di32);
+      dot_acc1[c] = hn::Zero(di32);
     }
 
     const int8_t* x_group = x_q + g * group_size;
@@ -142,9 +146,8 @@ void qmm_t_int8_cols(
           w_vec = unpack_4bit_lanes(du8, w_group[c]);
           w_group[c] += words_per_vec;
           const auto prod16 = hn::SatWidenMulPairwiseAdd(di16, w_vec, x_vec);
-          auto unused = hn::Zero(di32);
           dot_acc[c] = hn::ReorderWidenMulAccumulate(
-              di32, prod16, ones16, dot_acc[c], unused);
+              di32, prod16, ones16, dot_acc[c], dot_acc1[c]);
         } else {
           const auto* w_bytes = reinterpret_cast<const uint8_t*>(w_group[c]);
           w_group[c] += words_per_vec;
@@ -161,10 +164,9 @@ void qmm_t_int8_cols(
       const size_t param_idx = static_cast<size_t>(n + c) * groups_per_col + g;
       const float scale_f = static_cast<float>(scales[param_idx]);
       const float bias_f = static_cast<float>(biases[param_idx]);
+      const auto dot = hn::RearrangeToOddPlusEven(dot_acc[c], dot_acc1[c]);
       accum_vec[c] = hn::MulAdd(
-          hn::Set(df, scale_f * xs),
-          hn::ConvertTo(df, dot_acc[c]),
-          accum_vec[c]);
+          hn::Set(df, scale_f * xs), hn::ConvertTo(df, dot), accum_vec[c]);
       bias_accum[c] += bias_f * xgs;
     }
   }
