@@ -4,6 +4,7 @@
 #include "mlx/backend/cpu/gemm.h"
 #include "mlx/backend/cpu/lapack.h"
 #if defined(MLX_USE_HIGHWAY_KERNELS)
+#include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/threading/common.h"
 #endif // MLX_USE_HIGHWAY_KERNELS
 
@@ -99,6 +100,44 @@ void matmul<float>(
       if (M >= 16 && M * N * K >= 65536) {
         m_threads =
             std::min(pool.max_threads(), std::max(1, static_cast<int>(M / 8)));
+      }
+
+      // A short input (M < 16), such as an embedder's 8-token query: split the
+      // columns instead, so that pinning OpenBLAS to one thread never leaves a
+      // large GEMM on one core. Each slice writes its own columns of out.
+      int col_threads = 1;
+      if (m_threads == 1 && M * N * K >= 65536) {
+        col_threads =
+            std::min(pool.max_threads(), std::max(1, static_cast<int>(N / 64)));
+      }
+      if (col_threads > 1) {
+        cpu::highway_info::record_sgemm_column_split();
+        pool.parallel_for(col_threads, [&](int tid, int nth) {
+          size_t n_chunk = (N + nth - 1) / nth;
+          size_t n_start = n_chunk * tid;
+          size_t n_end = std::min(n_start + n_chunk, N);
+          if (n_start < n_end) {
+            // Column n of op(B) is row n of a transposed B (stored N x K), and
+            // column n of B otherwise (stored K x N).
+            size_t b_offset = b_transposed ? n_start * ldb : n_start;
+            cblas_sgemm(
+                CblasRowMajor,
+                a_transposed ? CblasTrans : CblasNoTrans,
+                b_transposed ? CblasTrans : CblasNoTrans,
+                M,
+                n_end - n_start,
+                K,
+                alpha,
+                a_ptr,
+                lda,
+                b_ptr + b_offset,
+                ldb,
+                beta,
+                out_ptr + n_start,
+                ldc);
+          }
+        });
+        continue;
       }
 
       if (m_threads > 1) {
