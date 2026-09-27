@@ -201,3 +201,38 @@ TEST_CASE("highway facade fma rounds once on every target") {
   CAPTURE(worst);
   CHECK(worst <= 8.0);
 }
+
+TEST_CASE("highway float16 keeps inf and nan") {
+  // Highway emulates float16 -> float32 where a target has no conversion
+  // instruction, and reads exponent 31 as finite there: inf became 65536.
+  const uint16_t pattern[4] = {
+      0x7C00, 0xFC00, 0x7E00, 0x3C00}; // inf -inf nan 1
+  std::vector<uint16_t> bits(64);
+  for (int i = 0; i < 64; ++i) {
+    bits[i] = pattern[i % 4];
+  }
+  auto x = view(array(bits.data(), {64}, uint16), float16);
+  auto half_at = [](const array& a, int i) {
+    return static_cast<float>(slice(a, {i}, {i + 1}).item<float16_t>());
+  };
+  auto bool_at = [](const array& a, int i) {
+    return slice(a, {i}, {i + 1}).item<bool>();
+  };
+  auto difference = subtract(x, x); // NaN for inf, -inf and NaN
+  auto sine = sin(x); // NaN for inf, -inf and NaN
+  auto nan = isnan(x);
+  auto inf = isinf(x);
+  // The other direction, float32 -> float16: an overflow, and a NaN.
+  auto overflow = multiply(full({64}, 65504.0f, float16), array(2.0f, float16));
+  auto root = sqrt(full({64}, -1.0f, float16));
+  for (int i = 0; i < 64; ++i) {
+    CAPTURE(i);
+    const bool special = i % 4 != 3;
+    CHECK(std::isnan(half_at(difference, i)) == special);
+    CHECK(std::isnan(half_at(sine, i)) == special);
+    CHECK(bool_at(nan, i) == (i % 4 == 2));
+    CHECK(bool_at(inf, i) == (i % 4 < 2));
+    CHECK(half_at(overflow, i) == INFINITY);
+    CHECK(std::isnan(half_at(root, i)));
+  }
+}

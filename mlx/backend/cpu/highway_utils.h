@@ -15,13 +15,39 @@ namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
+// Highway emulates float16 -> float32 where a target has no conversion
+// instruction (x86 before AVX2, EMU128, SCALAR), and reads exponent 31 as a
+// finite exponent there: inf became 65536. Lanes with exponent 31 take
+// float32's inf, or a quiet NaN with the same payload, as the instructions
+// give. simd/highway_simd.h has the same function for the facade.
+template <class DF>
+hn::Vec<DF> promote_f16(DF df, hn::Vec<hn::Rebind<hwy::float16_t, DF>> v) {
+  const hn::RebindToUnsigned<DF> du;
+  const hn::Rebind<uint16_t, DF> du16;
+  const auto bits = hn::PromoteTo(du, hn::BitCast(du16, v));
+  const auto mantissa = hn::And(bits, hn::Set(du, 0x3FFu));
+  const auto special =
+      hn::Eq(hn::And(bits, hn::Set(du, 0x7C00u)), hn::Set(du, 0x7C00u));
+  const auto quiet = hn::IfThenElseZero(
+      hn::Ne(mantissa, hn::Zero(du)), hn::Set(du, 0x400000u));
+  const auto inf_nan = hn::Or(
+      hn::Or(
+          hn::ShiftLeft<16>(hn::And(bits, hn::Set(du, 0x8000u))),
+          hn::Set(du, 0x7F800000u)),
+      hn::Or(hn::ShiftLeft<13>(mantissa), quiet));
+  return hn::IfThenElse(
+      hn::RebindMask(df, special),
+      hn::BitCast(df, inf_nan),
+      hn::PromoteTo(df, v));
+}
+
 template <typename T, class DF>
 hn::Vec<DF> load_typed_as_f32(DF df, const T* HWY_RESTRICT ptr, size_t idx) {
   if constexpr (std::is_same_v<T, float>) {
     return hn::LoadU(df, ptr + idx);
   } else if constexpr (std::is_same_v<T, float16_t>) {
     const hn::Rebind<hwy::float16_t, DF> df16;
-    return hn::PromoteTo(
+    return promote_f16(
         df,
         hn::LoadU(df16, reinterpret_cast<const hwy::float16_t*>(ptr) + idx));
   } else {
@@ -77,8 +103,8 @@ void load_interleaved_typed_as_f32(
     hn::Vec<decltype(df16)> x1h;
     hn::LoadInterleaved2(
         df16, reinterpret_cast<const hwy::float16_t*>(ptr) + idx, x0h, x1h);
-    x0 = hn::PromoteTo(df, x0h);
-    x1 = hn::PromoteTo(df, x1h);
+    x0 = promote_f16(df, x0h);
+    x1 = promote_f16(df, x1h);
   } else {
 #if HWY_TARGET == HWY_SCALAR
     const hn::Rebind<hwy::bfloat16_t, DF> dbf16;
