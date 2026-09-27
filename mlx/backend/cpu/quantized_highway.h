@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "mlx/backend/cpu/precision.h"
 #include "mlx/backend/cpu/quantized.h"
 #include "mlx/backend/cpu/threading/common.h"
 #include "mlx/types/half_types.h"
@@ -166,7 +167,7 @@ bool try_int8_simd_row(
   if constexpr (!((bits == 4 || bits == 8) && group_size >= 32)) {
     return false;
   } else {
-    if (!env::enable_tf32()) {
+    if (!cpu::quantized_int8()) {
       return false;
     }
     if (K > INT8_MAX_K) {
@@ -255,7 +256,7 @@ bool try_int8_preq_parallel(
   if constexpr (!((bits == 4 || bits == 8) && group_size >= 32)) {
     return false;
   } else {
-    if (!env::enable_tf32()) {
+    if (!cpu::quantized_int8()) {
       return false;
     }
     if (K > INT8_MAX_K) {

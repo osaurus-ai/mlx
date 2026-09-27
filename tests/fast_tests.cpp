@@ -8,6 +8,7 @@
 
 #include "doctest/doctest.h"
 
+#include "mlx/backend/cpu/precision.h"
 #include "mlx/fast.h"
 #include "mlx/mlx.h"
 
@@ -312,7 +313,7 @@ uint32_t pack_u8x4(uint8_t v0, uint8_t v1, uint8_t v2, uint8_t v3) {
       (static_cast<uint32_t>(v2) << 16) | (static_cast<uint32_t>(v3) << 24);
 }
 
-void check_quantized_matmul_8bit_high_values() {
+void check_quantized_matmul_8bit_high_values(bool int8_activations) {
   constexpr int M = 3;
   constexpr int N = 72;
   constexpr int K = 64;
@@ -385,6 +386,25 @@ void check_quantized_matmul_8bit_high_values() {
   std::vector<float> expected(M * N, 0.0f);
   for (int m = 0; m < M; ++m) {
     for (int n = 0; n < N; ++n) {
+      if (!int8_activations) {
+        // The exact activations: scale * sum_k(x * q) + bias * sum_k(x) per
+        // group, in double.
+        double sum = 0.0;
+        for (int g = 0; g < groups_per_col; ++g) {
+          double dot = 0.0;
+          double sum_x = 0.0;
+          for (int k = 0; k < group_size; ++k) {
+            const int kk = g * group_size + k;
+            const double x = x_values[m * K + kk];
+            dot += x * static_cast<double>(q_value(n, kk));
+            sum_x += x;
+          }
+          sum += static_cast<double>(scales[n * groups_per_col + g]) * dot +
+              static_cast<double>(biases[n * groups_per_col + g]) * sum_x;
+        }
+        expected[m * N + n] = static_cast<float>(sum);
+        continue;
+      }
       float sum = 0.0f;
       for (int g = 0; g < groups_per_col; ++g) {
         const float scale = scales[n * groups_per_col + g];
@@ -411,10 +431,8 @@ void check_quantized_matmul_8bit_high_values() {
       x, w, scale_arr, bias_arr, /* transpose = */ true, group_size, bits);
 
   y.eval();
-  const float* out = y.data<float>();
-  for (int i = 0; i < static_cast<int>(expected.size()); ++i) {
-    CHECK(std::abs(out[i] - expected[i]) < 2e-4f);
-  }
+  auto expected_arr = array(expected.data(), {M, N}, float32);
+  CHECK(max(abs(subtract(y, expected_arr))).item<float>() < 2e-4f);
 }
 
 template <typename T>
@@ -492,7 +510,17 @@ TEST_CASE("test fast quantized matmul token float32") {
   check_quantized_matmul_token_float32(8, 1);
   check_quantized_matmul_token_float32(4, 4);
   check_quantized_matmul_token_float32(8, 4);
-  check_quantized_matmul_8bit_high_values();
+  check_quantized_matmul_8bit_high_values(false);
+}
+
+TEST_CASE("test fast quantized matmul token float32 with int8 activations") {
+  if (!cpu::quantized_int8_available()) {
+    MESSAGE("no int8 path in this build");
+    return;
+  }
+  cpu::set_quantized_int8(true);
+  check_quantized_matmul_8bit_high_values(true);
+  cpu::set_quantized_int8(false);
 }
 
 TEST_CASE("test fast quantized matmul token float16") {
@@ -501,6 +529,11 @@ TEST_CASE("test fast quantized matmul token float16") {
 }
 
 TEST_CASE("test fast quantized matmul token bfloat16") {
+  if (!cpu::quantized_float32_accumulation()) {
+    MESSAGE(
+        "this build sums bf16 quantized matmuls in bf16; the bound is for float32 sums");
+    return;
+  }
   check_quantized_matmul_token_typed<bfloat16_t>(4, 1, 8e-3f);
   check_quantized_matmul_token_typed<bfloat16_t>(8, 1, 8e-3f);
 }

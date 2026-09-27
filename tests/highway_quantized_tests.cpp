@@ -142,3 +142,35 @@ TEST_CASE("highway qqmm mxfp8 rounds the block scale up") {
   auto out = through_qqmm(values, "mxfp8", 8);
   CHECK(out[0] == 576.0f);
 }
+
+#include "mlx/backend/cpu/precision.h"
+
+TEST_CASE("highway quantized matmul is exact unless int8 is switched on") {
+  // One activation row, affine 4-bit, group 64, K 256: every condition of the
+  // int8 path holds, so only the switch decides.
+  auto w = random::normal({64, 256}, float32, 0.0f, 1.0f, random::key(21));
+  auto x = random::normal({1, 256}, float32, 0.0f, 1.0f, random::key(22));
+  auto q = quantize(w, 64, 4);
+
+  REQUIRE_FALSE(cpu::quantized_int8());
+  auto exact = quantized_matmul(x, q[0], q[1], q[2], true, 64, 4);
+  CHECK(within_quantized_bound(exact, x, q, 64, 4, 256 + 2));
+
+  cpu::set_quantized_int8(true);
+  auto rounded = quantized_matmul(x, q[0], q[1], q[2], true, 64, 4);
+  // Rounding activations to int8 costs about 1/254 per element: far outside
+  // the fp32 bound. If this passes, the int8 path did not run.
+  CHECK_FALSE(within_quantized_bound(rounded, x, q, 64, 4, 256 + 2));
+  cpu::set_quantized_int8(false);
+}
+
+TEST_CASE("highway int8 switch parses its variable") {
+  // As env::get_var reads MLX's variables: an integer, and nonzero is on.
+  CHECK(cpu::detail::parse_quantized_int8("1"));
+  CHECK(cpu::detail::parse_quantized_int8("2"));
+  CHECK_FALSE(cpu::detail::parse_quantized_int8(nullptr));
+  CHECK_FALSE(cpu::detail::parse_quantized_int8("0"));
+  CHECK_FALSE(cpu::detail::parse_quantized_int8(""));
+  CHECK_FALSE(cpu::detail::parse_quantized_int8("yes"));
+  CHECK(cpu::quantized_int8_available());
+}
