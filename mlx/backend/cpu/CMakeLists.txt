@@ -8,9 +8,9 @@ endif()
 
 set(MLX_HIGHWAY_INCLUDE_DIR "")
 
-if(MLX_ENABLE_X86_SIMD)
+if(MLX_USE_HIGHWAY)
   if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
-    message(FATAL_ERROR "MLX_ENABLE_X86_SIMD requires an x86 target")
+    message(FATAL_ERROR "MLX_USE_HIGHWAY requires an x86 target")
   endif()
 
   set(HWY_ENABLE_CONTRIB
@@ -42,7 +42,7 @@ if(MLX_ENABLE_X86_SIMD)
     set(MLX_HIGHWAY_INCLUDE_DIR ${highway_SOURCE_DIR})
   endif()
   if(NOT TARGET hwy)
-    message(FATAL_ERROR "MLX_ENABLE_X86_SIMD requires Highway target hwy")
+    message(FATAL_ERROR "MLX_USE_HIGHWAY requires Highway target hwy")
   endif()
   if(NOT TARGET hwy::hwy)
     add_library(hwy::hwy ALIAS hwy)
@@ -139,7 +139,7 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/eval.cpp
           ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 
-if(MLX_ENABLE_X86_SIMD)
+if(MLX_USE_HIGHWAY)
   # quantized.cpp's Highway counterpart (quantized.cpp compiles to nothing
   # here).
   target_sources(
