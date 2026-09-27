@@ -770,6 +770,12 @@ void ScaledDotProductAttention::eval_cpu(
         "[ScaledDotProductAttention::eval_cpu] logsumexp output not supported "
         "on CPU. This should have been caught by use_fallback.");
   }
+  if (inputs[0].shape(-1) != inputs[2].shape(-1) || inputs[0].shape(-1) > 256) {
+    throw std::invalid_argument(
+        "[ScaledDotProductAttention::eval_cpu] The CPU kernel needs one head "
+        "dimension of at most 256 for queries, keys and values. This should "
+        "have been caught by use_fallback.");
+  }
 
   auto& q_in = inputs[0]; // (B, n_q_heads, M, head_dim)
   auto& k_in = inputs[1]; // (B, n_kv_heads, S, head_dim)
