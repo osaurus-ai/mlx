@@ -2,6 +2,8 @@
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/threading/openblas/thread_pool.h"
+#include "mlx/backend/cpu/threading/common.h"
+#include "mlx/backend/cpu/threading/config.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -64,78 +66,41 @@ static void set_blas_threads(int n) {
     blas_set_threads(n);
 }
 #else
+static void (*blas_set_threads)(int) = nullptr;
+static void init_blas_funcs() {}
 static void set_blas_threads(int n) {
   (void)n;
 }
 #endif
 
-// Physical core detection -- AVX2/FMA workloads get no benefit from SMT
-// (hyperthreads share the same SIMD execution units, L1/L2 cache, and memory
-// bandwidth). Using physical core count avoids over-subscription and reduces
-// atomic/mutex contention in the thread pool. Benchmarked: 16 physical cores
-// is +5-7% faster than logical core count for quantized LLM inference.
-#ifdef _WIN32
-// Windows: <windows.h> already included above for OpenBLAS DLL resolution.
-static int get_physical_cores() {
-  DWORD len = 0;
-  GetLogicalProcessorInformation(nullptr, &len);
-  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-    return 0;
-  std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> buf(
-      len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
-  if (!GetLogicalProcessorInformation(buf.data(), &len))
-    return 0;
-  int cores = 0;
-  for (auto& info : buf) {
-    if (info.Relationship == RelationProcessorCore)
-      cores++;
-  }
-  return cores;
+static std::atomic<bool>& openblas_pinned_flag() {
+  static std::atomic<bool> flag{false};
+  return flag;
 }
-#elif defined(__linux__)
-#include <fstream>
-#include <set>
-#include <string>
-static int get_physical_cores() {
-  // Count unique (physical_package_id, core_id) pairs across all online CPUs.
-  // This handles multi-socket systems correctly.
-  std::set<std::pair<int, int>> cores;
-  for (int i = 0; i < 4096; i++) {
-    std::string base =
-        "/sys/devices/system/cpu/cpu" + std::to_string(i) + "/topology/";
-    std::ifstream cf(base + "core_id");
-    if (!cf)
-      break;
-    int core_id, pkg_id = 0;
-    cf >> core_id;
-    std::ifstream pf(base + "physical_package_id");
-    if (pf)
-      pf >> pkg_id;
-    cores.insert({pkg_id, core_id});
-  }
-  return static_cast<int>(cores.size());
-}
-#else
-static int get_physical_cores() {
-  return 0; // Unknown platform -- caller falls back to hardware_concurrency()
-}
-#endif
 
 namespace mlx::core::cpu {
 
 namespace {
 int get_default_threads() {
-  if (const char* e = std::getenv("MLX_CPU_THREADS")) {
-    int n = std::atoi(e);
-    if (n > 0)
-      return n;
-  }
-  int physical = get_physical_cores();
-  if (physical > 0)
-    return physical;
-  return std::max(1, (int)std::thread::hardware_concurrency());
+  return thread_config().threads;
 }
+
+// Set while this thread runs a slot of some parallel_for.
+thread_local bool in_parallel_for = false;
 } // namespace
+
+void CPUThreadPool::run_slot(int slot, int nth) {
+  in_parallel_for = true;
+  try {
+    (*task_ptr_)(slot, nth);
+  } catch (...) {
+    std::lock_guard<std::mutex> lk(error_mtx_);
+    if (!first_error_) {
+      first_error_ = std::current_exception();
+    }
+  }
+  in_parallel_for = false;
+}
 
 CPUThreadPool::CPUThreadPool()
     : max_threads_(std::min(get_default_threads(), MAX_WORKERS + 1)) {
@@ -153,14 +118,14 @@ CPUThreadPool::CPUThreadPool()
   while (ready_.load(std::memory_order_acquire) < n_workers) {
     MLX_SPIN_PAUSE();
   }
-  // Pin OpenBLAS to single-threaded unless user explicitly overrides via env
-  // var. This prevents over-subscription (our N threads + OpenBLAS's N threads
-  // competing for N cores). BLAS ops are still fully parallel because
-  // cblas.cpp calls cblas_sgemm from within parallel_for workers -- each worker
-  // runs single-threaded BLAS on its row slice, achieving full core
-  // utilization without internal BLAS threading.
-  if (!std::getenv("OPENBLAS_NUM_THREADS")) {
+  // Look OpenBLAS up at any pool size, so that openblas_present() can answer.
+  init_blas_funcs();
+  // Pin OpenBLAS to one thread whenever this pool runs more than one: cblas.cpp
+  // splits every large SGEMM across the pool, and a second level of threads
+  // would oversubscribe the cores. MLX_CPU_THREADS is the one setting.
+  if (max_threads_ > 1) {
     set_blas_threads(1);
+    openblas_pinned_flag().store(blas_set_threads != nullptr);
   }
 }
 
@@ -224,7 +189,7 @@ void CPUThreadPool::worker_loop(int worker_id) {
         if (nth > 0 && started_.load(std::memory_order_relaxed) < nth) {
           int slot = started_.fetch_add(1, std::memory_order_acq_rel);
           if (slot < nth) {
-            (*task_ptr_)(slot, nth);
+            run_slot(slot, nth);
             done_.fetch_add(1, std::memory_order_acq_rel);
           }
         }
@@ -258,7 +223,7 @@ void CPUThreadPool::worker_loop(int worker_id) {
       int slot = started_.fetch_add(1, std::memory_order_acq_rel);
       if (slot >= nth)
         continue;
-      (*task_ptr_)(slot, nth);
+      run_slot(slot, nth);
       done_.fetch_add(1, std::memory_order_acq_rel);
     }
   }
@@ -273,12 +238,23 @@ void CPUThreadPool::parallel_for(
     return;
   }
 
+  // A task that calls parallel_for runs the inner range itself, every slot in
+  // turn: the workers are busy with the outer call, and dispatch_mtx_ is not
+  // recursive. Callers size per-slot state by n_threads, so each slot runs.
+  if (in_parallel_for) {
+    for (int slot = 0; slot < n_threads; ++slot) {
+      f(slot, n_threads);
+    }
+    return;
+  }
+
   // Serialize concurrent parallel_for calls from different CPU streams.
   // All task state (task_ptr_, started_, done_, etc.) is shared, so
   // concurrent calls would corrupt each other. The second caller blocks
   // until the first completes -- this is correct because the workers are
   // shared and can only process one task at a time anyway.
   std::lock_guard<std::mutex> dispatch_lk(dispatch_mtx_);
+  first_error_ = nullptr;
 
   int needed_workers = n_threads - 1;
   int n_workers = static_cast<int>(workers_.size());
@@ -333,7 +309,7 @@ void CPUThreadPool::parallel_for(
   }
 
   // Main thread executes slot 0
-  (*task_ptr_)(0, n_threads);
+  run_slot(0, n_threads);
   done_.fetch_add(1, std::memory_order_acq_rel);
 
   // Wait for workers -- spin then yield
@@ -350,6 +326,12 @@ void CPUThreadPool::parallel_for(
   task_gen_.store(0, std::memory_order_release);
   task_n_threads_.store(0, std::memory_order_release);
   task_ptr_ = nullptr;
+
+  if (first_error_) {
+    std::exception_ptr error = first_error_;
+    first_error_ = nullptr;
+    std::rethrow_exception(error);
+  }
 }
 
 int CPUThreadPool::max_threads() const {
@@ -358,6 +340,18 @@ int CPUThreadPool::max_threads() const {
 
 std::unique_ptr<ThreadPoolBackend> create_thread_pool_backend() {
   return std::make_unique<CPUThreadPool>();
+}
+
+bool openblas_present() {
+  // The pool's constructor runs init_blas_funcs, whose one-time guard is not
+  // synchronised: let it happen there, once.
+  ThreadPool::instance();
+  return blas_set_threads != nullptr;
+}
+
+bool openblas_pinned() {
+  ThreadPool::instance(); // the pool pins at construction
+  return openblas_pinned_flag().load();
 }
 
 } // namespace mlx::core::cpu
