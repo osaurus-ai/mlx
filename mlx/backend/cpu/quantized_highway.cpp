@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 // Normally this file is compiled directly and Highway emits its runtime
 // dispatch targets. Native MSVC builds compile this file once per target with
@@ -1660,3 +1661,4 @@ void fp_qmm_t_highway(
 
 } // namespace mlx::core
 #endif // HWY_ONCE
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)

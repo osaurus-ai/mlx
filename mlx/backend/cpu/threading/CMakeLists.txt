@@ -1,21 +1,4 @@
-# Threading backend selection
-#
-# Uses platform-aligned thread pools: - macOS: Grand Central Dispatch (GCD) -
-# Linux/Windows: persistent threading with optional OpenBLAS coordination
-
-set(THREADING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/common.cpp)
-
-# Select platform-specific implementation
-if(APPLE)
-  message(STATUS "Threading: Using Accelerate/GCD for macOS")
-  list(APPEND THREADING_SOURCES
-       ${CMAKE_CURRENT_SOURCE_DIR}/accelerate/thread_pool.mm)
-  target_sources(mlx PRIVATE ${THREADING_SOURCES})
-  target_compile_definitions(mlx PRIVATE MLX_THREADING_ACCELERATE)
-else()
-  message(STATUS "Threading: Using persistent CPU threading")
-  list(APPEND THREADING_SOURCES
-       ${CMAKE_CURRENT_SOURCE_DIR}/openblas/thread_pool.cpp)
-  target_sources(mlx PRIVATE ${THREADING_SOURCES})
-  target_compile_definitions(mlx PRIVATE MLX_THREADING_OPENBLAS)
-endif()
+# The CPU thread pool, used only by builds with Highway kernels. The parent adds
+# this directory inside its MLX_USE_HIGHWAY block.
+target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common.cpp
+                           ${CMAKE_CURRENT_SOURCE_DIR}/openblas/thread_pool.cpp)

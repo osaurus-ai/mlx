@@ -41,8 +41,12 @@ target_sources(
           utils_tests.cpp
           vmap_tests.cpp
           linalg_tests.cpp
-          thread_pool_tests.cpp
           ${METAL_TEST_SOURCES})
+
+if(MLX_ENABLE_X86_SIMD)
+  # The CPU thread pool exists only in builds with Highway kernels.
+  target_sources(tests PRIVATE thread_pool_tests.cpp)
+endif()
 
 target_link_libraries(tests PRIVATE mlx doctest)
 target_compile_options(tests PRIVATE ${SANITIZER_COMPILE_FLAGS})

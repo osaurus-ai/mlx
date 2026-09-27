@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/threading/common.h"
 
@@ -28,3 +29,4 @@ int ThreadPool::max_threads() const {
 }
 
 } // namespace mlx::core::cpu
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)
