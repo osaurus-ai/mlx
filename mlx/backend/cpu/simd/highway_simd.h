@@ -129,6 +129,32 @@ LaneTypeT<T>* lane_ptr(T* ptr) {
   return reinterpret_cast<LaneTypeT<T>*>(ptr);
 }
 
+// Highway emulates float16 -> float32 where a target has no conversion
+// instruction (x86 before AVX2, EMU128, SCALAR), and reads exponent 31 as a
+// finite exponent there: inf became 65536. Lanes with exponent 31 take
+// float32's inf, or a quiet NaN with the same payload, as the instructions
+// give. highway_utils.h has the same function for the dispatched kernels.
+template <class DF>
+hn::Vec<DF> promote_f16(DF df, hn::Vec<hn::Rebind<hwy::float16_t, DF>> v) {
+  const hn::RebindToUnsigned<DF> du;
+  const hn::Rebind<uint16_t, DF> du16;
+  const auto bits = hn::PromoteTo(du, hn::BitCast(du16, v));
+  const auto mantissa = hn::And(bits, hn::Set(du, 0x3FFu));
+  const auto special =
+      hn::Eq(hn::And(bits, hn::Set(du, 0x7C00u)), hn::Set(du, 0x7C00u));
+  const auto quiet = hn::IfThenElseZero(
+      hn::Ne(mantissa, hn::Zero(du)), hn::Set(du, 0x400000u));
+  const auto inf_nan = hn::Or(
+      hn::Or(
+          hn::ShiftLeft<16>(hn::And(bits, hn::Set(du, 0x8000u))),
+          hn::Set(du, 0x7F800000u)),
+      hn::Or(hn::ShiftLeft<13>(mantissa), quiet));
+  return hn::IfThenElse(
+      hn::RebindMask(df, special),
+      hn::BitCast(df, inf_nan),
+      hn::PromoteTo(df, v));
+}
+
 template <typename T, int N, typename Fn>
 Simd<T, N> map_unary(Simd<T, N> x, Fn fn);
 
@@ -235,7 +261,11 @@ struct Simd {
       value = other.value;
     } else if constexpr (
         std::is_same_v<T, float> && highway_detail::is_half_v<U>) {
-      value = hn::PromoteTo(D(), other.value);
+      if constexpr (std::is_same_v<U, float16_t>) {
+        value = highway_detail::promote_f16(D(), other.value);
+      } else {
+        value = hn::PromoteTo(D(), other.value);
+      }
     } else if constexpr (
         highway_detail::is_half_v<T> && std::is_same_v<U, float>) {
       value = hn::DemoteTo(D(), other.value);
