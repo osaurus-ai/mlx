@@ -2238,6 +2238,59 @@ void fp_bs_qmm_dispatch(
   }
 }
 
+uint8_t to_fp8_e8m0(float x) {
+  if (!std::isfinite(x)) {
+    return 0xFF;
+  }
+  if (x < 0.0f) {
+    return 0x00;
+  }
+  float le = std::log2(x);
+  int n = int(std::round(le));
+
+  n = n < -127 ? -127 : n;
+  n = n > 127 ? 127 : n;
+  return static_cast<uint8_t>(n + 127);
+}
+
+// Smallest E8M0 >= x, so a block's largest elements do not saturate.
+uint8_t to_fp8_e8m0_round_up(float x) {
+  uint8_t bits = to_fp8_e8m0(x);
+  if (bits < 0xFE && dequantize_scale<float, 32>(bits) < x) {
+    bits += 1;
+  }
+  return bits;
+}
+
+uint8_t to_fp4_e2m1(float x) {
+  if (std::isnan(x)) {
+    return 0x7;
+  }
+
+  const uint8_t sign_bit = (std::signbit(x)) ? 0x8 : 0x0;
+  x = std::abs(x);
+
+  uint8_t bits;
+  if (x > 5.0f) {
+    bits = 0x7;
+  } else if (x >= 3.5f) {
+    bits = 0x6;
+  } else if (x > 2.5f) {
+    bits = 0x5;
+  } else if (x >= 1.75f) {
+    bits = 0x4;
+  } else if (x > 1.25f) {
+    bits = 0x3;
+  } else if (x >= 0.75f) {
+    bits = 0x2;
+  } else if (x > 0.25f) {
+    bits = 0x1;
+  } else {
+    bits = 0x0;
+  }
+  return bits | sign_bit;
+}
+
 // Quantize then dequantize x in-place, simulating quantization noise.
 // For nvfp4 (group_size=16, bits=4): scale via fp8_e4m3, values via FP4 LUT.
 // For mxfp8 (group_size=32, bits=8): scale via fp8_e8m0 (exponent-only), values
@@ -2274,13 +2327,11 @@ void quantize_dequantize_fp(
       uint8_t scale_fp8 = to_fp8(raw_scale * scale_encode);
       scale = from_fp8(scale_fp8) / scale_encode;
     } else {
-      // mxfp8: fp8_e8m0 scale (pure exponent, 2^round(log2(x)))
-      if (raw_scale == 0.0f) {
-        scale = 1.0f; // 2^0 when all values are zero
-      } else {
-        float exp = std::round(std::log2(raw_scale));
-        scale = std::pow(2.0f, exp);
-      }
+      // The smallest E8M0 scale not below raw_scale, as upstream (#4353), so a
+      // block's largest elements do not saturate.
+      scale = raw_scale == 0.0f
+          ? 1.0f
+          : dequantize_scale<float, 32>(to_fp8_e8m0_round_up(raw_scale));
     }
 
     if (scale == 0.0f) {
@@ -2296,16 +2347,8 @@ void quantize_dequantize_fp(
       // Round to nearest FP4 LUT value, then multiply by scale
       for (int i = 0; i < group_size; i++) {
         float normalized = static_cast<float>(gp[i]) * inv_scale;
-        int best_idx = 0;
-        float best_dist = std::abs(normalized - FP4_LUT[0]);
-        for (int j = 1; j < 16; j++) {
-          float dist = std::abs(normalized - FP4_LUT[j]);
-          if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = j;
-          }
-        }
-        gp[i] = static_cast<T>(FP4_LUT[best_idx] * scale);
+        // Round half to even on the e2m1 grid, as upstream's to_fp4_e2m1.
+        gp[i] = static_cast<T>(FP4_LUT[to_fp4_e2m1(normalized)] * scale);
       }
     } else {
       // Round-trip through fp8_e4m3
