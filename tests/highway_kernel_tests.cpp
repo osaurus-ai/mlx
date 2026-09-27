@@ -236,3 +236,43 @@ TEST_CASE("highway float16 keeps inf and nan") {
     CHECK(std::isnan(half_at(root, i)));
   }
 }
+
+#include "mlx/backend/cpu/highway_info.h"
+#include "mlx/backend/cpu/threading/common.h"
+
+TEST_CASE("highway fp32 matmul splits short inputs by columns, exactly") {
+  namespace hi = mlx::core::cpu::highway_info;
+  const int k = 256;
+  // M * N * K >= 65536 for every m below. 1003 columns do not divide evenly
+  // among 8 threads, so the last slice is short.
+  const int n = 1003;
+  for (int m : {1, 3, 8, 15}) {
+    for (bool a_t : {false, true}) {
+      for (bool b_t : {false, true}) {
+        CAPTURE(m);
+        CAPTURE(a_t);
+        CAPTURE(b_t);
+        auto a = random::normal(
+            a_t ? Shape{k, m} : Shape{m, k},
+            float32,
+            0.0f,
+            1.0f,
+            random::key(m));
+        auto b = random::normal(
+            b_t ? Shape{n, k} : Shape{k, n},
+            float32,
+            0.0f,
+            1.0f,
+            random::key(100 + m));
+        auto lhs = a_t ? transpose(a) : a;
+        auto rhs = b_t ? transpose(b) : b;
+        hi::reset_stats();
+        auto y = matmul(lhs, rhs);
+        CHECK(within_sum_bound(y, lhs, rhs, k + 2));
+        if (cpu::ThreadPool::instance().max_threads() > 1) {
+          CHECK(hi::sgemm_column_splits() > 0);
+        }
+      }
+    }
+  }
+}
