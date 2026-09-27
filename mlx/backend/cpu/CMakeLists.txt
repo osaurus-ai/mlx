@@ -7,9 +7,6 @@ else()
 endif()
 
 set(MLX_HIGHWAY_INCLUDE_DIR "")
-set(PREAMBLE_SIMD_FLAGS "")
-set(PREAMBLE_HWY_AVX2_FLAGS "")
-set(PREAMBLE_HWY_AVX3_FLAGS "")
 
 if(MLX_ENABLE_X86_SIMD)
   if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
@@ -70,41 +67,7 @@ if(MLX_ENABLE_X86_SIMD)
                                          ${MLX_HIGHWAY_TARGET_DEFINITIONS})
   target_include_directories(mlx PRIVATE ${MLX_HIGHWAY_INCLUDE_DIR})
   target_link_libraries(mlx PRIVATE hwy::hwy)
-  if(MSVC)
-    target_compile_definitions(mlx PRIVATE MLX_HAVE_JIT_PREAMBLE_HWY_AVX2)
-    set(PREAMBLE_HWY_AVX2_FLAGS
-        "/DMLX_USE_HIGHWAY_JIT_SIMD /DHWY_COMPILE_ONLY_STATIC /DHWY_DISABLE_PCLMUL_AES /arch:AVX2"
-    )
-  elseif(NOT WIN32)
-    target_compile_definitions(mlx PRIVATE MLX_HAVE_JIT_PREAMBLE_HWY_AVX2)
-    # Highway's AVX2 target includes BMI2, FMA, and F16C in its feature group.
-    set(PREAMBLE_HWY_AVX2_FLAGS
-        "-DMLX_USE_HIGHWAY_JIT_SIMD -DHWY_COMPILE_ONLY_STATIC -DHWY_DISABLE_PCLMUL_AES -mavx2 -mbmi2 -mfma -mf16c"
-    )
-    target_compile_definitions(mlx PRIVATE MLX_HAVE_JIT_PREAMBLE_HWY_AVX3)
-    # Highway's HWY_AVX3 target maps to AVX-512F/BW/CD/DQ/VL plus AVX2-family
-    # prerequisites; use explicit compiler ISA flags for the generated JIT
-    # preamble.
-    set(PREAMBLE_HWY_AVX3_FLAGS
-        "-DMLX_USE_HIGHWAY_JIT_SIMD -DHWY_COMPILE_ONLY_STATIC -DHWY_DISABLE_PCLMUL_AES -mavx512f -mavx512vl -mavx512bw -mavx512dq -mavx512cd -mbmi2 -mfma -mf16c"
-    )
-  endif()
-  if(WIN32 AND NOT MSVC)
-    message(
-      STATUS
-        "x86 SIMD: Highway runtime dispatch enabled, Windows non-MSVC CPU JIT disabled"
-    )
-  elseif(WIN32)
-    message(
-      STATUS
-        "x86 SIMD: Highway runtime dispatch enabled, Windows CPU JIT capped to HWY_AVX2"
-    )
-  else()
-    message(
-      STATUS
-        "x86 SIMD: Highway runtime dispatch enabled, toolchain-selected targets"
-    )
-  endif()
+  message(STATUS "Highway: runtime-dispatched CPU kernels enabled")
 endif()
 
 set(COMPILE_DEPS
@@ -119,10 +82,6 @@ set(COMPILE_DEPS
     unary_ops.h
     binary_ops.h)
 
-if(MLX_ENABLE_X86_SIMD)
-  list(APPEND COMPILE_DEPS highway_utils.h simd/highway_simd.h)
-endif()
-
 if(WIN32)
   set(SHELL_EXT ps1)
   set(SHELL_CMD powershell -ExecutionPolicy Bypass -File)
@@ -131,50 +90,17 @@ else()
   set(SHELL_CMD bash)
 endif()
 
-set(PREAMBLE_OUTPUTS ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp
+  OUTPUT compiled_preamble.cpp
   COMMAND
     ${SHELL_CMD} ${CMAKE_CURRENT_SOURCE_DIR}/make_compiled_preamble.${SHELL_EXT}
     ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp ${COMPILER}
     ${PROJECT_SOURCE_DIR} ${CLANG} ${CMAKE_SYSTEM_PROCESSOR}
-    "${PREAMBLE_SIMD_FLAGS}" "" get_prebuilt_preamble
+    "${PREAMBLE_SIMD_FLAGS}"
   DEPENDS make_compiled_preamble.${SHELL_EXT} compiled_preamble.h
           ${COMPILE_DEPS})
 
-if(PREAMBLE_HWY_AVX2_FLAGS)
-  list(APPEND PREAMBLE_OUTPUTS
-       ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx2.cpp)
-  add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx2.cpp
-    COMMAND
-      ${SHELL_CMD}
-      ${CMAKE_CURRENT_SOURCE_DIR}/make_compiled_preamble.${SHELL_EXT}
-      ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx2.cpp ${COMPILER}
-      ${PROJECT_SOURCE_DIR} ${CLANG} ${CMAKE_SYSTEM_PROCESSOR}
-      "${PREAMBLE_HWY_AVX2_FLAGS}" "${MLX_HIGHWAY_INCLUDE_DIR}"
-      get_prebuilt_preamble_avx2
-    DEPENDS make_compiled_preamble.${SHELL_EXT} compiled_preamble.h
-            ${COMPILE_DEPS})
-endif()
-
-if(PREAMBLE_HWY_AVX3_FLAGS)
-  list(APPEND PREAMBLE_OUTPUTS
-       ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx3.cpp)
-  add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx3.cpp
-    COMMAND
-      ${SHELL_CMD}
-      ${CMAKE_CURRENT_SOURCE_DIR}/make_compiled_preamble.${SHELL_EXT}
-      ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble_avx3.cpp ${COMPILER}
-      ${PROJECT_SOURCE_DIR} ${CLANG} ${CMAKE_SYSTEM_PROCESSOR}
-      "${PREAMBLE_HWY_AVX3_FLAGS}" "${MLX_HIGHWAY_INCLUDE_DIR}"
-      get_prebuilt_preamble_avx3
-    DEPENDS make_compiled_preamble.${SHELL_EXT} compiled_preamble.h
-            ${COMPILE_DEPS})
-endif()
-
-add_custom_target(cpu_compiled_preamble DEPENDS ${PREAMBLE_OUTPUTS})
+add_custom_target(cpu_compiled_preamble DEPENDS compiled_preamble.cpp)
 
 add_dependencies(mlx cpu_compiled_preamble)
 
@@ -214,7 +140,7 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/rope.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/sdpa.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/eval.cpp
-          ${PREAMBLE_OUTPUTS})
+          ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 
 if(MLX_ENABLE_X86_SIMD)
   if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
