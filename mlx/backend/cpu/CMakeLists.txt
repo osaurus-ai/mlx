@@ -143,6 +143,11 @@ target_sources(
           ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 
 if(MLX_ENABLE_X86_SIMD)
+  # quantized.cpp's Highway counterpart (quantized.cpp compiles to nothing
+  # here).
+  target_sources(
+    mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized_highway_backend.cpp)
+
   if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(MLX_HIGHWAY_MSVC_DISPATCH_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/norms_highway_dispatch.cpp
