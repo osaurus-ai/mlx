@@ -43,7 +43,7 @@ target_sources(
           linalg_tests.cpp
           ${METAL_TEST_SOURCES})
 
-if(MLX_ENABLE_X86_SIMD)
+if(MLX_USE_HIGHWAY)
   # The CPU thread pool exists only in builds with Highway kernels.
   target_sources(tests PRIVATE thread_pool_tests.cpp)
 endif()

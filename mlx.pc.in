@@ -11,7 +11,7 @@
 
 @PACKAGE_INIT@
 
-if (@MLX_BUILD_CPU@ AND @MLX_ENABLE_X86_SIMD@)
+if (@MLX_BUILD_CPU@ AND @MLX_USE_HIGHWAY@)
     include(CMakeFindDependencyMacro)
     find_dependency(hwy CONFIG PATHS "${PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
 endif()
