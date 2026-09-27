@@ -39,6 +39,14 @@ struct Simd<T, 1> {
   Simd(Simd<U, 1> v) : value(v.value) {}
   template <typename U>
   Simd(U v) : value(v) {}
+
+  T operator[](int) const {
+    return value;
+  }
+
+  T& operator[](int) {
+    return value;
+  }
 };
 
 namespace detail {
