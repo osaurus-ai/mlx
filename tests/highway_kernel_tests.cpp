@@ -159,3 +159,15 @@ TEST_CASE("highway integer power with a negative exponent") {
     CHECK(slice(y, {i}, {i + 1}).item<int>() == expected[i]);
   }
 }
+
+TEST_CASE("highway bf16 sum does not depend on the thread count") {
+  // 2^20 + 3 ones, then -2^20: the sum is exactly 3. Every thread's partial is
+  // exact in float; rounded to bf16 before they are combined, the total is
+  // never 3 for any pool of 2 to 64 threads (0 with 2, 4, 8, 16 or 32, 4096
+  // with 6, -8192 with 12). A plain count of ones is no test: at many pool
+  // sizes each partial happens to be exact in bf16. item<float> on a bf16 array
+  // would read four bytes of a two-byte buffer, so widen first.
+  auto x = concatenate(
+      {ones({(1 << 20) + 3}, bfloat16), full({1}, -1048576.0f, bfloat16)});
+  CHECK(astype(sum(x), float32).item<float>() == 3.0f);
+}

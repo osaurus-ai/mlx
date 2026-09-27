@@ -114,51 +114,53 @@ struct AccumType<float16_t> {
 };
 
 #endif // MLX_USE_HIGHWAY_KERNELS
-template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-  constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
-  simd::Simd<U, N> accumulator_v(init);
-#else
-  using A = typename AccumType<U>::type;
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+template <typename T, typename A, typename Op>
+A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<A>);
-
-  simd::Simd<A, N> accumulator_v(static_cast<A>(init));
-#endif // MLX_USE_HIGHWAY_KERNELS
+  simd::Simd<A, N> accumulator_v(init);
   while (size >= N) {
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-    accumulator_v = op(accumulator_v, simd::Simd<U, N>(simd::load<T, N>(x)));
-#else
     accumulator_v = op(accumulator_v, simd::Simd<A, N>(simd::load<T, N>(x)));
-#endif // MLX_USE_HIGHWAY_KERNELS
     x += N;
     size -= N;
   }
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-  *accumulator = op(*accumulator, op(accumulator_v));
-#else
-
-  A simd_sum = op(accumulator_v); // horizontal reduction
-  A scalar_acc = op(static_cast<A>(*accumulator), simd_sum);
-
-#endif // MLX_USE_HIGHWAY_KERNELS
+  A result = op(acc, op(accumulator_v));
   while (size-- > 0) {
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-    *accumulator = op(*accumulator, *x);
-#else
-    scalar_acc = op(scalar_acc, static_cast<A>(*x));
-#endif // MLX_USE_HIGHWAY_KERNELS
+    result = op(result, static_cast<A>(*x));
     x++;
   }
-#if defined(MLX_USE_HIGHWAY_KERNELS)
-  *accumulator = static_cast<U>(scalar_acc);
-#endif // MLX_USE_HIGHWAY_KERNELS
+  return result;
 }
+
+template <typename T, typename U, typename Op>
+void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+  using A = typename AccumType<U>::type;
+  *accumulator = static_cast<U>(contiguous_accumulate(
+      x, size, op, static_cast<A>(*accumulator), static_cast<A>(init)));
+}
+#else
+template <typename T, typename U, typename Op>
+void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+  constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
+  simd::Simd<U, N> accumulator_v(init);
+  while (size >= N) {
+    accumulator_v = op(accumulator_v, simd::Simd<U, N>(simd::load<T, N>(x)));
+    x += N;
+    size -= N;
+  }
+  *accumulator = op(*accumulator, op(accumulator_v));
+  while (size-- > 0) {
+    *accumulator = op(*accumulator, *x);
+    x++;
+  }
+}
+#endif // MLX_USE_HIGHWAY_KERNELS
 
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 // Parallel version for large reductions
 template <typename T, typename U, typename Op>
 U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
+  using A = typename AccumType<U>::type;
   auto& pool = cpu::ThreadPool::instance();
   int max_threads = pool.max_threads();
   int n_threads = cpu::effective_threads(size, max_threads);
@@ -170,9 +172,9 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
   }
 
   // Each thread computes a partial reduction. Keep each partial on its own
-  // cache line to avoid false sharing while preserving U's alignment/lifetime.
+  // cache line to avoid false sharing while preserving A's alignment/lifetime.
   struct alignas(64) Partial {
-    U value;
+    A value;
   };
   std::vector<Partial> partials(n_threads);
 
@@ -181,21 +183,25 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
     size_t start = chunk * tid;
     size_t end = std::min(start + chunk, size);
 
-    U* partial = &partials[tid].value;
-    *partial = init;
+    A* partial = &partials[tid].value;
+    *partial = static_cast<A>(init);
 
     if (start < end) {
-      contiguous_reduce(
-          x + start, partial, static_cast<int>(end - start), op, init);
+      *partial = contiguous_accumulate(
+          x + start,
+          static_cast<int>(end - start),
+          op,
+          static_cast<A>(init),
+          static_cast<A>(init));
     }
   });
 
   // Final reduction of partial results
-  U result = init;
+  A result = static_cast<A>(init);
   for (int i = 0; i < n_threads; ++i) {
     result = op(result, partials[i].value);
   }
-  return result;
+  return static_cast<U>(result);
 }
 
 #endif // MLX_USE_HIGHWAY_KERNELS
