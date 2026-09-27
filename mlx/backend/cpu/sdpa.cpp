@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include <cassert>
 #include <cmath>
@@ -1007,3 +1008,4 @@ void ScaledDotProductAttention::eval_cpu(
 }
 
 } // namespace mlx::core::fast
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)

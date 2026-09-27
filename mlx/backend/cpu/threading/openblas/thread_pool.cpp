@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/threading/openblas/thread_pool.h"
 
@@ -360,3 +361,4 @@ std::unique_ptr<ThreadPoolBackend> create_thread_pool_backend() {
 }
 
 } // namespace mlx::core::cpu
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)

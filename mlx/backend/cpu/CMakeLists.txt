@@ -153,6 +153,9 @@ if(MLX_ENABLE_X86_SIMD)
             ${CMAKE_CURRENT_SOURCE_DIR}/rope.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/sdpa.cpp)
 
+  # The thread pool the Highway kernels use.
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/threading)
+
   if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(MLX_HIGHWAY_MSVC_DISPATCH_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/norms_highway_dispatch.cpp
@@ -230,6 +233,3 @@ else()
   target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/compiled.cpp
                              ${CMAKE_CURRENT_SOURCE_DIR}/jit_compiler.cpp)
 endif()
-
-# Include threading backend (platform-specific implementation)
-add_subdirectory(threading)
