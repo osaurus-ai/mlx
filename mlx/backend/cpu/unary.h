@@ -1,11 +1,13 @@
-// Copyright © 2023-2026 Apple Inc.
+// Copyright © 2023 Apple Inc.
 
 #pragma once
 
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/simd/simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/dtype_utils.h"
 #include "mlx/utils.h"
 
@@ -19,6 +21,7 @@ void unary_op(const T* a, U* out, size_t shape, size_t stride) {
   }
 }
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 // Helper to process a contiguous chunk of unary op with SIMD
 template <typename T, typename U, typename Op>
 void unary_op_contiguous_chunk(const T* src, U* dst, size_t size) {
@@ -37,6 +40,7 @@ void unary_op_contiguous_chunk(const T* src, U* dst, size_t size) {
   }
 }
 
+#endif // MLX_USE_HIGHWAY_KERNELS
 template <typename T, typename U = T, typename Op>
 void unary_op(const array& a, array& out, Op) {
   const T* src = a.data<T>();
@@ -44,6 +48,14 @@ void unary_op(const array& a, array& out, Op) {
   auto ndim = a.ndim();
   if (a.flags().contiguous) {
     auto size = a.data_size();
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
+    while (size >= N) {
+      simd::store(dst, simd::Simd<U, N>(Op{}(simd::load<T, N>(src))));
+      size -= N;
+      src += N;
+      dst += N;
+#else
 
     // Check if parallelization is beneficial
     auto& pool = cpu::ThreadPool::instance();
@@ -63,14 +75,38 @@ void unary_op(const array& a, array& out, Op) {
     } else {
       // Single-threaded path
       unary_op_contiguous_chunk<T, U, Op>(src, dst, size);
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    while (size > 0) {
+      *dst = Op{}(*src);
+      size--;
+      dst++;
+      src++;
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
   } else {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    size_t shape = ndim > 0 ? a.shape().back() : 1;
+    size_t stride = ndim > 0 ? a.strides().back() : 1;
+#else
     size_t inner_shape = ndim > 0 ? a.shape().back() : 1;
     size_t inner_stride = ndim > 0 ? a.strides().back() : 1;
+#endif // MLX_USE_HIGHWAY_KERNELS
     if (ndim <= 1) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+      unary_op<T, U, Op>(src, dst, shape, stride);
+#else
       unary_op<T, U, Op>(src, dst, inner_shape, inner_stride);
+#endif // MLX_USE_HIGHWAY_KERNELS
       return;
     }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    auto it = ContiguousIterator(a.shape(), a.strides(), ndim - 1);
+    for (size_t elem = 0; elem < a.size(); elem += shape) {
+      unary_op<T, U, Op>(src + it.loc, dst + elem, shape, stride);
+      it.step();
+#else
 
     size_t num_iterations = a.size() / inner_shape;
 
@@ -108,6 +144,7 @@ void unary_op(const array& a, array& out, Op) {
         unary_op<T, U, Op>(src + it.loc, dst + elem, inner_shape, inner_stride);
         it.step();
       }
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
   }
 }

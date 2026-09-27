@@ -1,4 +1,4 @@
-// Copyright © 2023-2026 Apple Inc.
+// Copyright © 2023 Apple Inc.
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -10,7 +10,9 @@
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/slicing.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/dtype_utils.h"
 #include "mlx/primitives.h"
 
@@ -88,9 +90,29 @@ void gather(
   const T* src_ptr = src.data<T>();
   T* dst_ptr = out.data<T>();
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  std::vector<ContiguousIterator> its(inds.begin(), inds.end());
+  ContiguousIterator src_it;
+  if (!can_copy && src.ndim() > 0) {
+    src_it = ContiguousIterator(slice_sizes, src.strides(), src.ndim());
+  }
+#else
   auto& pool = cpu::ThreadPool::instance();
   int n_threads = cpu::effective_threads(out.size(), pool.max_threads());
+#endif // MLX_USE_HIGHWAY_KERNELS
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  size_t out_idx = 0;
+  for (int idx = 0; idx < ind_size; idx++) {
+    size_t src_idx = 0;
+    for (int ii = 0; ii < inds.size(); ++ii) {
+      auto ax = axes[ii];
+      auto idx_loc = its[ii].loc;
+      its[ii].step();
+      auto idx_val =
+          offset_neg_idx(inds[ii].data<IdxT>()[idx_loc], src.shape(ax));
+      src_idx += (idx_val * src.strides()[ax]);
+#else
   if (n_threads > 1 && ind_size >= static_cast<size_t>(n_threads)) {
     pool.parallel_for(n_threads, [&](int tid, int nth) {
       size_t chunk = (ind_size + nth - 1) / nth;
@@ -145,8 +167,21 @@ void gather(
     ContiguousIterator src_it;
     if (!can_copy && src.ndim() > 0) {
       src_it = ContiguousIterator(slice_sizes, src.strides(), src.ndim());
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    if (slice_size == 1) {
+      dst_ptr[out_idx++] = src_ptr[src_idx];
+    } else if (can_copy) {
+      std::copy(
+          src_ptr + src_idx, src_ptr + src_idx + slice_size, dst_ptr + out_idx);
+      out_idx += slice_size;
+    } else {
+      for (int jj = 0; jj < slice_size; jj++) {
+        dst_ptr[out_idx++] = src_ptr[src_idx + src_it.loc];
+        src_it.step();
+#else
     size_t out_idx = 0;
     for (size_t idx = 0; idx < ind_size; idx++) {
       size_t src_idx = 0;
@@ -157,7 +192,11 @@ void gather(
         auto idx_val =
             offset_neg_idx(inds[ii].data<IdxT>()[idx_loc], src.shape(ax));
         src_idx += (idx_val * src.strides()[ax]);
+#endif // MLX_USE_HIGHWAY_KERNELS
       }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+      src_it.reset();
+#else
 
       if (slice_size == 1) {
         dst_ptr[out_idx++] = src_ptr[src_idx];
@@ -174,6 +213,7 @@ void gather(
         }
         src_it.reset();
       }
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
   }
 }
@@ -253,8 +293,15 @@ void gather_axis(
     array& out,
     const int axis) {
   auto shape = remove_index(ind.shape(), axis);
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  ContiguousIterator ind_it(
+      shape, remove_index(ind.strides(), axis), src.ndim() - 1);
+  ContiguousIterator src_it(
+      shape, remove_index(src.strides(), axis), src.ndim() - 1);
+#else
   auto ind_strides_no_ax = remove_index(ind.strides(), axis);
   auto src_strides_no_ax = remove_index(src.strides(), axis);
+#endif // MLX_USE_HIGHWAY_KERNELS
 
   auto ind_ptr = ind.data<IdxT>();
   auto src_ptr = src.data<T>();
@@ -275,6 +322,15 @@ void gather_axis(
   }
 
   size_t stride_pre = size_post * ind_ax_size;
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  for (size_t i = 0; i < size_pre; i++) {
+    for (size_t k = 0; k < size_post; k++) {
+      for (int j = 0; j < ind_ax_size; ++j) {
+        auto ind_val = offset_neg_idx(
+            ind_ptr[ind_it.loc + j * ind_ax_stride], src_ax_size);
+        dst_ptr[k + j * dst_ax_stride] =
+            src_ptr[src_it.loc + ind_val * src_ax_stride];
+#else
   int ndim_minus_1 = src.ndim() - 1;
 
   auto& pool = cpu::ThreadPool::instance();
@@ -296,7 +352,12 @@ void gather_axis(
       for (size_t s = 0; s < advance; s++) {
         my_ind_it.step();
         my_src_it.step();
+#endif // MLX_USE_HIGHWAY_KERNELS
       }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+      ind_it.step();
+      src_it.step();
+#else
 
       T* my_dst = dst_ptr + start * stride_pre;
       for (size_t i = start; i < end; i++) {
@@ -331,7 +392,11 @@ void gather_axis(
         src_it.step();
       }
       dst += stride_pre;
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    dst_ptr += stride_pre;
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
