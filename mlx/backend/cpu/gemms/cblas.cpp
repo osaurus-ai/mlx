@@ -1,16 +1,20 @@
-// Copyright © 2025-2026 Apple Inc.
+// Copyright © 2025 Apple Inc.
 
 #include "mlx/backend/common/utils.h"
 #include "mlx/backend/cpu/gemm.h"
 #include "mlx/backend/cpu/lapack.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 
 namespace mlx::core {
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 // Minimum batches per thread before parallelizing batch matmul
 // Higher threshold than unary/binary ops because BLAS calls are heavier
 constexpr int MIN_BATCHES_PER_THREAD = 4;
 
+#endif // MLX_USE_HIGHWAY_KERNELS
 template <>
 void matmul<float>(
     const float* a,
@@ -33,6 +37,24 @@ void matmul<float>(
   size_t N = b_shape[ndim - 1];
   size_t K = a_shape[ndim - 1];
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  for (int i = 0; i < batch_size; ++i) {
+    cblas_sgemm(
+        CblasRowMajor,
+        a_transposed ? CblasTrans : CblasNoTrans, // transA
+        b_transposed ? CblasTrans : CblasNoTrans, // transB
+        M,
+        N,
+        K,
+        alpha,
+        a + elem_to_loc(M * K * i, a_shape, a_strides),
+        lda,
+        b + elem_to_loc(K * N * i, b_shape, b_strides),
+        ldb,
+        beta,
+        out + M * N * i,
+        ldc);
+#else
   // Check if parallelization over batches is beneficial
   auto& pool = cpu::ThreadPool::instance();
   int n_threads = std::min(
@@ -124,6 +146,7 @@ void matmul<float>(
             ldc);
       }
     }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
@@ -149,6 +172,24 @@ void matmul<double>(
   size_t N = b_shape[ndim - 1];
   size_t K = a_shape[ndim - 1];
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  for (int i = 0; i < batch_size; ++i) {
+    cblas_dgemm(
+        CblasRowMajor,
+        a_transposed ? CblasTrans : CblasNoTrans, // transA
+        b_transposed ? CblasTrans : CblasNoTrans, // transB
+        M,
+        N,
+        K,
+        alpha,
+        a + elem_to_loc(M * K * i, a_shape, a_strides),
+        lda,
+        b + elem_to_loc(K * N * i, b_shape, b_strides),
+        ldb,
+        beta,
+        out + M * N * i,
+        ldc);
+#else
   auto& pool = cpu::ThreadPool::instance();
   int n_threads = std::min(
       pool.max_threads(),
@@ -231,6 +272,7 @@ void matmul<double>(
             ldc);
       }
     }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
@@ -258,6 +300,24 @@ void matmul<complex64_t>(
   auto calpha = static_cast<complex64_t>(alpha);
   auto cbeta = static_cast<complex64_t>(beta);
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  for (int i = 0; i < batch_size; ++i) {
+    cblas_cgemm(
+        CblasRowMajor,
+        a_transposed ? CblasTrans : CblasNoTrans, // transA
+        b_transposed ? CblasTrans : CblasNoTrans, // transB
+        M,
+        N,
+        K,
+        &calpha,
+        a + elem_to_loc(M * K * i, a_shape, a_strides),
+        lda,
+        b + elem_to_loc(K * N * i, b_shape, b_strides),
+        ldb,
+        &cbeta,
+        out + M * N * i,
+        ldc);
+#else
   auto& pool = cpu::ThreadPool::instance();
   int n_threads = std::min(
       pool.max_threads(),
@@ -340,6 +400,7 @@ void matmul<complex64_t>(
             ldc);
       }
     }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 

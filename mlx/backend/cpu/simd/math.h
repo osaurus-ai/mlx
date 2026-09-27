@@ -1,10 +1,12 @@
-// Copyright © 2024-2026 Apple Inc.
+// Copyright © 2024 Apple Inc.
 
 #pragma once
 
 #include "mlx/backend/cpu/simd/type.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/types/complex.h"
 #include "mlx/types/half_types.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 
 namespace mlx::core::simd {
 
@@ -156,6 +158,14 @@ Simd<T, N> cos(Simd<T, N> x) {
 template <typename T, int N>
 Simd<T, N> erf(Simd<T, N> x) {
   // https://github.com/pytorch/pytorch/blob/abf28982a8cb43342e7669d859de9543fd804cc9/aten/src/ATen/cpu/vec/vec256/vec256_float.h#L175
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  Simd<float, N> v = x;
+  auto t = recip(fma(Simd<float, N>(0.3275911f), abs(v), 1.0f));
+  auto r = fma(Simd<float, N>(1.061405429f), t, -1.453152027f);
+  r = fma(r, t, 1.421413741f);
+  r = fma(r, t, -0.284496736f);
+  r = fma(r, t, 0.254829592f);
+#else
   // Use explicit ComputeT so half-type Simd (float16/bfloat16) promotes to
   // float32 and bare float literals don't cause template deduction ambiguity
   // in fma(). For float/double T, ComputeT == T so behavior is unchanged.
@@ -171,12 +181,19 @@ Simd<T, N> erf(Simd<T, N> x) {
   r = fma(r, t, ComputeT(1.421413741f));
   r = fma(r, t, ComputeT(-0.284496736f));
   r = fma(r, t, ComputeT(0.254829592f));
+#endif // MLX_USE_HIGHWAY_KERNELS
   auto e = -exp(-v * v);
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  auto result = Simd<T, N>(fma(e * t, r, 1.0f));
+  return select(x > 0, result, -result);
+#else
   auto result = Simd<T, N>(fma(e * t, r, ComputeT(1.0f)));
   return select(x > ComputeT(0), result, -result);
+#endif // MLX_USE_HIGHWAY_KERNELS
 }
 
 template <typename T, int N>
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 Simd<T, N> sigmoid(Simd<T, N> x) {
   // For float16/bfloat16 inputs, compute in float32 precision for accuracy
   // For float32/float64, compute in the same precision
@@ -196,7 +213,12 @@ Simd<complex64_t, N> sigmoid(Simd<complex64_t, N> x) {
 }
 
 template <typename T, int N>
+#endif // MLX_USE_HIGHWAY_KERNELS
 Simd<T, N> erfinv(Simd<T, N> a_) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  Simd<float, N> a = a_;
+  auto t = fma(a, 0.0f - a, 1.0f);
+#else
   // Use explicit ComputeT so half-type Simd (float16/bfloat16) promotes to
   // float32 and bare float literals don't cause template deduction ambiguity
   // in fma(). For float/double T, ComputeT == T so behavior is unchanged.
@@ -206,8 +228,21 @@ Simd<T, N> erfinv(Simd<T, N> a_) {
       T>;
   Simd<ComputeT, N> a = a_;
   auto t = fma(a, ComputeT(0.0f) - a, ComputeT(1.0f));
+#endif // MLX_USE_HIGHWAY_KERNELS
   t = log(t);
   auto lhs = [](auto t) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    Simd<float, N> p;
+    p = 3.03697567e-10f; //  0x1.4deb44p-32
+    p = fma(p, t, 2.93243101e-8f); //  0x1.f7c9aep-26
+    p = fma(p, t, 1.22150334e-6f); //  0x1.47e512p-20
+    p = fma(p, t, 2.84108955e-5f); //  0x1.dca7dep-16
+    p = fma(p, t, 3.93552968e-4f); //  0x1.9cab92p-12
+    p = fma(p, t, 3.02698812e-3f); //  0x1.8cc0dep-9
+    p = fma(p, t, 4.83185798e-3f); //  0x1.3ca920p-8
+    p = fma(p, t, -2.64646143e-1f); // -0x1.0eff66p-2
+    return fma(p, t, 8.40016484e-1f); //  0x1.ae16a4p-1
+#else
     Simd<ComputeT, N> p;
     p = ComputeT(3.03697567e-10f); //  0x1.4deb44p-32
     p = fma(p, t, ComputeT(2.93243101e-8f)); //  0x1.f7c9aep-26
@@ -218,8 +253,22 @@ Simd<T, N> erfinv(Simd<T, N> a_) {
     p = fma(p, t, ComputeT(4.83185798e-3f)); //  0x1.3ca920p-8
     p = fma(p, t, ComputeT(-2.64646143e-1f)); // -0x1.0eff66p-2
     return fma(p, t, ComputeT(8.40016484e-1f)); //  0x1.ae16a4p-1
+#endif // MLX_USE_HIGHWAY_KERNELS
   };
   auto rhs = [](auto t) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    Simd<float, N> p;
+    p = 5.43877832e-9f; //  0x1.75c000p-28
+    p = fma(p, t, 1.43285448e-7f); //  0x1.33b402p-23
+    p = fma(p, t, 1.22774793e-6f); //  0x1.499232p-20
+    p = fma(p, t, 1.12963626e-7f); //  0x1.e52cd2p-24
+    p = fma(p, t, -5.61530760e-5f); // -0x1.d70bd0p-15
+    p = fma(p, t, -1.47697632e-4f); // -0x1.35be90p-13
+    p = fma(p, t, 2.31468678e-3f); //  0x1.2f6400p-9
+    p = fma(p, t, 1.15392581e-2f); //  0x1.7a1e50p-7
+    p = fma(p, t, -2.32015476e-1f); // -0x1.db2aeep-3
+    return fma(p, t, 8.86226892e-1f); //  0x1.c5bf88p-1
+#else
     Simd<ComputeT, N> p;
     p = ComputeT(5.43877832e-9f); //  0x1.75c000p-28
     p = fma(p, t, ComputeT(1.43285448e-7f)); //  0x1.33b402p-23
@@ -231,17 +280,34 @@ Simd<T, N> erfinv(Simd<T, N> a_) {
     p = fma(p, t, ComputeT(1.15392581e-2f)); //  0x1.7a1e50p-7
     p = fma(p, t, ComputeT(-2.32015476e-1f)); // -0x1.db2aeep-3
     return fma(p, t, ComputeT(8.86226892e-1f)); //  0x1.c5bf88p-1
+#endif // MLX_USE_HIGHWAY_KERNELS
   };
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  auto thresh = 6.125f;
+#else
   auto thresh = ComputeT(6.125f);
+#endif // MLX_USE_HIGHWAY_KERNELS
   // Compute both branches and select if N > 1
   if constexpr (N == 1) {
     if ((abs(t) > thresh).value) { // maximum ulp error = 2.35793
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+      return a * lhs(t);
+#else
       return Simd<T, N>(a * lhs(t));
+#endif // MLX_USE_HIGHWAY_KERNELS
     } else { // maximum ulp error = 2.35002
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+      return a * rhs(t);
+#else
       return Simd<T, N>(a * rhs(t));
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
   } else {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    return a * select(abs(t) > thresh, lhs(t), rhs(t));
+#else
     return Simd<T, N>(a * select(abs(t) > thresh, lhs(t), rhs(t)));
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 

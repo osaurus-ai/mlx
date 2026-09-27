@@ -136,9 +136,6 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/inverse.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/cholesky.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/unary.cpp
-          ${CMAKE_CURRENT_SOURCE_DIR}/norms.cpp
-          ${CMAKE_CURRENT_SOURCE_DIR}/rope.cpp
-          ${CMAKE_CURRENT_SOURCE_DIR}/sdpa.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/eval.cpp
           ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 
@@ -147,6 +144,14 @@ if(MLX_ENABLE_X86_SIMD)
   # here).
   target_sources(
     mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized_highway_backend.cpp)
+
+  # #3019's native norms, RoPE and attention; without Highway, fast_primitives.h
+  # keeps their inline eval_cpu.
+  target_sources(
+    mlx
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/norms.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/rope.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/sdpa.cpp)
 
   if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(MLX_HIGHWAY_MSVC_DISPATCH_SOURCES

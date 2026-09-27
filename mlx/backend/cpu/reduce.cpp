@@ -1,4 +1,4 @@
-// Copyright © 2023-2026 Apple Inc.
+// Copyright © 2023 Apple Inc.
 
 #include <cassert>
 #include <functional>
@@ -7,7 +7,9 @@
 #include "mlx/backend/common/reduce.h"
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/simd/simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/primitives.h"
 
 namespace mlx::core {
@@ -96,6 +98,7 @@ void strided_reduce(
   }
 };
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 // Accumulator type: use float for half-precision types to avoid precision loss
 template <typename U>
 struct AccumType {
@@ -110,28 +113,49 @@ struct AccumType<float16_t> {
   using type = float;
 };
 
+#endif // MLX_USE_HIGHWAY_KERNELS
 template <typename T, typename U, typename Op>
 void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
+  simd::Simd<U, N> accumulator_v(init);
+#else
   using A = typename AccumType<U>::type;
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<A>);
 
   simd::Simd<A, N> accumulator_v(static_cast<A>(init));
+#endif // MLX_USE_HIGHWAY_KERNELS
   while (size >= N) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    accumulator_v = op(accumulator_v, simd::Simd<U, N>(simd::load<T, N>(x)));
+#else
     accumulator_v = op(accumulator_v, simd::Simd<A, N>(simd::load<T, N>(x)));
+#endif // MLX_USE_HIGHWAY_KERNELS
     x += N;
     size -= N;
   }
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  *accumulator = op(*accumulator, op(accumulator_v));
+#else
 
   A simd_sum = op(accumulator_v); // horizontal reduction
   A scalar_acc = op(static_cast<A>(*accumulator), simd_sum);
 
+#endif // MLX_USE_HIGHWAY_KERNELS
   while (size-- > 0) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    *accumulator = op(*accumulator, *x);
+#else
     scalar_acc = op(scalar_acc, static_cast<A>(*x));
+#endif // MLX_USE_HIGHWAY_KERNELS
     x++;
   }
+#if defined(MLX_USE_HIGHWAY_KERNELS)
   *accumulator = static_cast<U>(scalar_acc);
+#endif // MLX_USE_HIGHWAY_KERNELS
 }
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 // Parallel version for large reductions
 template <typename T, typename U, typename Op>
 U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
@@ -174,6 +198,7 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
   return result;
 }
 
+#endif // MLX_USE_HIGHWAY_KERNELS
 // Helper for the ndimensional strided loop
 void nd_loop(
     std::function<void(int)> callback,
@@ -209,13 +234,23 @@ void reduction_op(
   auto in_ptr = x.data<T>();
   auto out_ptr = out.data<U>();
   if (plan.type == ContiguousAllReduce) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    *out_ptr = init;
+    contiguous_reduce(in_ptr, out_ptr, x.size(), Op{}, init);
+#else
     // Use parallel reduction for large arrays
     *out_ptr = parallel_contiguous_reduce(in_ptr, x.size(), Op{}, init);
+#endif // MLX_USE_HIGHWAY_KERNELS
     return;
   }
 
   if (plan.type == ContiguousReduce && plan.shape.size() == 1) {
     int reduction_size = plan.shape[0];
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+    for (int i = 0; i < out.size(); i++, out_ptr++, in_ptr += reduction_size) {
+      *out_ptr = init;
+      contiguous_reduce(in_ptr, out_ptr, reduction_size, Op{}, init);
+#else
     int num_reductions = out.size();
 
     // Parallelize over output elements (each is an independent reduction)
@@ -250,6 +285,7 @@ void reduction_op(
           contiguous_reduce(my_in, my_out, reduction_size, Op{}, init);
         }
       });
+#endif // MLX_USE_HIGHWAY_KERNELS
     }
     return;
   }

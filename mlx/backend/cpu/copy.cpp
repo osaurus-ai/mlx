@@ -1,4 +1,4 @@
-// Copyright © 2023-2026 Apple Inc.
+// Copyright © 2023-2024 Apple Inc.
 
 #include <numeric>
 
@@ -7,7 +7,9 @@
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/simd/simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/dtype_utils.h"
 
 namespace mlx::core {
@@ -110,8 +112,24 @@ void copy_general_general(
 
   auto size = std::accumulate(
       shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  ContiguousIterator in(shape, strides[0], ndim - 3);
+  ContiguousIterator out(shape, strides[1], ndim - 3);
+#endif // MLX_USE_HIGHWAY_KERNELS
   auto stride = std::accumulate(
       shape.end() - 3, shape.end(), 1, std::multiplies<int64_t>());
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+  for (int64_t elem = 0; elem < size; elem += stride) {
+    copy_dims<SrcT, DstT, 3>(
+        src_ptr + in.loc,
+        dst_ptr + out.loc,
+        shape,
+        strides[0],
+        strides[1],
+        ndim - 3);
+    in.step();
+    out.step();
+#else
   int64_t num_iterations = size / stride;
 
   // Check if parallelization is beneficial
@@ -163,6 +181,7 @@ void copy_general_general(
       in.step();
       out.step();
     }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
