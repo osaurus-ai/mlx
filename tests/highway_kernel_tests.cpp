@@ -79,3 +79,63 @@ TEST_CASE("highway sdpa declines shapes and types its kernel cannot hold") {
     CHECK(relative_error(y, sdpa_reference(q, k, v, scale)) < 1e-5f);
   }
 }
+
+TEST_CASE("highway float64 elementwise math computes in double") {
+  // Values whose float and double results differ in the double's low bits.
+  std::vector<double> a = {
+      1.1,
+      2.2,
+      3.3,
+      10.5,
+      123.456,
+      0.01,
+      7.77,
+      1e5,
+      2.5,
+      9.75,
+      0.3,
+      42.0,
+      5.5,
+      8.25,
+      1.9,
+      6.6,
+      3.7};
+  std::vector<double> b = {
+      0.7,
+      1.3,
+      -2.9,
+      3.1,
+      -0.45,
+      2.2,
+      1.7,
+      -3.3,
+      0.9,
+      1.1,
+      -1.7,
+      2.6,
+      0.35,
+      -4.1,
+      1.05,
+      2.9,
+      -0.8};
+  const int n = static_cast<int>(a.size());
+  auto x = array(a.data(), {n}, float64);
+  auto y = array(b.data(), {n}, float64);
+  auto logs = log(x);
+  auto powers = power(x, y);
+  auto angles = arctan2(x, y);
+  auto remainders = remainder(x, y);
+  for (int i = 0; i < n; ++i) {
+    CAPTURE(a[i]);
+    CAPTURE(b[i]);
+    CHECK(slice(logs, {i}, {i + 1}).item<double>() == std::log(a[i]));
+    CHECK(slice(powers, {i}, {i + 1}).item<double>() == std::pow(a[i], b[i]));
+    CHECK(slice(angles, {i}, {i + 1}).item<double>() == std::atan2(a[i], b[i]));
+    // base_simd's rule: std::remainder's result, moved into b's sign.
+    double r = std::remainder(a[i], b[i]);
+    if (r != 0 && (r < 0) != (b[i] < 0)) {
+      r += b[i];
+    }
+    CHECK(slice(remainders, {i}, {i + 1}).item<double>() == r);
+  }
+}
