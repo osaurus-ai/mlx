@@ -8,6 +8,7 @@
 #include "mlx/allocator.h"
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
+#include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/threading/common.h"
 #include "mlx/fast_primitives.h"
@@ -466,6 +467,17 @@ void layer_norm_half(
 void RMSNorm::eval_cpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+  // Types without a Highway kernel, such as float64, compose MLX's fallback.
+  if (inputs[0].dtype() != float32 && inputs[0].dtype() != float16 &&
+      inputs[0].dtype() != bfloat16) {
+    MLX_HIGHWAY_RECORD_FALLBACK(RmsNorm);
+    auto results = fallback_(inputs);
+    eval(results);
+    for (size_t i = 0; i < outputs.size(); i++) {
+      outputs[i].copy_shared_buffer(results[i]);
+    }
+    return;
+  }
   auto& in_x = inputs[0];
   auto& weight = inputs[1];
   auto& out = outputs[0];
@@ -616,6 +628,17 @@ void RMSNormVJP::eval_cpu(
 void LayerNorm::eval_cpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+  // Types without a Highway kernel, such as float64, compose MLX's fallback.
+  if (inputs[0].dtype() != float32 && inputs[0].dtype() != float16 &&
+      inputs[0].dtype() != bfloat16) {
+    MLX_HIGHWAY_RECORD_FALLBACK(LayerNorm);
+    auto results = fallback_(inputs);
+    eval(results);
+    for (size_t i = 0; i < outputs.size(); i++) {
+      outputs[i].copy_shared_buffer(results[i]);
+    }
+    return;
+  }
   auto& in_x = inputs[0];
   auto& weight = inputs[1];
   auto& bias = inputs[2];

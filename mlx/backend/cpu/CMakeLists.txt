@@ -142,9 +142,10 @@ target_sources(
 
 if(MLX_USE_HIGHWAY)
   # quantized.cpp's Highway counterpart (quantized.cpp compiles to nothing
-  # here).
+  # here), and the Highway kernels' dispatch counters.
   target_sources(
-    mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized_highway_backend.cpp)
+    mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized_highway_backend.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/highway_info.cpp)
 
   # #3019's native norms, RoPE and attention; without Highway, fast_primitives.h
   # keeps their inline eval_cpu.

@@ -8,9 +8,11 @@
 #include "mlx/allocator.h"
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
+#include "mlx/backend/cpu/highway_info.h"
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/threading/common.h"
 #include "mlx/fast_primitives.h"
+#include "mlx/transforms.h"
 
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/rope_highway.h"
@@ -419,6 +421,17 @@ void rope_dispatch(
 void RoPE::eval_cpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+  // Types without a Highway kernel, such as float64, compose MLX's fallback.
+  if (inputs[0].dtype() != float32 && inputs[0].dtype() != float16 &&
+      inputs[0].dtype() != bfloat16) {
+    MLX_HIGHWAY_RECORD_FALLBACK(Rope);
+    auto results = fallback_(inputs);
+    eval(results);
+    for (size_t i = 0; i < outputs.size(); i++) {
+      outputs[i].copy_shared_buffer(results[i]);
+    }
+    return;
+  }
   assert(outputs.size() == 1);
   auto& in = inputs[0];
   auto& out = outputs[0];
