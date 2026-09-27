@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -39,6 +40,7 @@ class CPUThreadPool : public ThreadPoolBackend {
 
  private:
   void worker_loop(int worker_id);
+  void run_slot(int slot, int nth);
 
   // Per-worker wake flag on its own cache line to avoid false sharing.
   // Workers spin on their private flag -- no cross-core cache contention.
@@ -72,6 +74,10 @@ class CPUThreadPool : public ThreadPoolBackend {
   std::atomic<uint64_t> task_gen_{0};
   std::atomic<int> sleeping_count_{0}; // workers currently in cv_.wait
   bool stop_ = false;
+
+  // The first exception any slot of the current parallel_for threw.
+  std::mutex error_mtx_;
+  std::exception_ptr first_error_;
 
   WorkerSlot worker_slots_[MAX_WORKERS];
 };
