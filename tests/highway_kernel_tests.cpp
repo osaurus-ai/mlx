@@ -171,3 +171,33 @@ TEST_CASE("highway bf16 sum does not depend on the thread count") {
       {ones({(1 << 20) + 3}, bfloat16), full({1}, -1048576.0f, bfloat16)});
   CHECK(astype(sum(x), float32).item<float>() == 3.0f);
 }
+
+TEST_CASE("highway facade fma rounds once on every target") {
+  // MLX's erfinv computes t = fma(a, -a, 1). Where Highway's MulAdd rounds a *
+  // a first, near |a| = 1 the result keeps few of its bits: 64 units in the
+  // last place at 0.99983, where one rounding (the scalar code's std::fma)
+  // keeps the worst over this range to about 2.1.
+  const int n = 1001;
+  std::vector<float> xs(n);
+  for (int i = 0; i < n; ++i) {
+    xs[i] = 0.999f + 0.000000999f * static_cast<float>(i); // 0.999 to 0.999999
+  }
+  auto y = erfinv(array(xs.data(), {n}, float32));
+  double worst = 0;
+  for (int i = 0; i < n; ++i) {
+    // erf^-1 in double, by bisection on std::erf.
+    double low = 0, high = 6;
+    for (int k = 0; k < 80; ++k) {
+      const double mid = (low + high) / 2;
+      (std::erf(mid) < xs[i] ? low : high) = mid;
+    }
+    const double truth = (low + high) / 2;
+    const float t32 = static_cast<float>(truth);
+    const double unit = std::nextafter(t32, INFINITY) - t32;
+    const double got = slice(y, {i}, {i + 1}).item<float>();
+    REQUIRE(std::isfinite(got));
+    worst = std::max(worst, std::abs(got - truth) / unit);
+  }
+  CAPTURE(worst);
+  CHECK(worst <= 8.0);
+}

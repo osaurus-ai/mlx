@@ -800,9 +800,32 @@ inline Simd<T, N> fma(Simd<T, N> x, Simd<T, N> y, U z) {
     return Simd<T, N>(
         fma(Simd<float, N>(x), Simd<float, N>(y), Simd<float, N>(z)));
   } else {
+#if HWY_NATIVE_FMA
     Simd<T, N> out;
     out.value = hn::MulAdd(x.value, y.value, Simd<T, N>(z).value);
     return out;
+#else
+    if constexpr (std::is_floating_point_v<T>) {
+      // Without FMA instructions MulAdd rounds twice, and fma promises one
+      // rounding (base_simd.h's std::fma): MLX's polynomials rely on it. This
+      // is the static target's path, SSE2 on x86-64, which runs every
+      // elementwise kernel; glibc's fma uses the CPU's FMA where it has one.
+      alignas(64) T xs[N];
+      alignas(64) T ys[N];
+      alignas(64) T zs[N];
+      x.store(xs);
+      y.store(ys);
+      Simd<T, N>(z).store(zs);
+      for (int i = 0; i < N; ++i) {
+        xs[i] = std::fma(xs[i], ys[i], zs[i]);
+      }
+      return Simd<T, N>::load(xs);
+    } else {
+      Simd<T, N> out;
+      out.value = hn::MulAdd(x.value, y.value, Simd<T, N>(z).value);
+      return out;
+    }
+#endif
   }
 }
 
