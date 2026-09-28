@@ -518,9 +518,8 @@ TEST_CASE("test fast quantized matmul token float32 with int8 activations") {
     MESSAGE("no int8 path in this build");
     return;
   }
-  cpu::set_quantized_int8(true);
+  cpu::detail::QuantizedInt8Scope on(true);
   check_quantized_matmul_8bit_high_values(true);
-  cpu::set_quantized_int8(false);
 }
 
 TEST_CASE("test fast quantized matmul token float16") {

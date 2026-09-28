@@ -3,36 +3,15 @@
 
 #include "doctest/doctest.h"
 
+#include "mlx/backend/cpu/precision.h"
 #include "mlx/mlx.h"
 
 using namespace mlx::core;
 
 namespace {
 
-// Every |got - reference| is at most c * eps32 * sum_k |a_ik b_kj|. The
-// reference and the magnitude are computed in float64 by MLX's own ops on the
-// CPU. That makes an fp32 kernel's rounding bound rigorous for any summation
-// order with c = K + 2, while an index or precision bug exceeds it.
-bool within_sum_bound(
-    const array& got,
-    const array& a,
-    const array& b,
-    double c) {
-  auto a64 = astype(a, float64);
-  auto b64 = astype(b, float64);
-  auto reference = matmul(a64, b64);
-  auto magnitude = matmul(abs(a64), abs(b64));
-  auto bound = multiply(
-      array(c * std::numeric_limits<float>::epsilon(), float64), magnitude);
-  return all(less_equal(abs(subtract(astype(got, float64), reference)), bound))
-      .item<bool>();
-}
-
-// The same bound for an affine quantized matmul against its dequantized
-// weights. The kernels compute s * sum(x * q) + b * sum(x) per group, so their
-// rounding scales with sum |x| * (|s| * q + |b|), which exceeds sum |x * w|
-// where s * q and b nearly cancel. dequantize() with |s| and |b| gives
-// |s| * q + |b|.
+// |got - x w^T| <= c * eps32 * sum |x| (|s| q + |b|), in float64: the kernels
+// sum s * sum(x q) + b * sum(x) per group, so |s| and |b| bound their rounding.
 bool within_quantized_bound(
     const array& got,
     const array& x,
@@ -143,8 +122,6 @@ TEST_CASE("highway qqmm mxfp8 rounds the block scale up") {
   CHECK(out[0] == 576.0f);
 }
 
-#include "mlx/backend/cpu/precision.h"
-
 TEST_CASE("highway quantized matmul is exact unless int8 is switched on") {
   // One activation row, affine 4-bit, group 64, K 256: every condition of the
   // int8 path holds, so only the switch decides.
@@ -156,12 +133,11 @@ TEST_CASE("highway quantized matmul is exact unless int8 is switched on") {
   auto exact = quantized_matmul(x, q[0], q[1], q[2], true, 64, 4);
   CHECK(within_quantized_bound(exact, x, q, 64, 4, 256 + 2));
 
-  cpu::set_quantized_int8(true);
+  cpu::detail::QuantizedInt8Scope on(true);
   auto rounded = quantized_matmul(x, q[0], q[1], q[2], true, 64, 4);
   // Rounding activations to int8 costs about 1/254 per element: far outside
   // the fp32 bound. If this passes, the int8 path did not run.
   CHECK_FALSE(within_quantized_bound(rounded, x, q, 64, 4, 256 + 2));
-  cpu::set_quantized_int8(false);
 }
 
 TEST_CASE("highway int8 switch parses its variable") {

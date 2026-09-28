@@ -24,6 +24,21 @@ MLX_API bool parse_quantized_int8(const char* value);
 // For a test: whether transposed affine 2-, 4- and 8-bit quantized matmul sums
 // bf16 and fp16 in float32, as it does with Highway. Other paths may not.
 MLX_API bool quantized_float32_accumulation();
+// For tests: sets the int8 switch for a scope, and restores it at the end.
+class QuantizedInt8Scope {
+ public:
+  explicit QuantizedInt8Scope(bool enabled) : saved_(quantized_int8()) {
+    set_quantized_int8(enabled);
+  }
+  ~QuantizedInt8Scope() {
+    set_quantized_int8(saved_);
+  }
+  QuantizedInt8Scope(const QuantizedInt8Scope&) = delete;
+  QuantizedInt8Scope& operator=(const QuantizedInt8Scope&) = delete;
+
+ private:
+  bool saved_;
+};
 } // namespace detail
 
 } // namespace mlx::core::cpu

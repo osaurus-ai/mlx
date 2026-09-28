@@ -3,12 +3,11 @@
 
 #include "doctest/doctest.h"
 
+#include "mlx/backend/cpu/highway_info.h"
+#include "mlx/backend/cpu/precision.h"
 #include "mlx/mlx.h"
 
 using namespace mlx::core;
-
-#include "mlx/backend/cpu/highway_info.h"
-#include "mlx/backend/cpu/precision.h"
 
 namespace hi = mlx::core::cpu::highway_info;
 
@@ -71,11 +70,12 @@ TEST_CASE("highway int8 family records only when the int8 path ran") {
       sum(quantized_matmul(x, q[0], q[1], q[2], true, 64, 4)).item<float>() !=
       0.0f);
   CHECK(hi::stats(hi::Family::QmmAffineInt8).highway_calls == 0);
-  cpu::set_quantized_int8(true);
-  CHECK(
-      sum(quantized_matmul(x, q[0], q[1], q[2], true, 64, 4)).item<float>() !=
-      0.0f);
-  cpu::set_quantized_int8(false);
+  {
+    cpu::detail::QuantizedInt8Scope on(true);
+    CHECK(
+        sum(quantized_matmul(x, q[0], q[1], q[2], true, 64, 4)).item<float>() !=
+        0.0f);
+  }
   CHECK(hi::stats(hi::Family::QmmAffineInt8).highway_calls > 0);
 }
 
