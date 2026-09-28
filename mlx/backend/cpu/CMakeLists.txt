@@ -9,8 +9,8 @@ endif()
 set(MLX_HIGHWAY_INCLUDE_DIR "")
 
 if(MLX_USE_HIGHWAY)
-  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
-    message(FATAL_ERROR "MLX_USE_HIGHWAY requires an x86 target")
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    message(FATAL_ERROR "MLX_USE_HIGHWAY requires an x86-64 target")
   endif()
 
   set(HWY_ENABLE_CONTRIB
