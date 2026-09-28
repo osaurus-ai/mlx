@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 #include "mlx/api.h"
@@ -23,17 +24,17 @@ MLX_API inline size_t scratch_retained_bytes() {
   return scratch_retained().load(std::memory_order_relaxed);
 }
 
-// A thread's scratch buffer, borrowed for one operation. The buffer stays with
-// the thread for reuse, unless the operation left it larger than kKeepBytes:
-// then the lease frees it when the operation ends, so one large prefill does
-// not hold memory outside MLX's allocator for the thread's lifetime. Leases on
-// one buffer do not nest: a second could reallocate it under the first. The
-// kernels take one per operation, at its top.
+// A thread's scratch buffer, borrowed for one operation, which frees it if it
+// grew past kKeepBytes. A thread holds one lease at a time.
 class ScratchLease {
  public:
   static constexpr size_t kKeepBytes = size_t{64} << 20;
 
   ScratchLease(std::vector<float>& buffer, size_t floats) : buffer_(buffer) {
+    // A second lease could reallocate the buffer under the first.
+    if (leased_) {
+      throw std::logic_error("ScratchLease: this thread already holds a lease");
+    }
     const size_t before = buffer_.capacity();
     if (buffer_.size() < floats) {
       buffer_.resize(floats);
@@ -41,10 +42,12 @@ class ScratchLease {
     scratch_retained().fetch_add(
         (buffer_.capacity() - before) * sizeof(float),
         std::memory_order_relaxed);
+    leased_ = true;
   }
   ScratchLease(const ScratchLease&) = delete;
   ScratchLease& operator=(const ScratchLease&) = delete;
   ~ScratchLease() {
+    leased_ = false;
     const size_t bytes = buffer_.capacity() * sizeof(float);
     if (bytes > kKeepBytes) {
       std::vector<float>().swap(buffer_);
@@ -56,6 +59,7 @@ class ScratchLease {
   }
 
  private:
+  static inline thread_local bool leased_ = false;
   std::vector<float>& buffer_;
 };
 

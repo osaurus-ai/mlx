@@ -1,6 +1,8 @@
 // Copyright © 2026 Osaurus AI. All rights reserved.
 // SPDX-License-Identifier: MIT
 
+#include <stdexcept>
+
 #include "doctest/doctest.h"
 
 #include "mlx/mlx.h"
@@ -300,4 +302,15 @@ TEST_CASE("highway scratch past 64 MiB is freed after its operation") {
       sum(quantized_matmul(xs, qs[0], qs[1], qs[2], true, 64, 4))
           .item<float>() != 0.0f);
   CHECK(cpu::scratch_retained_bytes() > after_large);
+}
+
+TEST_CASE("highway scratch leases do not nest on one thread") {
+  std::vector<float> buffer;
+  {
+    cpu::ScratchLease first(buffer, 16);
+    // A second lease could reallocate the buffer under the first.
+    CHECK_THROWS_AS(cpu::ScratchLease(buffer, 1 << 20), std::logic_error);
+    CHECK(buffer.size() == 16);
+  }
+  CHECK_NOTHROW(cpu::ScratchLease(buffer, 16));
 }
