@@ -63,8 +63,10 @@ if(MLX_USE_HIGHWAY)
   # foreach-target attributes; MSVC uses per-target shims below because it needs
   # /arch:AVX2 on AVX2 codegen to avoid slow SSE/AVX transitions.
   target_compile_definitions(hwy PRIVATE ${MLX_HIGHWAY_TARGET_DEFINITIONS})
-  target_compile_definitions(mlx PRIVATE MLX_USE_HIGHWAY_KERNELS
-                                         ${MLX_HIGHWAY_TARGET_DEFINITIONS})
+  # PUBLIC, since installed headers (fast_primitives.h, unary.h, binary.h)
+  # change with it. Highway's own definitions stay PRIVATE.
+  target_compile_definitions(mlx PUBLIC MLX_USE_HIGHWAY_KERNELS)
+  target_compile_definitions(mlx PRIVATE ${MLX_HIGHWAY_TARGET_DEFINITIONS})
   target_include_directories(mlx PRIVATE ${MLX_HIGHWAY_INCLUDE_DIR})
   target_link_libraries(mlx PRIVATE hwy::hwy)
   message(STATUS "Highway: runtime-dispatched CPU kernels enabled")
