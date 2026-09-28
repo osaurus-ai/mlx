@@ -9,6 +9,7 @@
 #include "mlx/backend/gpu/copy.h"
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/kernels.h"
+#include "mlx/backend/metal/matmul.h"
 #include "mlx/backend/metal/reduce.h"
 #include "mlx/backend/metal/unary.h"
 #include "mlx/backend/metal/utils.h"
@@ -1598,7 +1599,9 @@ void gather_qmm_rhs_nax(
   int bn = 64, bk = 64;
   int wm = 2, wn = 2;
 
-  const bool align_M = (M % bm) == 0;
+  const bool scheduled_rows = mode == "affine";
+  const int num_groups = w.size() / w.shape(-1) / w.shape(-2);
+  const bool align_M = !scheduled_rows && (M % bm) == 0;
   const bool align_N = (N % bn) == 0;
   const bool align_K = (K % bk) == 0;
 
@@ -1645,6 +1648,11 @@ void gather_qmm_rhs_nax(
       "_align_K_",
       align_K ? 't' : 'n');
 
+  std::optional<array> row_offsets;
+  if (scheduled_rows) {
+    row_offsets = gather_mm_offsets(indices, num_groups, M, d, s);
+  }
+
   // Get and set the kernel
   auto& compute_encoder = metal::get_command_encoder(s);
   auto kernel = get_gather_qmm_nax_kernel(
@@ -1665,7 +1673,10 @@ void gather_qmm_rhs_nax(
   compute_encoder.set_compute_pipeline_state(kernel);
 
   MTL::Size group_dims(32, wn, wm);
-  MTL::Size grid_dims((N + bn - 1) / bn, (M + bm - 1) / bm, 1);
+  const int tiles_m = scheduled_rows
+      ? std::min(M, (M + bm - 1) / bm + num_groups - 1)
+      : (M + bm - 1) / bm;
+  MTL::Size grid_dims((N + bn - 1) / bn, tiles_m, 1);
 
   int c = 0;
   compute_encoder.set_input_array(x, c++);
@@ -1674,11 +1685,14 @@ void gather_qmm_rhs_nax(
   if (biases) {
     compute_encoder.set_input_array(*biases, c++);
   }
-  compute_encoder.set_input_array(indices, c++);
+  compute_encoder.set_input_array(row_offsets ? *row_offsets : indices, c++);
   compute_encoder.set_output_array(out, c++);
   compute_encoder.set_bytes(M, c++);
   compute_encoder.set_bytes(N, c++);
   compute_encoder.set_bytes(K, c++);
+  if (scheduled_rows) {
+    compute_encoder.set_bytes(num_groups, c++);
+  }
 
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
@@ -1752,7 +1766,9 @@ void gather_qmm_rhs(
   int bm = 16, bn = 32, bk = 32;
   int wm = 1, wn = 2;
 
-  const bool align_M = (M % bm) == 0;
+  const bool scheduled_rows = mode == "affine";
+  const int num_groups = w.size() / w.shape(-1) / w.shape(-2);
+  const bool align_M = !scheduled_rows && (M % bm) == 0;
   const bool align_N = (N % bn) == 0;
   const bool align_K = (K % bk) == 0;
 
@@ -1798,6 +1814,11 @@ void gather_qmm_rhs(
       "_align_K_",
       align_K ? 't' : 'n');
 
+  std::optional<array> row_offsets;
+  if (scheduled_rows) {
+    row_offsets = gather_mm_offsets(indices, num_groups, M, d, s);
+  }
+
   // Get and set the kernel
   auto& compute_encoder = metal::get_command_encoder(s);
   auto kernel = get_gather_qmm_kernel(
@@ -1818,7 +1839,10 @@ void gather_qmm_rhs(
   compute_encoder.set_compute_pipeline_state(kernel);
 
   MTL::Size group_dims(32, wn, wm);
-  MTL::Size grid_dims((N + bn - 1) / bn, (M + bm - 1) / bm, 1);
+  const int tiles_m = scheduled_rows
+      ? std::min(M, (M + bm - 1) / bm + num_groups - 1)
+      : (M + bm - 1) / bm;
+  MTL::Size grid_dims((N + bn - 1) / bn, tiles_m, 1);
 
   int c = 0;
   compute_encoder.set_input_array(x, c++);
@@ -1827,11 +1851,14 @@ void gather_qmm_rhs(
   if (biases) {
     compute_encoder.set_input_array(*biases, c++);
   }
-  compute_encoder.set_input_array(indices, c++);
+  compute_encoder.set_input_array(row_offsets ? *row_offsets : indices, c++);
   compute_encoder.set_output_array(out, c++);
   compute_encoder.set_bytes(M, c++);
   compute_encoder.set_bytes(N, c++);
   compute_encoder.set_bytes(K, c++);
+  if (scheduled_rows) {
+    compute_encoder.set_bytes(num_groups, c++);
+  }
 
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
