@@ -529,7 +529,7 @@ TEST_CASE("test fast quantized matmul token float16") {
 }
 
 TEST_CASE("test fast quantized matmul token bfloat16") {
-  if (!cpu::quantized_float32_accumulation()) {
+  if (!cpu::detail::quantized_float32_accumulation()) {
     MESSAGE(
         "this build sums bf16 quantized matmuls in bf16; the bound is for float32 sums");
     return;

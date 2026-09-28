@@ -12,6 +12,14 @@ namespace detail {
 bool parse_quantized_int8(const char* value) {
   return value != nullptr && std::atoi(value) != 0;
 }
+
+bool quantized_float32_accumulation() {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  return true;
+#else
+  return false;
+#endif
+}
 } // namespace detail
 
 namespace {
@@ -31,14 +39,6 @@ void set_quantized_int8(bool enabled) {
 }
 
 bool quantized_int8_available() {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
-  return true;
-#else
-  return false;
-#endif
-}
-
-bool quantized_float32_accumulation() {
 #if defined(MLX_USE_HIGHWAY_KERNELS)
   return true;
 #else
