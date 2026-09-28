@@ -8,12 +8,8 @@
 namespace mlx::core::cpu {
 
 /**
- * Pure virtual interface for platform-specific thread pool implementations.
- *
- * This interface abstracts the threading mechanism so different platforms
- * can use their respective thread pools:
- * - macOS: Grand Central Dispatch (GCD)
- * - Linux/Windows: persistent threading with optional OpenBLAS coordination
+ * Pure virtual interface for the thread pool implementation: persistent
+ * threading with optional OpenBLAS coordination (openblas/thread_pool.cpp).
  */
 class ThreadPoolBackend {
  public:
@@ -40,9 +36,8 @@ class ThreadPoolBackend {
 };
 
 /**
- * Factory function to create the platform-specific thread pool backend.
- * Implemented in platform-specific files (accelerate/thread_pool.mm,
- * openblas/thread_pool.cpp).
+ * Factory function to create the thread pool backend, implemented in
+ * openblas/thread_pool.cpp.
  */
 std::unique_ptr<ThreadPoolBackend> create_thread_pool_backend();
 

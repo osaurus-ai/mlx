@@ -14,9 +14,8 @@ namespace mlx::core::cpu {
  * Thread pool for CPU backend parallelism.
  *
  * Provides a simple interface for parallel execution of work across multiple
- * threads. Uses platform-native thread pools for optimal performance:
- * - macOS: Grand Central Dispatch (GCD)
- * - Linux/Windows: persistent threading with optional OpenBLAS coordination
+ * threads: persistent threading with optional OpenBLAS coordination, in builds
+ * with Highway kernels.
  *
  * Usage:
  *   auto& pool = ThreadPool::instance();

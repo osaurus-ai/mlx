@@ -129,11 +129,8 @@ LaneTypeT<T>* lane_ptr(T* ptr) {
   return reinterpret_cast<LaneTypeT<T>*>(ptr);
 }
 
-// Highway emulates float16 -> float32 where a target has no conversion
-// instruction (x86 before AVX2, EMU128, SCALAR), and reads exponent 31 as a
-// finite exponent there: inf became 65536. Lanes with exponent 31 take
-// float32's inf, or a quiet NaN with the same payload, as the instructions
-// give. highway_utils.h has the same function for the dispatched kernels.
+// Highway's emulated float16 -> float32 decodes exponent 31 as finite (inf as
+// 65536); return inf or quiet NaN there. Same as highway_utils.h's copy.
 template <class DF>
 hn::Vec<DF> promote_f16(DF df, hn::Vec<hn::Rebind<hwy::float16_t, DF>> v) {
   const hn::RebindToUnsigned<DF> du;
@@ -836,10 +833,8 @@ inline Simd<T, N> fma(Simd<T, N> x, Simd<T, N> y, U z) {
     return out;
 #else
     if constexpr (std::is_floating_point_v<T>) {
-      // Without FMA instructions MulAdd rounds twice, and fma promises one
-      // rounding (base_simd.h's std::fma): MLX's polynomials rely on it. This
-      // is the static target's path, SSE2 on x86-64, which runs every
-      // elementwise kernel; glibc's fma uses the CPU's FMA where it has one.
+      // Without FMA instructions MulAdd rounds twice. std::fma rounds once, as
+      // base_simd.h does, and MLX's polynomials rely on that.
       alignas(64) T xs[N];
       alignas(64) T ys[N];
       alignas(64) T zs[N];

@@ -14,10 +14,8 @@ using namespace mlx::core;
 
 namespace {
 
-// Every |got - reference| is at most c * eps32 * sum_k |a_ik b_kj|. The
-// reference and the magnitude are computed in float64 by MLX's own ops on the
-// CPU. That makes an fp32 kernel's rounding bound rigorous for any summation
-// order with c = K + 2, while an index or precision bug exceeds it.
+// |got - a b| <= c * eps32 * sum_k |a_ik b_kj|, both computed in float64 by
+// MLX's ops: rigorous for fp32 at c = K + 2, in any summation order.
 bool within_sum_bound(
     const array& got,
     const array& a,
@@ -146,9 +144,8 @@ TEST_CASE("highway float64 elementwise math computes in double") {
 }
 
 TEST_CASE("highway integer power with a negative exponent") {
-  // base_simd.h's rule (hwy/base, lines 249-267): a signed integer to a
-  // negative power is 0, for every base, 1 included. #3019's facade looped
-  // forever here.
+  // base_simd.h's rule: a signed integer to a negative power is 0, for every
+  // base, 1 included. #3019's facade looped forever here.
   std::vector<int> bases = {
       2, 3, -2, 5, 7, 1, 4, 6, 2, -3, 1, 0, 9, 2, -1, 3, 5};
   std::vector<int> exponents = {
@@ -166,22 +163,16 @@ TEST_CASE("highway integer power with a negative exponent") {
 }
 
 TEST_CASE("highway bf16 sum does not depend on the thread count") {
-  // 2^20 + 3 ones, then -2^20: the sum is exactly 3. Every thread's partial is
-  // exact in float; rounded to bf16 before they are combined, the total is
-  // never 3 for any pool of 2 to 64 threads (0 with 2, 4, 8, 16 or 32, 4096
-  // with 6, -8192 with 12). A plain count of ones is no test: at many pool
-  // sizes each partial happens to be exact in bf16. item<float> on a bf16 array
-  // would read four bytes of a two-byte buffer, so widen first.
+  // 2^20 + 3 ones, then -2^20: exactly 3. Partials rounded to bf16 gave 0 with
+  // 8 threads, and -8192 with 9 or 12. Widen before item<float>.
   auto x = concatenate(
       {ones({(1 << 20) + 3}, bfloat16), full({1}, -1048576.0f, bfloat16)});
   CHECK(astype(sum(x), float32).item<float>() == 3.0f);
 }
 
 TEST_CASE("highway facade fma rounds once on every target") {
-  // MLX's erfinv computes t = fma(a, -a, 1). Where Highway's MulAdd rounds a *
-  // a first, near |a| = 1 the result keeps few of its bits: 64 units in the
-  // last place at 0.99983, where one rounding (the scalar code's std::fma)
-  // keeps the worst over this range to about 2.1.
+  // erfinv computes fma(a, -a, 1): rounding a * a first left 64 units in the
+  // last place at 0.99983, where one rounding keeps the worst near 2.1.
   const int n = 1001;
   std::vector<float> xs(n);
   for (int i = 0; i < n; ++i) {
@@ -208,8 +199,8 @@ TEST_CASE("highway facade fma rounds once on every target") {
 }
 
 TEST_CASE("highway float16 keeps inf and nan") {
-  // Highway emulates float16 -> float32 where a target has no conversion
-  // instruction, and reads exponent 31 as finite there: inf became 65536.
+  // Where Highway emulates float16 -> float32, it decodes exponent 31 as a
+  // finite exponent: inf as 65536.
   const uint16_t pattern[4] = {
       0x7C00, 0xFC00, 0x7E00, 0x3C00}; // inf -inf nan 1
   std::vector<uint16_t> bits(64);

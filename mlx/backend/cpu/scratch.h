@@ -13,8 +13,6 @@
 namespace mlx::core::cpu {
 
 // Bytes of kernel scratch every thread keeps between operations, process-wide.
-// MLX_API gives the static default visibility, so that a shared library and
-// the code linked against it count in one place.
 MLX_API inline std::atomic<size_t>& scratch_retained() {
   static std::atomic<size_t> bytes{0};
   return bytes;

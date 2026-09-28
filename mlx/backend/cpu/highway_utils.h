@@ -15,11 +15,8 @@ namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Highway emulates float16 -> float32 where a target has no conversion
-// instruction (x86 before AVX2, EMU128, SCALAR), and reads exponent 31 as a
-// finite exponent there: inf became 65536. Lanes with exponent 31 take
-// float32's inf, or a quiet NaN with the same payload, as the instructions
-// give. simd/highway_simd.h has the same function for the facade.
+// Highway's emulated float16 -> float32 decodes exponent 31 as finite (inf as
+// 65536); return inf or quiet NaN there. Same as simd/highway_simd.h's copy.
 template <class DF>
 hn::Vec<DF> promote_f16(DF df, hn::Vec<hn::Rebind<hwy::float16_t, DF>> v) {
   const hn::RebindToUnsigned<DF> du;

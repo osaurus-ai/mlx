@@ -18,9 +18,8 @@ namespace mlx::core::detail {
 
 constexpr int LOWP_MIN_BATCHES_PER_THREAD = 4;
 
-// Thread-local scratch buffer for low-precision <-> f32 conversion, borrowed
-// through ScratchLease. Avoids mmap/munmap cycles and page faults from repeated
-// large allocations.
+// Thread-local scratch for low-precision <-> f32 conversion, borrowed through
+// ScratchLease: no mmap/munmap cycles or page faults from repeated allocations.
 inline std::vector<float>& lowp_gemm_buffer() {
   thread_local std::vector<float> buf;
   return buf;

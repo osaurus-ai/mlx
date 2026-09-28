@@ -35,10 +35,8 @@ bool fast::ScaledDotProductAttention::use_fallback(
     bool force_fused,
     Stream s) {
 #if defined(MLX_USE_HIGHWAY_KERNELS)
-  // Use native CPU kernel for inference (handles causal, array mask, sinks)
-  // The native CPU kernel takes float32, float16 and bfloat16, and one head
-  // dimension of at most 256 (its stack buffers) for queries, keys and values.
-  // Everything else composes.
+  // Use native CPU kernel for inference (handles causal, array mask, sinks).
+  // It takes float32, float16 and bfloat16, one head dim up to 256.
   const bool native_type =
       q.dtype() == float32 || q.dtype() == float16 || q.dtype() == bfloat16;
   if (s.device == Device::cpu && !output_logsumexp && native_type &&

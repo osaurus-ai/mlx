@@ -235,9 +235,8 @@ void CPUThreadPool::parallel_for(
     return;
   }
 
-  // A task that calls parallel_for runs the inner range itself, every slot in
-  // turn: the workers are busy with the outer call, and dispatch_mtx_ is not
-  // recursive. Callers size per-slot state by n_threads, so each slot runs.
+  // Nested: run every slot inline, since the workers are busy with the outer
+  // call and dispatch_mtx_ is not recursive. Callers size state by n_threads.
   if (in_parallel_for) {
     for (int slot = 0; slot < n_threads; ++slot) {
       f(slot, n_threads);

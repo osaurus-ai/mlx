@@ -58,8 +58,7 @@ class CPUThreadPool : public ThreadPoolBackend {
   // MLX's stream_generate uses a separate generation_stream, so two
   // StreamThreads may call parallel_for simultaneously. Since all task
   // state (task_ptr_, started_, done_, etc.) is shared, concurrent calls
-  // must be serialized. The GCD backend (macOS) handles this implicitly
-  // via dispatch_apply; we need an explicit mutex.
+  // must be serialized.
   std::mutex dispatch_mtx_;
 
   std::mutex mtx_; // worker sleep/wake coordination

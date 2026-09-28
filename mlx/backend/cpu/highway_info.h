@@ -32,11 +32,8 @@ MLX_API void set_targets_for_test(int64_t targets);
 // does not know.
 MLX_API const char* target_name(int64_t target);
 
-// What a family's kernels did since the last reset_stats(). `executed` is the
-// OR of every target whose kernel ran. `highway_calls` is 1 once a dispatched
-// kernel ran, and `fallback_calls` once an entry point sent a call to code that
-// is not dynamically dispatched: both count to 1 and stop, so that recording
-// in a row loop writes shared memory only once.
+// Since the last reset_stats(): `executed` ORs the targets whose kernels ran;
+// the calls count dispatched kernels and undispatched fallbacks, up to 1.
 struct FamilyStats {
   int64_t executed;
   uint64_t highway_calls;
@@ -55,9 +52,8 @@ MLX_API void record_sgemm_column_split();
 
 } // namespace mlx::core::cpu::highway_info
 
-// For the kernels. MLX_HIGHWAY_RECORD goes inside HWY_NAMESPACE code, where
-// HWY_TARGET is the target that code was compiled for. Fully qualified,
-// because the kernels' own namespaces hold an unrelated `highway`.
+// For the kernels, in HWY_NAMESPACE code, where HWY_TARGET is its target. Fully
+// qualified: the kernels' own namespaces hold an unrelated `highway`.
 #define MLX_HIGHWAY_RECORD(family)        \
   ::mlx::core::cpu::highway_info::record( \
       ::mlx::core::cpu::highway_info::Family::family, HWY_TARGET)

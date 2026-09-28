@@ -7,11 +7,10 @@
 
 namespace mlx::core::cpu {
 
-// Whether affine quantized matmul may round activations to int8 per group
-// (the fast path of ml-explore/mlx#3019). Off unless MLX_CPU_QUANTIZED_INT8 is
-// a nonzero integer at first use, or until set_quantized_int8(true).
-// Process-wide.
+// Whether affine quantized matmul may round activations to int8 (#3019's fast
+// path). Off unless MLX_CPU_QUANTIZED_INT8 is a nonzero integer at first use.
 MLX_API bool quantized_int8();
+// Process-wide. Set it only while no quantized matmul runs.
 MLX_API void set_quantized_int8(bool enabled);
 
 // Whether this build has the int8 path at all (builds with Highway kernels).
