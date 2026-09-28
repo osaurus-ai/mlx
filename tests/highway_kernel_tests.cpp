@@ -5,6 +5,9 @@
 
 #include "doctest/doctest.h"
 
+#include "mlx/backend/cpu/highway_info.h"
+#include "mlx/backend/cpu/scratch.h"
+#include "mlx/backend/cpu/threading/common.h"
 #include "mlx/mlx.h"
 
 using namespace mlx::core;
@@ -239,8 +242,25 @@ TEST_CASE("highway float16 keeps inf and nan") {
   }
 }
 
-#include "mlx/backend/cpu/highway_info.h"
-#include "mlx/backend/cpu/threading/common.h"
+TEST_CASE("highway bf16 sin and cos of lanes past 2^23") {
+  // A vector with a lane past 2^23 takes std::sin and std::cos lane by lane,
+  // written through Simd's operator[]. Every vector here holds one.
+  std::vector<float> xs(64);
+  for (int i = 0; i < 32; ++i) {
+    xs[2 * i] = std::ldexp(128.0f + 4 * i, 17); // 2^24 and up, exact in bf16
+    xs[2 * i + 1] = 0.25f * (i + 1);
+  }
+  auto x = astype(array(xs.data(), {64}, float32), bfloat16);
+  auto sine = astype(sin(x), float32);
+  auto cosine = astype(cos(x), float32);
+  for (int i = 0; i < 64; ++i) {
+    CAPTURE(xs[i]);
+    const float s = slice(sine, {i}, {i + 1}).item<float>();
+    const float c = slice(cosine, {i}, {i + 1}).item<float>();
+    CHECK(std::abs(s - std::sin(xs[i])) < 1.0f / 64);
+    CHECK(std::abs(c - std::cos(xs[i])) < 1.0f / 64);
+  }
+}
 
 TEST_CASE("highway fp32 matmul splits short inputs by columns, exactly") {
   namespace hi = mlx::core::cpu::highway_info;
@@ -278,8 +298,6 @@ TEST_CASE("highway fp32 matmul splits short inputs by columns, exactly") {
     }
   }
 }
-
-#include "mlx/backend/cpu/scratch.h"
 
 TEST_CASE("highway scratch past 64 MiB is freed after its operation") {
   // M >= 32 dequantizes W to float32 scratch. 9216 x 2048 floats are 75.5 MB on
