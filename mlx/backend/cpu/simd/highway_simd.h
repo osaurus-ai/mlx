@@ -739,13 +739,15 @@ inline Simd<T, N> sqrt(Simd<T, N> a) {
   }
 }
 
+// At SSE2 and SSSE3, Highway's Floor, Ceil and Round can return +0 where C
+// returns -0. A result rounded to an integer has its input's sign: copy it.
 template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> floor(Simd<T, N> a) {
   if constexpr (highway_detail::is_half_v<T>) {
     return Simd<T, N>(floor(Simd<float, N>(a)));
   } else if constexpr (std::is_floating_point_v<T>) {
     Simd<T, N> out;
-    out.value = hn::Floor(a.value);
+    out.value = hn::CopySign(hn::Floor(a.value), a.value);
     return out;
   } else {
     return a;
@@ -758,7 +760,7 @@ inline Simd<T, N> ceil(Simd<T, N> a) {
     return Simd<T, N>(ceil(Simd<float, N>(a)));
   } else if constexpr (std::is_floating_point_v<T>) {
     Simd<T, N> out;
-    out.value = hn::Ceil(a.value);
+    out.value = hn::CopySign(hn::Ceil(a.value), a.value);
     return out;
   } else {
     return a;
@@ -771,7 +773,7 @@ inline Simd<T, N> rint(Simd<T, N> a) {
     return Simd<T, N>(rint(Simd<float, N>(a)));
   } else if constexpr (std::is_floating_point_v<T>) {
     Simd<T, N> out;
-    out.value = hn::Round(a.value);
+    out.value = hn::CopySign(hn::Round(a.value), a.value);
     return out;
   } else {
     return a;

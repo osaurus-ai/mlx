@@ -1,7 +1,9 @@
 // Copyright © 2026 Osaurus AI. All rights reserved.
 // SPDX-License-Identifier: MIT
 
+#include <cmath>
 #include <stdexcept>
+#include <string>
 
 #include "doctest/doctest.h"
 
@@ -250,6 +252,63 @@ TEST_CASE("highway bf16 sin and cos of lanes past 2^23") {
     const float c = slice(cosine, {i}, {i + 1}).item<float>();
     CHECK(std::abs(s - std::sin(xs[i])) < 1.0f / 64);
     CHECK(std::abs(c - std::cos(xs[i])) < 1.0f / 64);
+  }
+}
+
+TEST_CASE("highway floor, ceil, trunc and round keep the sign of zero") {
+  // As in C, each result has its input's sign, zeros included. 16 values fill
+  // whole vectors at every target, so no lane takes the scalar path.
+  std::vector<float> xs;
+  for (float v : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.5f, 3.75f}) {
+    xs.push_back(-v);
+    xs.push_back(v);
+  }
+  struct Rounding {
+    std::string name;
+    array (*mlx)(const array&);
+    double (*c)(double);
+  };
+  const Rounding roundings[] = {
+      {"floor",
+       [](const array& a) { return floor(a); },
+       [](double v) { return std::floor(v); }},
+      {"ceil",
+       [](const array& a) { return ceil(a); },
+       [](double v) { return std::ceil(v); }},
+      {"trunc",
+       [](const array& a) { return trunc(a); },
+       [](double v) { return std::trunc(v); }},
+      {"round",
+       [](const array& a) { return round(a); },
+       [](double v) { return std::rint(v); }}};
+  auto element = [](const array& a, int i) -> double {
+    auto e = slice(a, {i}, {i + 1});
+    if (a.dtype() == float16) {
+      return static_cast<float>(e.item<float16_t>());
+    } else if (a.dtype() == bfloat16) {
+      return static_cast<float>(e.item<bfloat16_t>());
+    } else if (a.dtype() == float32) {
+      return e.item<float>();
+    }
+    return e.item<double>();
+  };
+  const int n = static_cast<int>(xs.size());
+  for (auto dtype : {float32, float64, bfloat16, float16}) {
+    auto x = array(xs.begin(), {n}, dtype);
+    for (const auto& r : roundings) {
+      auto y = r.mlx(x);
+      for (int i = 0; i < n; ++i) {
+        const double got = element(y, i);
+        const double want = r.c(xs[i]);
+        CAPTURE(r.name);
+        CAPTURE(dtype);
+        CAPTURE(xs[i]);
+        CAPTURE(got);
+        CAPTURE(want);
+        CHECK(got == want);
+        CHECK(std::signbit(got) == std::signbit(want));
+      }
+    }
   }
 }
 
