@@ -42,9 +42,7 @@ option(MLX_BUILD_GGUF "Include support for GGUF format" ON)
 option(MLX_BUILD_SAFETENSORS "Include support for safetensors format" ON)
 option(MLX_BUILD_PYTHON_STUBS "Build stub files for python bindings" ON)
 option(MLX_METAL_JIT "Use JIT compilation for Metal kernels" OFF)
-# Highway SIMD kernels for the CPU backend (runtime-dispatched per target). On
-# by default for Linux x86-64. MLX_ENABLE_X86_SIMD, the name in
-# ml-explore/mlx#3019, is accepted as an alias.
+# Highway SIMD kernels for the CPU backend, on by default for Linux x86-64.
 if(MLX_BUILD_CPU
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
@@ -52,12 +50,15 @@ if(MLX_BUILD_CPU
 else()
   set(_MLX_USE_HIGHWAY_DEFAULT OFF)
 endif()
-if(DEFINED MLX_ENABLE_X86_SIMD)
-  set(_MLX_USE_HIGHWAY_DEFAULT ${MLX_ENABLE_X86_SIMD})
-endif()
 option(MLX_USE_HIGHWAY "Build the CPU backend's Highway SIMD kernels"
        ${_MLX_USE_HIGHWAY_DEFAULT})
-set(MLX_ENABLE_X86_SIMD ${MLX_USE_HIGHWAY})
+# MLX_ENABLE_X86_SIMD (ml-explore/mlx#3019's name) sets it on any configure.
+if(DEFINED MLX_ENABLE_X86_SIMD)
+  set(MLX_USE_HIGHWAY
+      ${MLX_ENABLE_X86_SIMD}
+      CACHE BOOL "Build the CPU backend's Highway SIMD kernels" FORCE)
+  unset(MLX_ENABLE_X86_SIMD CACHE)
+endif()
 set(MLX_HIGHWAY_SOURCE_DIR
     ""
     CACHE PATH "Path to a local Highway source checkout")
