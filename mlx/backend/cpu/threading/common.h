@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "mlx/api.h"
 #include "mlx/backend/cpu/threading/base.h"
 
 #include <cstdlib>
@@ -31,7 +32,7 @@ namespace mlx::core::cpu {
  *     process_chunk(0, size);
  *   }
  */
-class ThreadPool {
+class MLX_API ThreadPool {
  public:
   /// Get the singleton instance.
   static ThreadPool& instance();
