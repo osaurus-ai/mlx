@@ -1,3 +1,4 @@
+// Copyright © 2026 Apple Inc.
 // Copyright © 2026 Osaurus AI. All rights reserved.
 // SPDX-License-Identifier: MIT
 
@@ -17,11 +18,8 @@
 #include <sched.h>
 #endif
 
-// Physical core detection -- AVX2/FMA workloads get no benefit from SMT
-// (hyperthreads share the same SIMD execution units, L1/L2 cache, and memory
-// bandwidth). Using physical core count avoids over-subscription and reduces
-// atomic/mutex contention in the thread pool. Benchmarked: 16 physical cores
-// is +5-7% faster than logical core count for quantized LLM inference.
+// #3019's Windows core count: physical cores, since SMT siblings share the
+// SIMD units, caches and memory bandwidth.
 #if defined(_WIN32)
 #include <windows.h>
 static int get_physical_cores() {

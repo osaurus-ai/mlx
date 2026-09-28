@@ -102,9 +102,8 @@ void matmul<float>(
             std::min(pool.max_threads(), std::max(1, static_cast<int>(M / 8)));
       }
 
-      // A short input (M < 16), such as an embedder's 8-token query: split the
-      // columns instead, so that pinning OpenBLAS to one thread never leaves a
-      // large GEMM on one core. Each slice writes its own columns of out.
+      // Short inputs (M < 16) split by columns, so that a pinned OpenBLAS never
+      // leaves a large GEMM on one core. Each slice writes its own columns.
       int col_threads = 1;
       if (m_threads == 1 && M * N * K >= 65536) {
         col_threads =

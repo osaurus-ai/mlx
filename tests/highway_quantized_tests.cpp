@@ -75,10 +75,8 @@ TEST_CASE("highway gather_qmm merges experts without the byte-packing bug") {
 
 namespace {
 
-// One group of `values` through qqmm against a quantized identity, which
-// returns the activations exactly as QQMatmul quantized and dequantized them.
-// The identity quantizes exactly: mxfp4 stores 1 as 4 with scale 2^-2, mxfp8 as
-// 256 with scale 2^-8.
+// `values` through qqmm against a quantized identity, which quantizes exactly,
+// so it returns them as QQMatmul rounded them.
 std::vector<float> through_qqmm(
     const std::vector<float>& values,
     const std::string& mode,
@@ -113,9 +111,8 @@ TEST_CASE("highway qqmm mxfp4 rounds half to even on the e2m1 grid") {
 }
 
 TEST_CASE("highway qqmm mxfp8 rounds the block scale up") {
-  // amax / 448 = 1.3: a nearest E8M0 scale of 1 would saturate the block's
-  // largest element to 448. Rounding the scale up to 2 keeps it: 582.4 / 2 =
-  // 291.2, which E4M3 rounds to 288, so the element returns as 576.
+  // amax / 448 = 1.3: scale 1 would saturate 582.4 to 448. Scale 2 gives 291.2,
+  // which E4M3 rounds to 288, so it returns as 576.
   std::vector<float> values(32, 1.0f);
   values[0] = 582.4f;
   auto out = through_qqmm(values, "mxfp8", 8);
