@@ -2872,8 +2872,14 @@ template <
   int y_row, group;
   short scheduled_rows;
   if (!schedule_row_tile<BM>(
-          offsets, num_groups, M, tid.y, simd_lane_id,
-          y_row, group, scheduled_rows)) {
+          offsets,
+          num_groups,
+          M,
+          tid.y,
+          simd_lane_id,
+          y_row,
+          group,
+          scheduled_rows)) {
     return;
   }
   const int y_col = tid.x * BN;

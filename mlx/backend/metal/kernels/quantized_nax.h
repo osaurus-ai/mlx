@@ -1554,8 +1554,14 @@ template <
   int y_row, group;
   short scheduled_rows;
   if (!schedule_row_tile<BM>(
-          offsets, num_groups, M, tid.y, simd_lane_id,
-          y_row, group, scheduled_rows)) {
+          offsets,
+          num_groups,
+          M,
+          tid.y,
+          simd_lane_id,
+          y_row,
+          group,
+          scheduled_rows)) {
     return;
   }
   const int y_col = tid.x * BN;
@@ -1590,8 +1596,7 @@ template <
   const short tm = SM * (simd_group_id / WN);
   const short tn = SN * (simd_group_id % WN);
 
-  const short sgp_sm =
-      min(SM, short(max(0, int(tgp_bm) - tm)));
+  const short sgp_sm = min(SM, short(max(0, int(tgp_bm) - tm)));
   const short sgp_sn =
       align_N ? SN : min(SN, short(max(0, (N - (y_col + tn)))));
 
