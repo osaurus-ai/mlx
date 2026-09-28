@@ -701,14 +701,10 @@ struct QuantizedBlockLoader {
       return;
     }
 
-    if (reduction_dim == 1 && bi >= src_tile_dim.x) {
-      for (int i = 0; i < n_reads * pack_factor; i++) {
-        dst[i] = T(0);
-      }
-      return;
-    }
-
-    if (reduction_dim == 0 && bi >= src_tile_dim.y) {
+    // Bounds are (columns, rows), independent of the traversal direction.
+    // The packed column extent is group-aligned, so each thread's reads
+    // are either wholly inside the tile or wholly padding.
+    if (bi >= src_tile_dim.y || bj * pack_factor >= src_tile_dim.x) {
       for (int i = 0; i < n_reads * pack_factor; i++) {
         dst[i] = T(0);
       }
@@ -841,14 +837,10 @@ struct QuantizedBlockLoader<
       return;
     }
 
-    if (reduction_dim == 1 && bi >= src_tile_dim.x) {
-      for (int i = 0; i < n_reads * pack_factor; i++) {
-        dst[i] = T(0);
-      }
-      return;
-    }
-
-    if (reduction_dim == 0 && bi >= src_tile_dim.y) {
+    // Bounds are (columns, rows), independent of the traversal direction.
+    // The packed column extent is group-aligned, so each thread's reads
+    // are either wholly inside the tile or wholly padding.
+    if (bi >= src_tile_dim.y || bj * pack_factor >= src_tile_dim.x) {
       for (int i = 0; i < n_reads * pack_factor; i++) {
         dst[i] = T(0);
       }
@@ -1698,7 +1690,7 @@ template <
 
               volatile int compiler_barrier;
 
-              const short psk = min(int(SK), max(0, (BK - kk1)));
+              const short psk = min(int(SK), max(0, (k_remain - kk1)));
               Atile.load_safe(xn + kk1, K, short2(psk, sgp_sm));
 
               if constexpr (transpose) {
