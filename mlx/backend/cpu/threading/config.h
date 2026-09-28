@@ -28,7 +28,7 @@ struct ThreadConfig {
 MLX_API const ThreadConfig& thread_config();
 
 // Whether OpenBLAS's thread setter was found, and whether the pool pinned
-// OpenBLAS to one thread (it does whenever it runs more than one itself).
+// OpenBLAS to one thread (it does at every pool size).
 MLX_API bool openblas_present();
 MLX_API bool openblas_pinned();
 

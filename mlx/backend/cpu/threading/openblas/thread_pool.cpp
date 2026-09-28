@@ -120,13 +120,10 @@ CPUThreadPool::CPUThreadPool()
   }
   // Look OpenBLAS up at any pool size, so that openblas_present() can answer.
   init_blas_funcs();
-  // Pin OpenBLAS to one thread whenever this pool runs more than one: cblas.cpp
-  // splits every large SGEMM across the pool, and a second level of threads
-  // would oversubscribe the cores. MLX_CPU_THREADS is the one setting.
-  if (max_threads_ > 1) {
-    set_blas_threads(1);
-    openblas_pinned_flag().store(blas_set_threads != nullptr);
-  }
+  // Pin OpenBLAS to one thread at every pool size, 1 included: cblas.cpp splits
+  // SGEMMs across the pool, and MLX_CPU_THREADS is the one setting.
+  set_blas_threads(1);
+  openblas_pinned_flag().store(blas_set_threads != nullptr);
 }
 
 CPUThreadPool::~CPUThreadPool() {

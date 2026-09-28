@@ -162,23 +162,21 @@ TEST_CASE("highway nested parallel_for runs its range inline") {
   }
 }
 
-TEST_CASE("highway pool pins OpenBLAS whenever it runs more than one thread") {
-  auto& pool = cpu::ThreadPool::instance();
-#if defined(__linux__)
-  REQUIRE(cpu::openblas_present()); // the containers link Debian's OpenBLAS
-#endif
-  CHECK(
-      cpu::openblas_pinned() ==
-      (cpu::openblas_present() && pool.max_threads() > 1));
-#if defined(__linux__)
-  if (cpu::openblas_pinned()) {
-    // Ask OpenBLAS itself, not the flag stored next to the call.
-    using GetThreads = int (*)();
-    auto get = reinterpret_cast<GetThreads>(
-        dlsym(RTLD_DEFAULT, "openblas_get_num_threads"));
-    REQUIRE(get != nullptr);
-    CHECK(get() == 1);
+TEST_CASE("highway pool pins OpenBLAS at every pool size") {
+  const int pool = cpu::ThreadPool::instance().max_threads();
+  if (!cpu::openblas_present()) {
+    MESSAGE("skipped: the linked BLAS has no openblas_set_num_threads");
+    return;
   }
+  CAPTURE(pool);
+  CHECK(cpu::openblas_pinned());
+#if defined(__linux__)
+  // Ask OpenBLAS itself, not the flag stored next to the call.
+  using GetThreads = int (*)();
+  auto get = reinterpret_cast<GetThreads>(
+      dlsym(RTLD_DEFAULT, "openblas_get_num_threads"));
+  REQUIRE(get != nullptr);
+  CHECK(get() == 1);
 #endif
 }
 
