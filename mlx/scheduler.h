@@ -69,7 +69,8 @@ class MLX_API Scheduler {
   StreamThread& get_thread(Stream s);
 
   // Reads also occur outside mtx during eval admission. Keep updates under mtx
-  // for condition-variable wakeups; atomic access makes unlocked snapshots safe.
+  // for condition-variable wakeups; atomic access makes unlocked snapshots
+  // safe.
   std::atomic<int> n_active_tasks_{0};
   std::unordered_map<int, std::unique_ptr<StreamThread>> threads_;
   std::shared_mutex threads_mtx_;
