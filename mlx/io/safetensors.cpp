@@ -989,12 +989,13 @@ int64_t safetensors_mmap_tracked_buffer_bytes() {
 #endif
 }
 
-array mmap_file_region(
+static array mmap_file_region_impl(
     const std::string& file,
     uint64_t offset,
     size_t length,
     Shape shape,
-    Dtype dtype) {
+    Dtype dtype,
+    std::optional<int32_t> registered_layer) {
 #ifndef _WIN32
   if (length == 0) {
     throw std::runtime_error("[mmap_file_region] length must be non-zero.");
@@ -1080,10 +1081,78 @@ array mmap_file_region(
       tensor.flags(),
       tensor.size(),
       static_cast<int64_t>(offset_delta / item_size));
+  if (registered_layer) {
+    auto& registry = SafetensorsMmapRegistry::instance();
+    registry.register_layer_region(
+        shard, *registered_layer, static_cast<size_t>(offset_delta), length);
+    const auto experts = static_cast<size_t>(shape[0]);
+    const auto per_expert = length / experts;
+    for (size_t expert = 0; expert < experts; ++expert) {
+      registry.register_region(
+          shard,
+          *registered_layer,
+          static_cast<int32_t>(expert),
+          static_cast<size_t>(offset_delta) + expert * per_expert,
+          per_expert);
+    }
+  }
   return tensor;
 #else
   throw std::runtime_error("[mmap_file_region] unsupported on Windows.");
 #endif
+}
+
+array mmap_file_region(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype) {
+  return mmap_file_region_impl(
+      file, offset, length, std::move(shape), dtype, std::nullopt);
+}
+
+array mmap_file_region_named(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype,
+    const std::string& tensor_name) {
+  // This additive API admits only the prevalidated JANGH stacked-bank
+  // namespace. The old loader's name matching and unnamed API are unchanged.
+  static const std::regex canonical(
+      R"(^model\.layers\.(0|[1-9][0-9]*)\.mlp\.switch_mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
+  std::smatch match;
+  if (!std::regex_match(tensor_name, match, canonical)) {
+    throw std::invalid_argument("[mmap_file_region_named] invalid canonical bank name.");
+  }
+  const auto layer_value = std::stoull(match[1].str());
+  if (layer_value > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::invalid_argument("[mmap_file_region_named] layer index overflow.");
+  }
+  const bool packed = match[3].str() == "packed";
+  if (shape.size() != (packed ? 3 : 2) || dtype != (packed ? uint32 : float16)) {
+    throw std::invalid_argument("[mmap_file_region_named] bank rank/dtype mismatch.");
+  }
+  size_t expected = size_of(dtype);
+  for (auto dim : shape) {
+    if (dim <= 0 || expected > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim)) {
+      throw std::invalid_argument("[mmap_file_region_named] invalid bank dimensions.");
+    }
+    expected *= static_cast<size_t>(dim);
+  }
+  if (expected != length || length % static_cast<size_t>(shape[0]) != 0) {
+    throw std::invalid_argument("[mmap_file_region_named] bank byte count mismatch.");
+  }
+#ifndef _WIN32
+  const auto delta = offset % static_cast<uint64_t>(getpagesize());
+  if (length > static_cast<uint64_t>(std::numeric_limits<ShapeElem>::max()) - delta) {
+    throw std::invalid_argument("[mmap_file_region_named] bank mapped span overflow.");
+  }
+#endif
+  return mmap_file_region_impl(
+      file, offset, length, std::move(shape), dtype, static_cast<int32_t>(layer_value));
 }
 
 /** Load array from reader in safetensor format */

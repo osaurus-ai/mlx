@@ -67,6 +67,18 @@ MLX_API array mmap_file_region(
     Shape shape,
     Dtype dtype);
 
+// Named JANGH banks participate in canonical layer/expert cold-page advice.
+// Valid names are model.layers.N.mlp.switch_mlp.{gate,up,down}_proj.tq2_{packed,scales}.
+// The array owns its mapping; registry entries hold only weak references.
+// Advice uses the existing process-global layer/expert namespace, not a model ID.
+MLX_API array mmap_file_region_named(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype,
+    const std::string& tensor_name);
+
 MLX_API void save_safetensors(
     std::shared_ptr<io::Writer> in_stream,
     std::unordered_map<std::string, array>,

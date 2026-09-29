@@ -4,6 +4,11 @@
 #include <fstream>
 #include <stdexcept>
 #include <vector>
+#include <optional>
+#include <limits>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "doctest/doctest.h"
 
@@ -556,3 +561,94 @@ TEST_CASE("test single array serialization") {
     CHECK(array_equal(a, b).item<bool>());
   }
 }
+
+#ifndef _WIN32
+namespace {
+struct NamedMmapFixture {
+  std::string path;
+  size_t page = static_cast<size_t>(getpagesize());
+  NamedMmapFixture() {
+    auto pattern = get_temp_file("mlx-named-mmap-XXXXXX");
+    std::vector<char> name(pattern.begin(), pattern.end());
+    name.push_back('\0');
+    const int fd = mkstemp(name.data());
+    if (fd < 0) {
+      throw std::runtime_error("temporary mmap fixture creation failed");
+    }
+    path = name.data();
+    const int result = ftruncate(fd, static_cast<off_t>(page * 4));
+    close(fd);
+    if (result != 0) {
+      std::filesystem::remove(path);
+      throw std::runtime_error("temporary mmap fixture sizing failed");
+    }
+  }
+  ~NamedMmapFixture() { std::filesystem::remove(path); }
+};
+} // namespace
+
+TEST_CASE("named mmap banks register expert ranges and release weak owners") {
+  NamedMmapFixture file;
+  constexpr int32_t layer = 1900000000;
+  const auto prefix = "model.layers.1900000000.mlp.switch_mlp.gate_proj.tq2_";
+  const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  for (bool packed : {true, false}) {
+    std::optional<array> retained;
+    {
+      const Shape shape = packed ? Shape{2, static_cast<int>(file.page / 4), 1}
+                                 : Shape{2, static_cast<int>(file.page / 2)};
+      auto bank = mmap_file_region_named(
+          file.path, file.page, 2 * file.page, shape,
+          packed ? uint32 : float16,
+          std::string(prefix) + (packed ? "packed" : "scales"));
+      CHECK_EQ(bank.shape(), shape);
+      CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline + 2 * file.page);
+      int32_t selected_layer = layer;
+      int32_t expert = 1;
+      CHECK_EQ(safetensors_mmap_advise_experts(1, &selected_layer, &expert, 1), file.page);
+      CHECK_EQ(safetensors_mmap_advise_experts(0, &selected_layer, &expert, 1), file.page);
+      expert = 2;
+      CHECK_EQ(safetensors_mmap_advise_experts(1, &selected_layer, &expert, 1), 0);
+      CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 2 * file.page);
+      retained = bank;
+    }
+    CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline + 2 * file.page);
+    retained.reset();
+    CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+    CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 0);
+  }
+}
+
+TEST_CASE("named mmap rejects invalid contract before registering") {
+  NamedMmapFixture file;
+  const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  const std::string name = "model.layers.1900000000.mlp.switch_mlp.up_proj.tq2_packed";
+  const Shape valid{2, static_cast<int>(file.page / 4), 1};
+  for (const std::string& invalid : {
+           std::string(""), std::string("model.layers.0.mlp.gate.weight"),
+           std::string("model.layers.00.mlp.switch_mlp.up_proj.tq2_packed"),
+           std::string("model.layers.2147483648.mlp.switch_mlp.up_proj.tq2_packed"),
+           std::string("model.layers.99999999999999999999999.mlp.switch_mlp.up_proj.tq2_packed")}) {
+    CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page, valid, uint32, invalid));
+  }
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page, valid, float16, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page, {2, 1}, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page, {0, 1, 1}, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page, {-1, 1, 1}, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page,
+                                    {2147483647, 2147483647, 2147483647}, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 3 * file.page, 2 * file.page, valid, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 1, 2 * file.page, valid, uint32, name));
+  CHECK_THROWS(mmap_file_region_named(file.path, 0, 2 * file.page - 1, valid, uint32, name));
+  CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+}
+
+TEST_CASE("unnamed mmap regions retain their unregistered behavior") {
+  NamedMmapFixture file;
+  const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  auto bank = mmap_file_region(file.path, file.page, file.page,
+                              {static_cast<int>(file.page / 4)}, uint32);
+  CHECK_EQ(bank.nbytes(), file.page);
+  CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+}
+#endif
