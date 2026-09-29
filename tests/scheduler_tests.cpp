@@ -2,6 +2,9 @@
 
 #include "doctest/doctest.h"
 
+#include <atomic>
+#include <thread>
+
 #include "mlx/mlx.h"
 #include "mlx/scheduler.h"
 
@@ -248,4 +251,53 @@ TEST_CASE("test scheduler races") {
     y = exp(y);
   }
   eval(a, y);
+}
+
+TEST_CASE("test concurrent scheduler active task observations") {
+  // Use an independent actual Scheduler so other test streams cannot change
+  // this counter. No tasks are enqueued and no GPU work is required.
+  scheduler::Scheduler scheduler;
+  const Stream stream(0, Device::cpu);
+  std::atomic<bool> start{false};
+  bool invalid_observation = false;
+  constexpr int iterations = 1000000;
+
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < iterations; ++i) {
+      scheduler.notify_new_task(stream);
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+      scheduler.notify_task_completion(stream);
+    }
+  });
+  std::thread reader([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < iterations; ++i) {
+      const int active = scheduler.n_active_tasks();
+      invalid_observation |= active < 0 || active > 1;
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  });
+  start.store(true, std::memory_order_release);
+  writer.join();
+  reader.join();
+
+  // TSan detects the unsynchronized getter even if all observed values happen
+  // to be in range. Ordinary builds additionally check the count contract.
+  CHECK_FALSE(invalid_observation);
+  CHECK_EQ(scheduler.n_active_tasks(), 0);
+  scheduler.wait_for_one();
+  scheduler.notify_new_task(stream);
+  CHECK_EQ(scheduler.n_active_tasks(), 1);
+  scheduler.wait_for_one();
+  scheduler.notify_task_completion(stream);
+  CHECK_EQ(scheduler.n_active_tasks(), 0);
 }
