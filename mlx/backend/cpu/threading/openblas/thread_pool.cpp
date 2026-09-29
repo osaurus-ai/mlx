@@ -87,6 +87,15 @@ int get_default_threads() {
 
 // Set while this thread runs a slot of some parallel_for.
 thread_local bool in_parallel_for = false;
+
+std::atomic<detail::PoolTestHook> test_hook{nullptr};
+
+// Calls the test hook if a test set one. Otherwise costs one relaxed load.
+inline void test_point(detail::PoolTestPoint point, int worker) {
+  if (auto hook = test_hook.load(std::memory_order_relaxed)) {
+    hook(point, worker);
+  }
+}
 } // namespace
 
 void CPUThreadPool::run_slot(int slot, int nth) {
@@ -102,8 +111,10 @@ void CPUThreadPool::run_slot(int slot, int nth) {
   in_parallel_for = false;
 }
 
-CPUThreadPool::CPUThreadPool()
-    : max_threads_(std::min(get_default_threads(), MAX_WORKERS + 1)) {
+CPUThreadPool::CPUThreadPool() : CPUThreadPool(get_default_threads()) {}
+
+CPUThreadPool::CPUThreadPool(int threads)
+    : max_threads_(std::clamp(threads, 1, MAX_WORKERS + 1)) {
   // Spawn max_threads_ - 1 workers. The main thread takes slot 0 in
   // parallel_for, so we only need (max_threads_ - 1) workers for the
   // remaining slots. This saves one thread of spin overhead.
@@ -149,17 +160,37 @@ CPUThreadPool::~CPUThreadPool() {
 // dispatch without OS wakeup latency (~10-50us for futex).
 static constexpr int WORKER_SPIN_COUNT = 32768; // ~160us at ~5ns/iter
 
+void CPUThreadPool::claim_slot(int worker_id, uint64_t gen) {
+  uint64_t c = claim_.load(std::memory_order_acquire);
+  while ((c >> 32) == (gen & 0xffffffff)) {
+    int nth = static_cast<int>((c >> 16) & 0xffff);
+    int slot = static_cast<int>(c & 0xffff);
+    if (slot >= nth) {
+      return;
+    }
+    test_point(detail::PoolTestPoint::BeforeClaim, worker_id);
+    if (claim_.compare_exchange_weak(
+            c, c + 1, std::memory_order_acquire, std::memory_order_acquire)) {
+      run_slot(slot, nth);
+      done_.fetch_add(1, std::memory_order_acq_rel);
+      return;
+    }
+  }
+}
+
 void CPUThreadPool::worker_loop(int worker_id) {
+  // Read gen_ before this worker is ready: a call can start just after that.
+  uint64_t my_gen = gen_.load(std::memory_order_acquire);
   // Signal that this worker is ready and waiting for tasks.
   ready_.fetch_add(1, std::memory_order_release);
-  uint64_t my_gen = gen_.load(std::memory_order_acquire);
+  test_point(detail::PoolTestPoint::AfterReady, worker_id);
 
   while (true) {
     // Phase 1: Spin on per-worker flag (private cache line, no contention).
     // The main thread writes to each worker's flag after setting up the task.
     // The acquire load on wake_gen provides happens-before for all writes
-    // the main thread did before the release store (task_ptr_, task_n_threads_,
-    // started_, done_), so we can access them without the mutex.
+    // the main thread did before the release store (task_ptr_, claim_, done_),
+    // so we can access them without the mutex.
     bool woken_by_spin = false;
     for (int i = 0; i < WORKER_SPIN_COUNT; i++) {
       uint64_t wake =
@@ -173,24 +204,10 @@ void CPUThreadPool::worker_loop(int worker_id) {
     }
 
     if (woken_by_spin) {
-      // Fast path: skip mutex entirely. Task state is visible via the
-      // acquire load on wake_gen (happens-before from the main thread's
-      // release store on gen_). task_ptr_ is a raw pointer (naturally
-      // atomic on x86-64), so no std::function access race.
+      // Fast path: skip mutex entirely.
       if (stop_)
         return;
-      {
-        if (task_gen_.load(std::memory_order_acquire) != my_gen)
-          continue;
-        int nth = task_n_threads_.load(std::memory_order_acquire);
-        if (nth > 0 && started_.load(std::memory_order_relaxed) < nth) {
-          int slot = started_.fetch_add(1, std::memory_order_acq_rel);
-          if (slot < nth) {
-            run_slot(slot, nth);
-            done_.fetch_add(1, std::memory_order_acq_rel);
-          }
-        }
-      }
+      claim_slot(worker_id, my_gen);
       continue;
     }
 
@@ -212,16 +229,7 @@ void CPUThreadPool::worker_loop(int worker_id) {
       // Release mutex immediately -- task state is visible via gen_ acquire
       // (happens-before from parallel_for's gen_.fetch_add release).
       lk.unlock();
-      if (task_gen_.load(std::memory_order_acquire) != my_gen)
-        continue;
-      int nth = task_n_threads_.load(std::memory_order_acquire);
-      if (nth <= 0 || started_.load(std::memory_order_relaxed) >= nth)
-        continue;
-      int slot = started_.fetch_add(1, std::memory_order_acq_rel);
-      if (slot >= nth)
-        continue;
-      run_slot(slot, nth);
-      done_.fetch_add(1, std::memory_order_acq_rel);
+      claim_slot(worker_id, my_gen);
     }
   }
 }
@@ -245,7 +253,7 @@ void CPUThreadPool::parallel_for(
   }
 
   // Serialize concurrent parallel_for calls from different CPU streams.
-  // All task state (task_ptr_, started_, done_, etc.) is shared, so
+  // All task state (task_ptr_, claim_, done_, etc.) is shared, so
   // concurrent calls would corrupt each other. The second caller blocks
   // until the first completes -- this is correct because the workers are
   // shared and can only process one task at a time anyway.
@@ -260,13 +268,8 @@ void CPUThreadPool::parallel_for(
   // Requires mutex for gen_ update (cv_ lost-wakeup safety) and
   // per-worker wake_gen writes.
 
-  // Set up task state. task_ptr_ is a raw pointer (naturally atomic on
-  // x86-64). All relaxed stores below become visible to workers via the
-  // gen_.fetch_add(release) below, which provides happens-before for any
-  // thread that observes the new gen_ via acquire load.
+  // Set up the task. The release store to claim_ below publishes it.
   task_ptr_ = &f;
-  task_n_threads_.store(n_threads, std::memory_order_relaxed);
-  started_.store(1, std::memory_order_relaxed); // slot 0 reserved for main
   done_.store(0, std::memory_order_relaxed);
 
   int wake_count = std::min(needed_workers, n_workers);
@@ -282,7 +285,10 @@ void CPUThreadPool::parallel_for(
     std::lock_guard<std::mutex> lk(mtx_);
     n_sleeping = sleeping_count_.load(std::memory_order_relaxed);
     new_gen = gen_.fetch_add(1, std::memory_order_release) + 1;
-    task_gen_.store(new_gen, std::memory_order_release);
+    // Slot 0 is the caller's, so the workers start at slot 1.
+    claim_.store(
+        (new_gen << 32) | (static_cast<uint64_t>(n_threads) << 16) | 1,
+        std::memory_order_release);
   }
 
   // Write per-worker wake flags -- spinning workers see these immediately.
@@ -317,12 +323,6 @@ void CPUThreadPool::parallel_for(
     }
   }
 
-  // Reset task state so late-waking workers (from spin or cv_wait)
-  // won't pass the started_ < task_n_threads_ check with stale values.
-  task_gen_.store(0, std::memory_order_release);
-  task_n_threads_.store(0, std::memory_order_release);
-  task_ptr_ = nullptr;
-
   if (first_error_) {
     std::exception_ptr error = first_error_;
     first_error_ = nullptr;
@@ -337,6 +337,16 @@ int CPUThreadPool::max_threads() const {
 std::unique_ptr<ThreadPoolBackend> create_thread_pool_backend() {
   return std::make_unique<CPUThreadPool>();
 }
+
+namespace detail {
+std::unique_ptr<ThreadPoolBackend> make_thread_pool(int threads) {
+  return std::make_unique<CPUThreadPool>(threads);
+}
+
+void set_pool_test_hook(PoolTestHook hook) {
+  test_hook.store(hook, std::memory_order_relaxed);
+}
+} // namespace detail
 
 bool openblas_present() {
   // The pool's constructor runs init_blas_funcs, whose one-time guard is not

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "mlx/api.h"
+#include "mlx/backend/cpu/threading/base.h"
 
 namespace mlx::core::cpu {
 
@@ -59,6 +61,17 @@ MLX_API ThreadConfig resolve_thread_config(
     const std::vector<int>& allowed_cpus,
     const Topology& topology,
     std::optional<int> cgroup_limit);
+
+// For tests: a pool of `threads` threads, the calling thread included.
+MLX_API std::unique_ptr<ThreadPoolBackend> make_thread_pool(int threads);
+// For tests: the points where a pool worker calls the test hook.
+enum class PoolTestPoint {
+  AfterReady, // The worker has told the pool that it is ready.
+  BeforeClaim, // The worker has seen a free slot, and not yet claimed it.
+};
+using PoolTestHook = void (*)(PoolTestPoint point, int worker);
+// Process-wide. Null, the default, removes the hook.
+MLX_API void set_pool_test_hook(PoolTestHook hook);
 } // namespace detail
 
 } // namespace mlx::core::cpu
