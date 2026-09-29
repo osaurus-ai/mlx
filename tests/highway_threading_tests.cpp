@@ -13,8 +13,13 @@ using namespace mlx::core;
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -188,4 +193,236 @@ TEST_CASE("highway pool size agrees with the thread configuration") {
                  << "), pool " << pool);
   // The pool clamps to MAX_WORKERS + 1 (thread_pool.h; 129 in #3019).
   CHECK(pool == std::min(config.threads, 129));
+}
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+using std::chrono::milliseconds;
+using std::chrono::seconds;
+
+// Runs `call` on a new thread and waits at most `limit` for it. If the call
+// does not return, its thread stays: what the call uses must stay too.
+bool returns_within(std::function<void()> call, seconds limit) {
+  auto returned = std::make_shared<std::promise<void>>();
+  auto future = returned->get_future();
+  std::thread caller([call = std::move(call), returned] {
+    call();
+    returned->set_value();
+  });
+  if (future.wait_for(limit) != std::future_status::ready) {
+    caller.detach();
+    return false;
+  }
+  caller.join();
+  return true;
+}
+
+// Holds a worker after it told the pool that it is ready, until the first
+// call runs its slot 0.
+struct LateWorker {
+  std::mutex mtx;
+  std::condition_variable cv;
+  bool first_call = false;
+  int held = 0;
+  std::atomic<int> slots{0};
+} late;
+
+void hold_after_ready(d::PoolTestPoint point, int) {
+  if (point != d::PoolTestPoint::AfterReady) {
+    return;
+  }
+  std::unique_lock<std::mutex> lk(late.mtx);
+  ++late.held;
+  late.cv.wait_for(lk, seconds(2), [] { return late.first_call; });
+}
+
+// The slots of one call, as they ran. Static: a call that returns too early
+// must not free what its slots still use.
+struct SlotLog {
+  void reset(int slots) {
+    n = slots;
+    for (auto& r : runs) {
+      r = 0;
+    }
+    wrong = 0;
+    wrong_tid = -1;
+    wrong_nth = -1;
+    finished = 0;
+    at_return = -1;
+  }
+  void ran(int tid, int nth) {
+    if (tid < 0 || tid >= n || nth != n) {
+      wrong_tid = tid;
+      wrong_nth = nth;
+      wrong.fetch_add(1);
+    } else {
+      runs[tid].fetch_add(1);
+    }
+    finished.fetch_add(1);
+  }
+  int n = 0;
+  std::atomic<int> runs[8];
+  std::atomic<int> wrong{0};
+  std::atomic<int> wrong_tid{-1};
+  std::atomic<int> wrong_nth{-1};
+  std::atomic<int> finished{0};
+  int at_return = -1;
+} first_log, second_log;
+
+// Worker 2 gets no wake flag for either call below: it wakes from its sleep
+// for the first call, and the hook holds its claim until the second call runs.
+constexpr int kStaleWorker = 2;
+struct StaleClaim {
+  std::mutex mtx;
+  std::condition_variable cv;
+  // 0: off. 1: first call. 2: second call next. 3: worker 2 may go. 4: all.
+  int phase = 0;
+  bool held = false;
+  Clock::time_point deadline;
+} stale;
+
+void set_phase(int phase) {
+  std::lock_guard<std::mutex> lk(stale.mtx);
+  stale.phase = phase;
+  stale.cv.notify_all();
+}
+
+void hold_stale_claim(d::PoolTestPoint point, int worker) {
+  if (point != d::PoolTestPoint::BeforeClaim) {
+    return;
+  }
+  std::unique_lock<std::mutex> lk(stale.mtx);
+  if (stale.phase == 1 && worker == kStaleWorker && !stale.held) {
+    stale.held = true;
+    stale.cv.notify_all();
+    stale.cv.wait_for(
+        lk, seconds(5), [] { return stale.phase == 0 || stale.phase >= 3; });
+  } else if (stale.phase == 1 && worker != kStaleWorker) {
+    // Worker 2 must see a free slot of the first call.
+    stale.cv.wait_until(
+        lk, stale.deadline, [] { return stale.held || stale.phase != 1; });
+  } else if ((stale.phase == 2 || stale.phase == 3) && worker != kStaleWorker) {
+    // The second call's other claims come after the held claim.
+    stale.cv.wait_for(
+        lk, seconds(5), [] { return stale.phase == 0 || stale.phase >= 4; });
+  }
+}
+
+void check_log(const SlotLog& log, const std::string& call) {
+  INFO("the " << call << " call, " << log.n << " slots");
+  CHECK_MESSAGE(
+      log.wrong.load() == 0,
+      "slot " << log.wrong_tid.load() << " ran with nth "
+              << log.wrong_nth.load());
+  for (int t = 0; t < log.n; ++t) {
+    CHECK_MESSAGE(
+        log.runs[t].load() == 1,
+        "slot " << t << " ran " << log.runs[t].load() << " times");
+  }
+  CHECK_MESSAGE(
+      log.at_return == log.n,
+      "parallel_for returned after " << log.at_return << " slots finished");
+}
+
+} // namespace
+
+TEST_CASE(
+    "highway pool worker delayed after announcing ready takes the first call") {
+  {
+    std::lock_guard<std::mutex> lk(late.mtx);
+    late.first_call = false;
+    late.held = 0;
+  }
+  late.slots = 0;
+  d::set_pool_test_hook(hold_after_ready);
+  auto pool = d::make_thread_pool(2); // One worker.
+  auto* p = pool.get();
+  const bool returned = returns_within(
+      [p] {
+        p->parallel_for(2, [](int tid, int) {
+          if (tid == 0) {
+            std::lock_guard<std::mutex> lk(late.mtx);
+            late.first_call = true;
+            late.cv.notify_all();
+          }
+          late.slots.fetch_add(1);
+        });
+      },
+      seconds(5));
+  d::set_pool_test_hook(nullptr);
+  CHECK_MESSAGE(returned, "the first parallel_for did not return in 5 s");
+  if (!returned) {
+    (void)pool.release(); // Its call still waits for the worker.
+    return;
+  }
+  CHECK(late.slots.load() == 2);
+  std::lock_guard<std::mutex> lk(late.mtx);
+  CHECK(late.held == 1);
+}
+
+TEST_CASE("highway pool claim delayed past its call does not run in the next") {
+  const int calls[2][2] = {{3, 2}, {2, 3}};
+  for (const auto& c : calls) {
+    const int n1 = c[0];
+    const int n2 = c[1];
+    CAPTURE(n1);
+    CAPTURE(n2);
+    bool held = false;
+    for (int attempt = 0; attempt < 5 && !held; ++attempt) {
+      auto pool = d::make_thread_pool(4); // Workers 0, 1 and 2.
+      std::this_thread::sleep_for(milliseconds(100)); // Let them all sleep.
+      {
+        std::lock_guard<std::mutex> lk(stale.mtx);
+        stale.phase = 1;
+        stale.held = false;
+        stale.deadline = Clock::now() + seconds(1);
+      }
+      first_log.reset(n1);
+      second_log.reset(n2);
+      d::set_pool_test_hook(hold_stale_claim);
+      auto* p = pool.get();
+      bool returned = returns_within(
+          [p, n1] {
+            p->parallel_for(
+                n1, [](int tid, int nth) { first_log.ran(tid, nth); });
+            first_log.at_return = first_log.finished.load();
+          },
+          seconds(10));
+      {
+        std::lock_guard<std::mutex> lk(stale.mtx);
+        held = stale.held;
+      }
+      if (returned && held) {
+        set_phase(2);
+        returned = returns_within(
+            [p, n2] {
+              p->parallel_for(n2, [](int tid, int nth) {
+                if (tid == 0) {
+                  set_phase(3); // The held claim goes first.
+                  std::this_thread::sleep_for(milliseconds(50));
+                  set_phase(4);
+                } else {
+                  std::this_thread::sleep_for(milliseconds(20));
+                }
+                second_log.ran(tid, nth);
+              });
+              second_log.at_return = second_log.finished.load();
+            },
+            seconds(10));
+      }
+      d::set_pool_test_hook(nullptr);
+      set_phase(0);
+      CHECK_MESSAGE(returned, "a parallel_for did not return in 10 s");
+      if (!returned) {
+        (void)pool.release(); // A call still waits in it.
+        return;
+      }
+      check_log(first_log, "first");
+      if (held) {
+        check_log(second_log, "second");
+      }
+    }
+    CHECK_MESSAGE(held, "no attempt held a claim of the first call");
+  }
 }

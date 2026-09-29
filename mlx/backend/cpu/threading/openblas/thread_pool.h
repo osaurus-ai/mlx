@@ -32,6 +32,8 @@ namespace mlx::core::cpu {
 class CPUThreadPool : public ThreadPoolBackend {
  public:
   CPUThreadPool();
+  // A pool of `threads` threads, the calling thread included.
+  explicit CPUThreadPool(int threads);
   ~CPUThreadPool() override;
 
   void parallel_for(int n_threads, std::function<void(int tid, int nth)> f)
@@ -41,6 +43,8 @@ class CPUThreadPool : public ThreadPoolBackend {
  private:
   void worker_loop(int worker_id);
   void run_slot(int slot, int nth);
+  // Claims and runs one slot of call `gen`, if the call has a slot left.
+  void claim_slot(int worker_id, uint64_t gen);
 
   // Per-worker wake flag on its own cache line to avoid false sharing.
   // Workers spin on their private flag -- no cross-core cache contention.
@@ -57,7 +61,7 @@ class CPUThreadPool : public ThreadPoolBackend {
   // Serializes concurrent parallel_for calls from different CPU streams.
   // MLX's stream_generate uses a separate generation_stream, so two
   // StreamThreads may call parallel_for simultaneously. Since all task
-  // state (task_ptr_, started_, done_, etc.) is shared, concurrent calls
+  // state (task_ptr_, claim_, done_, etc.) is shared, concurrent calls
   // must be serialized.
   std::mutex dispatch_mtx_;
 
@@ -65,14 +69,14 @@ class CPUThreadPool : public ThreadPoolBackend {
   std::condition_variable cv_;
 
   const std::function<void(int, int)>* task_ptr_ = nullptr;
-  std::atomic<int> task_n_threads_{0};
-  std::atomic<int> started_{0};
+  // The call's generation (high 32 bits), slot count and next slot (16 bits
+  // each). One CAS claims a slot, and it fails when the call has changed.
+  std::atomic<uint64_t> claim_{0};
   std::atomic<int> done_{0};
   std::atomic<int> ready_{0};
   std::atomic<uint64_t> gen_{0};
-  std::atomic<uint64_t> task_gen_{0};
   std::atomic<int> sleeping_count_{0}; // workers currently in cv_.wait
-  bool stop_ = false;
+  std::atomic<bool> stop_{false};
 
   // The first exception any slot of the current parallel_for threw.
   std::mutex error_mtx_;
