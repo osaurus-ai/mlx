@@ -599,6 +599,24 @@ TEST_CASE("named mmap banks register expert ranges and release weak owners") {
     {
       const Shape shape = packed ? Shape{2, static_cast<int>(file.page / 4), 1}
                                  : Shape{2, static_cast<int>(file.page / 2)};
+      // Zero-copy adoption is currently implemented only by MetalAllocator.
+      // Other backends must reject the region without retaining a registry
+      // entry; exercise that contract rather than assuming Metal on Linux CI.
+      if (!metal::is_available()) {
+        CHECK_THROWS_WITH_AS(
+            mmap_file_region_named(
+                file.path,
+                file.page,
+                2 * file.page,
+                shape,
+                packed ? uint32 : float16,
+                std::string(prefix) + (packed ? "packed" : "scales")),
+            ("[mmap_file_region] make_buffer failed: " + file.path).c_str(),
+            std::runtime_error);
+        CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+        CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 0);
+        continue;
+      }
       auto bank = mmap_file_region_named(
           file.path,
           file.page,
@@ -674,6 +692,19 @@ TEST_CASE("named mmap rejects invalid contract before registering") {
 TEST_CASE("unnamed mmap regions retain their unregistered behavior") {
   NamedMmapFixture file;
   const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  if (!metal::is_available()) {
+    CHECK_THROWS_WITH_AS(
+        mmap_file_region(
+            file.path,
+            file.page,
+            file.page,
+            {static_cast<int>(file.page / 4)},
+            uint32),
+        ("[mmap_file_region] make_buffer failed: " + file.path).c_str(),
+        std::runtime_error);
+    CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+    return;
+  }
   auto bank = mmap_file_region(
       file.path,
       file.page,
