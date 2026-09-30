@@ -42,6 +42,29 @@ option(MLX_BUILD_GGUF "Include support for GGUF format" ON)
 option(MLX_BUILD_SAFETENSORS "Include support for safetensors format" ON)
 option(MLX_BUILD_PYTHON_STUBS "Build stub files for python bindings" ON)
 option(MLX_METAL_JIT "Use JIT compilation for Metal kernels" OFF)
+# Highway SIMD kernels for the CPU backend, on by default for Linux x86-64.
+if(MLX_BUILD_CPU
+   AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  set(_MLX_USE_HIGHWAY_DEFAULT ON)
+else()
+  set(_MLX_USE_HIGHWAY_DEFAULT OFF)
+endif()
+option(MLX_USE_HIGHWAY "Build the CPU backend's Highway SIMD kernels"
+       ${_MLX_USE_HIGHWAY_DEFAULT})
+# MLX_ENABLE_X86_SIMD (ml-explore/mlx#3019's name) sets it on any configure.
+if(DEFINED MLX_ENABLE_X86_SIMD)
+  set(MLX_USE_HIGHWAY
+      ${MLX_ENABLE_X86_SIMD}
+      CACHE BOOL "Build the CPU backend's Highway SIMD kernels" FORCE)
+  unset(MLX_ENABLE_X86_SIMD CACHE)
+endif()
+set(MLX_HIGHWAY_SOURCE_DIR
+    ""
+    CACHE PATH "Path to a local Highway source checkout")
+set(MLX_HIGHWAY_GIT_TAG
+    "1.4.0"
+    CACHE STRING "Highway git tag or commit used when fetching Highway")
 option(MLX_USE_CCACHE "Use CCache for compilation cache when available" ON)
 option(BUILD_SHARED_LIBS "Build mlx as a shared library" OFF)
 option(USE_SYSTEM_FMT "Use system's provided fmt library" OFF)

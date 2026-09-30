@@ -10,6 +10,9 @@
 
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/simd/simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+#include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 
 namespace mlx::core {
 
@@ -18,6 +21,13 @@ struct VectorScalar {
   template <typename T, typename U>
   void operator()(const T* a, const T* b, U* dst, int size) {
     T scalar = *b;
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+    process_chunk(a, scalar, dst, static_cast<size_t>(size));
+  }
+
+  template <typename T, typename U>
+  static void process_chunk(const T* a, T scalar, U* dst, size_t size) {
+#endif // MLX_USE_HIGHWAY_KERNELS
     constexpr int N = simd::max_size<T>;
     while (size >= N) {
       simd::store(dst, Op{}(simd::load<T, N>(a), simd::Simd<T, N>(scalar)));
@@ -38,6 +48,13 @@ struct ScalarVector {
   template <typename T, typename U>
   void operator()(const T* a, const T* b, U* dst, int size) {
     T scalar = *a;
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+    process_chunk(scalar, b, dst, static_cast<size_t>(size));
+  }
+
+  template <typename T, typename U>
+  static void process_chunk(T scalar, const T* b, U* dst, size_t size) {
+#endif // MLX_USE_HIGHWAY_KERNELS
     constexpr int N = simd::max_size<T>;
     while (size >= N) {
       simd::store(dst, Op{}(simd::Simd<T, N>(scalar), simd::load<T, N>(b)));
@@ -57,6 +74,13 @@ template <typename Op>
 struct VectorVector {
   template <typename T, typename U>
   void operator()(const T* a, const T* b, U* dst, int size) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+    process_chunk(a, b, dst, static_cast<size_t>(size));
+  }
+
+  template <typename T, typename U>
+  static void process_chunk(const T* a, const T* b, U* dst, size_t size) {
+#endif // MLX_USE_HIGHWAY_KERNELS
     constexpr int N = simd::max_size<T>;
     while (size >= N) {
       simd::store(dst, Op{}(simd::load<T, N>(a), simd::load<T, N>(b)));
@@ -132,9 +156,12 @@ void binary_op_dispatch_dims(
       return;
   }
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   ContiguousIterator a_it(shape, a_strides, dim - 3);
   ContiguousIterator b_it(shape, b_strides, dim - 3);
+#endif // MLX_USE_HIGHWAY_KERNELS
   auto stride = out_strides[dim - 4];
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   for (int64_t elem = 0; elem < size; elem += stride) {
     binary_op_dims<T, U, Op, 3, Strided>(
         a + a_it.loc,
@@ -147,6 +174,62 @@ void binary_op_dispatch_dims(
         dim - 3);
     a_it.step();
     b_it.step();
+#else
+  int64_t num_iterations = size / stride;
+
+  // Check if parallelization is beneficial
+  auto& pool = cpu::ThreadPool::instance();
+  int n_threads =
+      cpu::effective_threads(static_cast<size_t>(size), pool.max_threads());
+
+  if (n_threads > 1 && num_iterations >= n_threads) {
+    // Parallel path for strided binary operations
+    pool.parallel_for(n_threads, [&](int tid, int nth) {
+      int64_t chunk = (num_iterations + nth - 1) / nth;
+      int64_t start_iter = chunk * tid;
+      int64_t end_iter = std::min(start_iter + chunk, num_iterations);
+
+      if (start_iter >= end_iter) {
+        return;
+      }
+
+      ContiguousIterator a_it(shape, a_strides, dim - 3);
+      ContiguousIterator b_it(shape, b_strides, dim - 3);
+      a_it.seek(start_iter);
+      b_it.seek(start_iter);
+
+      for (int64_t iter = start_iter; iter < end_iter; ++iter) {
+        binary_op_dims<T, U, Op, 3, Strided>(
+            a + a_it.loc,
+            b + b_it.loc,
+            out + iter * stride,
+            shape,
+            a_strides,
+            b_strides,
+            out_strides,
+            dim - 3);
+        a_it.step();
+        b_it.step();
+      }
+    });
+  } else {
+    // Sequential path
+    ContiguousIterator a_it(shape, a_strides, dim - 3);
+    ContiguousIterator b_it(shape, b_strides, dim - 3);
+    for (int64_t elem = 0; elem < size; elem += stride) {
+      binary_op_dims<T, U, Op, 3, Strided>(
+          a + a_it.loc,
+          b + b_it.loc,
+          out + elem,
+          shape,
+          a_strides,
+          b_strides,
+          out_strides,
+          dim - 3);
+      a_it.step();
+      b_it.step();
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
@@ -164,19 +247,78 @@ void binary_op(const array& a, const array& b, array& out, BinaryOpType bopt) {
 
   // The full computation is scalar vector so delegate to the op
   if (bopt == BinaryOpType::ScalarVector) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
     ScalarVector<Op>{}(a_ptr, b_ptr, out_ptr, b.data_size());
+#else
+    size_t size = b.data_size();
+    auto& pool = cpu::ThreadPool::instance();
+    int n_threads = cpu::effective_threads(size, pool.max_threads());
+    if (n_threads > 1) {
+      T scalar = *a_ptr;
+      pool.parallel_for(n_threads, [&](int tid, int nth) {
+        size_t chunk = (size + nth - 1) / nth;
+        size_t start = chunk * tid;
+        size_t end = std::min(start + chunk, size);
+        if (start < end) {
+          ScalarVector<Op>::template process_chunk<T, U>(
+              scalar, b_ptr + start, out_ptr + start, end - start);
+        }
+      });
+    } else {
+      ScalarVector<Op>{}(a_ptr, b_ptr, out_ptr, size);
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
     return;
   }
 
   // The full computation is vector scalar so delegate to the op
   if (bopt == BinaryOpType::VectorScalar) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
     VectorScalar<Op>{}(a_ptr, b_ptr, out_ptr, a.data_size());
+#else
+    size_t size = a.data_size();
+    auto& pool = cpu::ThreadPool::instance();
+    int n_threads = cpu::effective_threads(size, pool.max_threads());
+    if (n_threads > 1) {
+      T scalar = *b_ptr;
+      pool.parallel_for(n_threads, [&](int tid, int nth) {
+        size_t chunk = (size + nth - 1) / nth;
+        size_t start = chunk * tid;
+        size_t end = std::min(start + chunk, size);
+        if (start < end) {
+          VectorScalar<Op>::template process_chunk<T, U>(
+              a_ptr + start, scalar, out_ptr + start, end - start);
+        }
+      });
+    } else {
+      VectorScalar<Op>{}(a_ptr, b_ptr, out_ptr, size);
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
     return;
   }
 
   // The full computation is vector vector so delegate to the op
   if (bopt == BinaryOpType::VectorVector) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
     VectorVector<Op>{}(a_ptr, b_ptr, out_ptr, a.size());
+#else
+    size_t size = a.size();
+    auto& pool = cpu::ThreadPool::instance();
+    int n_threads = cpu::effective_threads(size, pool.max_threads());
+    if (n_threads > 1) {
+      pool.parallel_for(n_threads, [&](int tid, int nth) {
+        size_t chunk = (size + nth - 1) / nth;
+        size_t start = chunk * tid;
+        size_t end = std::min(start + chunk, size);
+        if (start < end) {
+          VectorVector<Op>::template process_chunk<T, U>(
+              a_ptr + start, b_ptr + start, out_ptr + start, end - start);
+        }
+      });
+    } else {
+      VectorVector<Op>{}(a_ptr, b_ptr, out_ptr, size);
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
     return;
   }
 

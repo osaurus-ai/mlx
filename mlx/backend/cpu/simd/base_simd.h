@@ -1,4 +1,27 @@
 #pragma once
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+
+#ifdef _MSC_VER
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES
+#endif
+#include <intrin.h>
+#endif
+
+#include <stdint.h>
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <functional>
+#include <type_traits>
+
+// Fallback definitions for math constants on MSVC
+// (may not be defined if <cmath> was included before _USE_MATH_DEFINES was set)
+#ifndef M_LN2
+#define M_LN2 0.69314718055994530942
+#endif
+
+#else
 
 // Required for using M_LN2 in MSVC.
 #define _USE_MATH_DEFINES
@@ -13,6 +36,7 @@
 #include <intrin.h> // For _BitScanReverse
 #endif
 
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/types/half_types.h"
 
 namespace mlx::core::simd {
@@ -41,13 +65,53 @@ struct Simd<T, 1> {
   }
 };
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+namespace detail {
+
+template <typename V, typename T, typename = void>
+struct HasStaticLoad : std::false_type {};
+
+template <typename V, typename T>
+struct HasStaticLoad<
+    V,
+    T,
+    std::void_t<decltype(V::load(std::declval<const T*>()))>> : std::true_type {
+};
+
+template <typename V, typename T, typename = void>
+struct HasMemberStore : std::false_type {};
+
+template <typename V, typename T>
+struct HasMemberStore<
+    V,
+    T,
+    std::void_t<decltype(std::declval<V>().store(std::declval<T*>()))>>
+    : std::true_type {};
+
+} // namespace detail
+
+#endif // MLX_USE_HIGHWAY_KERNELS
 template <typename T, int N>
 Simd<T, N> load(const T* x) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   return *(Simd<T, N>*)x;
+#else
+  if constexpr (detail::HasStaticLoad<Simd<T, N>, T>::value) {
+    return Simd<T, N>::load(x);
+  } else {
+    return *(Simd<T, N>*)x;
+  }
+#endif // MLX_USE_HIGHWAY_KERNELS
 }
 
 template <typename T, int N>
 void store(T* dst, Simd<T, N> x) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  if constexpr (detail::HasMemberStore<Simd<T, N>, T>::value) {
+    x.store(dst);
+    return;
+  }
+#endif // MLX_USE_HIGHWAY_KERNELS
   // Maintain invariant that bool is either 0 or 1 as
   // simd comparison ops set all bits in the result to 1
   if constexpr (std::is_same_v<T, bool> && N > 1) {
@@ -192,12 +256,17 @@ DEFAULT_BINARY(||)
 template <typename T>
 Simd<T, 1> clz(Simd<T, 1> x_) {
 #ifdef _MSC_VER
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   // MSVC doesn't have __builtin_clz, use _BitScanReverse instead
   unsigned long index;
   if (_BitScanReverse(&index, static_cast<unsigned long>(x_.value))) {
     return static_cast<T>(31 - index);
   }
   return static_cast<T>(32); // All zeros case
+#else
+  unsigned long idx;
+  return _BitScanReverse(&idx, (unsigned long)x_.value) ? (31 - idx) : 32;
+#endif // MLX_USE_HIGHWAY_KERNELS
 #else
   return __builtin_clz(x_.value);
 #endif
@@ -211,7 +280,11 @@ Simd<T, 1> remainder(Simd<T, 1> a_, Simd<T, 1> b_) {
   if constexpr (std::is_integral_v<T>) {
     r = a % b;
   } else {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
     r = std::remainder(a, b);
+#else
+    r = std::fmod(a, b);
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
   if constexpr (is_signed_v<T>) {
     if (r != 0 && (r < 0 != b < 0)) {
@@ -226,6 +299,11 @@ Simd<T, 1> maximum(Simd<T, 1> a_, Simd<T, 1> b_) {
   T a = a_.value;
   T b = b_.value;
   if constexpr (!std::is_integral_v<T>) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+    if (std::isnan(b)) {
+      return b;
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
     if (std::isnan(a)) {
       return a;
     }
@@ -238,6 +316,11 @@ Simd<T, 1> minimum(Simd<T, 1> a_, Simd<T, 1> b_) {
   T a = a_.value;
   T b = b_.value;
   if constexpr (!std::is_integral_v<T>) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+    if (std::isnan(b)) {
+      return b;
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
     if (std::isnan(a)) {
       return a;
     }

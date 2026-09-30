@@ -30,6 +30,7 @@ target_sources(
           einsum_tests.cpp
           export_import_tests.cpp
           eval_tests.cpp
+          fast_tests.cpp
           fft_tests.cpp
           load_tests.cpp
           metal_buffer_lifetime_tests.cpp
@@ -42,9 +43,33 @@ target_sources(
           linalg_tests.cpp
           ${METAL_TEST_SOURCES})
 
+if(MLX_BUILD_CPU AND MLX_USE_HIGHWAY)
+  # The CPU thread pool exists only in builds with Highway kernels.
+  target_sources(tests PRIVATE thread_pool_tests.cpp)
+  target_sources(tests PRIVATE highway_quantized_tests.cpp)
+  target_sources(tests PRIVATE highway_kernel_tests.cpp)
+  target_sources(tests PRIVATE highway_info_tests.cpp)
+  target_sources(tests PRIVATE highway_threading_tests.cpp)
+  # highway_simd_tests.cpp includes the Highway facade, which includes
+  # hwy/highway.h.
+  target_sources(tests PRIVATE highway_simd_tests.cpp)
+  target_include_directories(
+    tests PRIVATE $<TARGET_PROPERTY:hwy,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_compile_definitions(tests PRIVATE HWY_DISABLE_PCLMUL_AES)
+endif()
+
 target_link_libraries(tests PRIVATE mlx doctest)
 target_compile_options(tests PRIVATE ${SANITIZER_COMPILE_FLAGS})
 target_link_options(tests PRIVATE ${SANITIZER_LINK_FLAGS})
 
-doctest_discover_tests(tests)
+set(MLX_TEST_WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+if(WIN32)
+  # OpenBLAS is copied to the build root on Windows. Run test discovery from
+  # there so the test executable can find libopenblas.dll at startup.
+  set(MLX_TEST_WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
+
+doctest_discover_tests(tests WORKING_DIRECTORY ${MLX_TEST_WORKING_DIRECTORY})
 add_test(NAME tests COMMAND tests)
+set_tests_properties(tests PROPERTIES WORKING_DIRECTORY
+                                      ${MLX_TEST_WORKING_DIRECTORY})

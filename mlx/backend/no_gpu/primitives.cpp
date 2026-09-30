@@ -34,6 +34,16 @@ bool fast::ScaledDotProductAttention::use_fallback(
     bool output_logsumexp,
     bool force_fused,
     Stream s) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  // Use native CPU kernel for inference (handles causal, array mask, sinks).
+  // It takes float32, float16 and bfloat16, one head dim up to 256.
+  const bool native_type =
+      q.dtype() == float32 || q.dtype() == float16 || q.dtype() == bfloat16;
+  if (s.device == Device::cpu && !output_logsumexp && native_type &&
+      q.shape(-1) == v.shape(-1) && q.shape(-1) <= 256) {
+    return false;
+  }
+#endif // MLX_USE_HIGHWAY_KERNELS
   if (force_fused) {
     throw std::invalid_argument(
         "[scaled_dot_product_attention] force_fused=True but no fused "
@@ -172,11 +182,35 @@ NO_GPU(MaskedScatter)
 namespace fast {
 NO_GPU_USE_FALLBACK(CrossEntropy)
 NO_GPU_MULTI(CrossEntropyVJP)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 NO_GPU_USE_FALLBACK(LayerNorm)
+#else
+// LayerNorm and RMSNorm have native CPU implementations (norms.cpp)
+// so don't use fallback on CPU
+bool LayerNorm::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(LayerNorm)
+#endif // MLX_USE_HIGHWAY_KERNELS
 NO_GPU_MULTI(LayerNormVJP)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 NO_GPU_USE_FALLBACK(RMSNorm)
+#else
+bool RMSNorm::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(RMSNorm)
+#endif // MLX_USE_HIGHWAY_KERNELS
 NO_GPU_MULTI(RMSNormVJP)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 NO_GPU_USE_FALLBACK(RoPE)
+#else
+// RoPE has native CPU implementation (rope.cpp)
+bool RoPE::use_fallback(Stream s) {
+  return false; // Use native eval_cpu
+}
+NO_GPU_MULTI(RoPE)
+#endif // MLX_USE_HIGHWAY_KERNELS
 NO_GPU_MULTI(ScaledDotProductAttention)
 NO_GPU_MULTI(ScaledDotProductAttentionVJP)
 NO_GPU_MULTI(ConvertFP8)
