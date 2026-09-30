@@ -1,5 +1,6 @@
 // Copyright © 2023-2026 Apple Inc.
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -117,4 +118,95 @@ TEST_CASE("test clear cache synchronizes cpu streams") {
   clear_thread.join();
 
   set_cache_limit(old_limit);
+}
+
+TEST_CASE("test concurrent allocator statistics") {
+  // The linked backend supplies the actual allocator (CPU or Metal). Only tiny
+  // buffers are allocated; no array graph, model or shader is needed.
+  clear_cache();
+  const auto initial_active = get_active_memory();
+  const auto initial_limit = get_memory_limit();
+  std::atomic<bool> start{false};
+  bool allocation_failed = false;
+  size_t observations = 0;
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    try {
+      for (int i = 0; i < 10000; ++i) {
+        auto buffer = allocator::malloc((i & 1) ? 4096 : 8192);
+        if (buffer.ptr() == nullptr) {
+          allocation_failed = true;
+          break;
+        }
+        allocator::free(buffer);
+        if ((i & 63) == 0) {
+          std::this_thread::yield();
+        }
+      }
+    } catch (...) {
+      allocation_failed = true;
+    }
+  });
+  std::thread reader([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < 100000; ++i) {
+      observations += get_active_memory();
+      observations += get_peak_memory();
+      observations += get_cache_memory();
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  });
+  start.store(true, std::memory_order_release);
+  writer.join();
+  reader.join();
+  INFO("statistics checksum: ", observations);
+  CHECK_FALSE(allocation_failed);
+  CHECK_EQ(get_active_memory(), initial_active);
+  CHECK_EQ(get_memory_limit(), initial_limit);
+  clear_cache();
+  CHECK_EQ(get_cache_memory(), 0);
+}
+
+TEST_CASE("test concurrent allocator limit and peak observations") {
+  const auto initial_limit = get_memory_limit();
+  std::atomic<bool> start{false};
+  bool wrong_limit = false;
+  size_t observations = 0;
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < 10000; ++i) {
+      // Exercise setter/read synchronization without changing the limit value.
+      set_memory_limit(initial_limit);
+      reset_peak_memory();
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  });
+  std::thread reader([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < 100000; ++i) {
+      wrong_limit |= get_memory_limit() != initial_limit;
+      observations += get_peak_memory();
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  });
+  start.store(true, std::memory_order_release);
+  writer.join();
+  reader.join();
+  INFO("peak checksum: ", observations);
+  CHECK_FALSE(wrong_limit);
+  CHECK_EQ(get_memory_limit(), initial_limit);
 }
