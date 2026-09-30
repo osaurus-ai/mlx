@@ -161,16 +161,19 @@ Simd<T, N> map_binary(Simd<T, N> x, Simd<T, N> y, Fn fn);
 template <int N>
 struct BoolSimdBase {
   static constexpr int size = N;
-  uint8_t bits[(N + 7) / 8] = {};
+  // The lanes' bits fill the first used_bytes bytes. Highway's StoreMaskBits
+  // and LoadMaskBits may access 8.
+  static constexpr int used_bytes = (N + 7) / 8;
+  uint8_t bits[8] = {};
 
   BoolSimdBase() = default;
 
   BoolSimdBase(bool value) {
     if (value) {
-      for (int i = 0; i < static_cast<int>(sizeof(bits)); ++i) {
+      for (int i = 0; i < used_bytes; ++i) {
         bits[i] = 0xFF;
       }
-      bits[sizeof(bits) - 1] &=
+      bits[used_bytes - 1] &=
           static_cast<uint8_t>((1u << (((N - 1) % 8) + 1)) - 1u);
     }
   }
@@ -475,22 +478,22 @@ Simd<T, N> map_integer_binary(Simd<T, N> x, Simd<T, N> y, Fn fn) {
 template <int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<bool, N> operator!(Simd<bool, N> x) {
   Simd<bool, N> out;
-  for (int i = 0; i < static_cast<int>(sizeof(out.bits)); ++i) {
+  for (int i = 0; i < Simd<bool, N>::used_bytes; ++i) {
     out.bits[i] = static_cast<uint8_t>(~x.bits[i]);
   }
-  out.bits[sizeof(out.bits) - 1] &=
+  out.bits[Simd<bool, N>::used_bytes - 1] &=
       static_cast<uint8_t>((1u << (((N - 1) % 8) + 1)) - 1u);
   return out;
 }
 
-#define MLX_HIGHWAY_BOOL_OP(name, op)                              \
-  template <int N, highway_detail::EnableIfVector<N> = 0>          \
-  inline Simd<bool, N> name(Simd<bool, N> a, Simd<bool, N> b) {    \
-    Simd<bool, N> out;                                             \
-    for (int i = 0; i < static_cast<int>(sizeof(out.bits)); ++i) { \
-      out.bits[i] = static_cast<uint8_t>(a.bits[i] op b.bits[i]);  \
-    }                                                              \
-    return out;                                                    \
+#define MLX_HIGHWAY_BOOL_OP(name, op)                             \
+  template <int N, highway_detail::EnableIfVector<N> = 0>         \
+  inline Simd<bool, N> name(Simd<bool, N> a, Simd<bool, N> b) {   \
+    Simd<bool, N> out;                                            \
+    for (int i = 0; i < Simd<bool, N>::used_bytes; ++i) {         \
+      out.bits[i] = static_cast<uint8_t>(a.bits[i] op b.bits[i]); \
+    }                                                             \
+    return out;                                                   \
   }
 
 MLX_HIGHWAY_BOOL_OP(operator&&, &)
@@ -975,7 +978,7 @@ inline T prod(Simd<T, N> x) {
 
 template <int N, highway_detail::EnableIfVector<N> = 0>
 inline bool any(Simd<bool, N> x) {
-  for (int i = 0; i < static_cast<int>(sizeof(x.bits)); ++i) {
+  for (int i = 0; i < Simd<bool, N>::used_bytes; ++i) {
     if (x.bits[i] != 0) {
       return true;
     }
