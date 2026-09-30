@@ -9,8 +9,20 @@ endif()
 set(MLX_HIGHWAY_INCLUDE_DIR "")
 
 if(MLX_USE_HIGHWAY)
-  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    message(FATAL_ERROR "MLX_USE_HIGHWAY requires an x86-64 target")
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES
+     "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+    message(FATAL_ERROR "MLX_USE_HIGHWAY requires an x86-64 or arm64 target")
+  endif()
+  if(APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"
+                OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64"))
+    # simd/type.h uses Accelerate's SIMD there.
+    message(FATAL_ERROR "MLX_USE_HIGHWAY is not supported on Apple silicon")
+  endif()
+  if(MSVC
+     AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+     AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    # The MSVC shims below build only x86 targets.
+    message(FATAL_ERROR "MLX_USE_HIGHWAY does not support MSVC on arm64")
   endif()
 
   set(HWY_ENABLE_CONTRIB
@@ -49,7 +61,11 @@ if(MLX_USE_HIGHWAY)
   endif()
 
   set(MLX_HIGHWAY_TARGET_DEFINITIONS HWY_DISABLE_PCLMUL_AES)
-  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(MLX_HIGHWAY_PUBLIC_DEFINITIONS "")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    # No SVE until the dispatched kernels are vector-length agnostic.
+    set(MLX_HIGHWAY_PUBLIC_DEFINITIONS HWY_DISABLED_TARGETS=HWY_ALL_SVE)
+  elseif(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Highway marks its AVX3-family targets broken for MSVC. Mirror that policy
     # here by using Highway's target-filtering define.
     set(MLX_HIGHWAY_DISABLED_AVX3_TARGETS
@@ -62,10 +78,12 @@ if(MLX_USE_HIGHWAY)
   # Keep ISA flags out of the main MLX target. Clang/GCC use Highway's
   # foreach-target attributes; MSVC uses per-target shims below because it needs
   # /arch:AVX2 on AVX2 codegen to avoid slow SSE/AVX transitions.
-  target_compile_definitions(hwy PRIVATE ${MLX_HIGHWAY_TARGET_DEFINITIONS})
+  target_compile_definitions(hwy PRIVATE ${MLX_HIGHWAY_TARGET_DEFINITIONS}
+                                         ${MLX_HIGHWAY_PUBLIC_DEFINITIONS})
   # PUBLIC, since installed headers (fast_primitives.h, unary.h, binary.h)
-  # change with it. Highway's own definitions stay PRIVATE.
-  target_compile_definitions(mlx PUBLIC MLX_USE_HIGHWAY_KERNELS)
+  # change with them. The other Highway definitions stay PRIVATE.
+  target_compile_definitions(mlx PUBLIC MLX_USE_HIGHWAY_KERNELS
+                                        ${MLX_HIGHWAY_PUBLIC_DEFINITIONS})
   target_compile_definitions(mlx PRIVATE ${MLX_HIGHWAY_TARGET_DEFINITIONS})
   target_include_directories(mlx PRIVATE ${MLX_HIGHWAY_INCLUDE_DIR})
   target_link_libraries(mlx PRIVATE hwy::hwy)
