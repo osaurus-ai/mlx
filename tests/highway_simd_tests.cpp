@@ -13,6 +13,13 @@
 
 using namespace mlx::core;
 
+// Highway's StoreMaskBits and LoadMaskBits may access 8 bytes of the buffer
+// they are given, even when the lanes need fewer (g3doc/quick_reference.md).
+static_assert(sizeof(simd::Simd<bool, 2>::bits) >= 8, "mask storage");
+static_assert(sizeof(simd::Simd<bool, 4>::bits) >= 8, "mask storage");
+static_assert(sizeof(simd::Simd<bool, 8>::bits) >= 8, "mask storage");
+static_assert(sizeof(simd::Simd<bool, 16>::bits) >= 8, "mask storage");
+
 namespace {
 
 // A lane's bits in hexadecimal; a float as hexfloat, subnormals included.
