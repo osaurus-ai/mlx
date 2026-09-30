@@ -90,6 +90,25 @@ int count_physical_cores(
   return static_cast<int>(cores.size()) + unknown;
 }
 
+std::optional<std::pair<int, int>> sysfs_topology(
+    const std::string& root,
+    int cpu) {
+  // core_id is not unique within a package on every kernel: key a core by
+  // the first CPU of its list.
+  const std::string base = root + "/cpu" + std::to_string(cpu) + "/topology/";
+  for (const char* list : {"core_cpus_list", "thread_siblings_list"}) {
+    std::ifstream in(base + list);
+    int first = 0;
+    if (in >> first) {
+      int package = 0;
+      std::ifstream package_file(base + "physical_package_id");
+      package_file >> package;
+      return std::make_pair(package, first);
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<int> cgroup_cpu_limit(
     const std::string& root,
     std::string_view self_cgroup) {
@@ -167,20 +186,6 @@ std::vector<int> allowed_cpus() {
   return cpus;
 }
 
-std::optional<std::pair<int, int>> sysfs_topology(int cpu) {
-  const std::string base =
-      "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/";
-  std::ifstream core_file(base + "core_id");
-  int core = 0;
-  int package = 0;
-  if (!(core_file >> core)) {
-    return std::nullopt;
-  }
-  std::ifstream package_file(base + "physical_package_id");
-  package_file >> package;
-  return std::make_pair(package, core);
-}
-
 std::string read_file(const char* path) {
   std::ifstream in(path);
   std::ostringstream text;
@@ -195,7 +200,9 @@ const ThreadConfig& thread_config() {
     ThreadConfig resolved = detail::resolve_thread_config(
         std::getenv("MLX_CPU_THREADS"),
         allowed_cpus(),
-        sysfs_topology,
+        [](int cpu) {
+          return detail::sysfs_topology("/sys/devices/system/cpu", cpu);
+        },
         detail::cgroup_cpu_limit(
             "/sys/fs/cgroup", read_file("/proc/self/cgroup")));
 #if defined(_WIN32)
