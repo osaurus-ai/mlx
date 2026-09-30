@@ -86,6 +86,60 @@ TEST_CASE("highway physical cores are counted within the affinity mask") {
   CHECK(d::count_physical_cores({0, 1, 2}, unknown) == 3);
 }
 
+TEST_CASE("highway cores are told apart by the CPUs they hold") {
+  namespace fs = std::filesystem;
+  const auto stamp =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto root =
+      fs::temp_directory_path() / ("mlx-topology-" + std::to_string(stamp));
+  // cpu<n>/topology/<file> holds <value>, as sysfs shows it.
+  auto write = [&](int cpu, const char* file, const std::string& value) {
+    const auto dir = root / ("cpu" + std::to_string(cpu)) / "topology";
+    fs::create_directories(dir);
+    std::ofstream(dir / file) << value << "\n";
+  };
+  // Two clusters of four cores; core_id restarts in each.
+  for (int cpu = 0; cpu < 8; ++cpu) {
+    write(cpu, "physical_package_id", "0");
+    write(cpu, "cluster_id", std::to_string(cpu / 4));
+    write(cpu, "core_id", std::to_string(cpu % 4));
+    write(cpu, "core_cpus_list", std::to_string(cpu));
+  }
+  d::Topology topology = [&](int cpu) {
+    return d::sysfs_topology(root.string(), cpu);
+  };
+  CHECK(d::count_physical_cores({0, 1, 2, 3, 4, 5, 6, 7}, topology) == 8);
+  CHECK(d::count_physical_cores({0, 4}, topology) == 2);
+  CHECK(d::sysfs_topology(root.string(), 4) == std::make_pair(0, 4));
+  // SMT siblings share a list, which may be a range or a set.
+  for (int cpu : {8, 9}) {
+    write(cpu, "physical_package_id", "0");
+    write(cpu, "core_id", "0");
+    write(cpu, "core_cpus_list", "8-9");
+  }
+  CHECK(d::count_physical_cores({8, 9}, topology) == 1);
+  CHECK(d::sysfs_topology(root.string(), 9) == std::make_pair(0, 8));
+  // Before Linux 5.3 the list is thread_siblings_list.
+  for (int cpu : {10, 12}) {
+    write(cpu, "physical_package_id", "0");
+    write(cpu, "core_id", "5");
+    write(cpu, "thread_siblings_list", "10,12");
+  }
+  CHECK(d::count_physical_cores({10, 12}, topology) == 1);
+  CHECK(d::sysfs_topology(root.string(), 12) == std::make_pair(0, 10));
+  // No list: a core of its own, even with a core_id.
+  write(14, "physical_package_id", "0");
+  write(14, "core_id", "0");
+  CHECK_FALSE(d::sysfs_topology(root.string(), 14).has_value());
+  CHECK_FALSE(d::sysfs_topology(root.string(), 42).has_value());
+  // A real kernel's sysfs gives CPU 0 a key.
+  if (fs::exists(
+          "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")) {
+    CHECK(d::sysfs_topology("/sys/devices/system/cpu", 0).has_value());
+  }
+  fs::remove_all(root);
+}
+
 TEST_CASE("highway pool size: the override, else the tighter limit") {
   d::Topology cores = [](int cpu) -> std::optional<std::pair<int, int>> {
     return std::make_pair(0, cpu);

@@ -43,12 +43,17 @@ MLX_API std::optional<int> parse_thread_count(
 // cgroup v2 cpu.max, "<quota> <period>" or "max <period>": floor(quota /
 // period), at least 1. nullopt without a limit, or for text it cannot read.
 MLX_API std::optional<int> parse_cpu_max(std::string_view contents);
-// Distinct (package, core) pairs among `cpus`. A CPU with no topology counts as
-// a core of its own.
+// Distinct topology keys among `cpus`. A CPU with no topology counts as a core
+// of its own.
 using Topology = std::function<std::optional<std::pair<int, int>>(int cpu)>;
 MLX_API int count_physical_cores(
     const std::vector<int>& cpus,
     const Topology& topology);
+// The topology key of `cpu`, read under `root`: its package and the first
+// CPU of its core's CPU list. nullopt where neither list can be read.
+MLX_API std::optional<std::pair<int, int>> sysfs_topology(
+    const std::string& root,
+    int cpu);
 // The tightest cgroup v2 cpu.max from the "0::" line's cgroup up to `root`;
 // nullopt without that line, for a relative path, or without a limit.
 MLX_API std::optional<int> cgroup_cpu_limit(
