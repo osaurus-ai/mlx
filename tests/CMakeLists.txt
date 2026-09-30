@@ -50,6 +50,12 @@ if(MLX_BUILD_CPU AND MLX_USE_HIGHWAY)
   target_sources(tests PRIVATE highway_kernel_tests.cpp)
   target_sources(tests PRIVATE highway_info_tests.cpp)
   target_sources(tests PRIVATE highway_threading_tests.cpp)
+  # highway_simd_tests.cpp includes the Highway facade, which includes
+  # hwy/highway.h.
+  target_sources(tests PRIVATE highway_simd_tests.cpp)
+  target_include_directories(
+    tests PRIVATE $<TARGET_PROPERTY:hwy,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_compile_definitions(tests PRIVATE HWY_DISABLE_PCLMUL_AES)
 endif()
 
 target_link_libraries(tests PRIVATE mlx doctest)

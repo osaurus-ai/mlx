@@ -177,9 +177,15 @@ struct BoolSimdBase {
 
   template <typename T>
   explicit BoolSimdBase(Simd<T, N> value) {
+    static_assert(
+        !is_half_v<T>,
+        "Highway does not compare float16 and bfloat16 lanes on every target");
     using D = highway_detail::D<T, N>;
     const D d;
-    hn::StoreMaskBits(d, hn::MaskFromVec(value.value), bits);
+    // Compare with zero, as static_cast<bool> does. MaskFromVec is defined
+    // only for lanes of all zeros or all ones: x86 reads the top bit of each
+    // lane, and NEON bit i of lane i.
+    hn::StoreMaskBits(d, hn::Ne(value.value, hn::Zero(d)), bits);
   }
 
   template <class D>
