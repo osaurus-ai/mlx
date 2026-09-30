@@ -802,9 +802,15 @@ inline Simd<T, N> maximum(Simd<T, N> a, Simd<T, N> b) {
     return Simd<T, N>(maximum(Simd<float, N>(a), Simd<float, N>(b)));
   } else {
     Simd<T, N> out;
-    out.value = hn::Max(a.value, b.value);
     if constexpr (std::is_floating_point_v<T>) {
-      out = select(isnan(b), b, select(isnan(a), a, out));
+      // As base_simd.h: a NaN wins, and a tie of +0 and -0 returns b.
+      // Highway's Max, FMAXNM on arm64, returns +0 for that tie.
+      out.value = hn::IfThenElse(
+          hn::Or(hn::IsNaN(b.value), hn::Le(a.value, b.value)),
+          b.value,
+          a.value);
+    } else {
+      out.value = hn::Max(a.value, b.value);
     }
     return out;
   }
@@ -816,9 +822,15 @@ inline Simd<T, N> minimum(Simd<T, N> a, Simd<T, N> b) {
     return Simd<T, N>(minimum(Simd<float, N>(a), Simd<float, N>(b)));
   } else {
     Simd<T, N> out;
-    out.value = hn::Min(a.value, b.value);
     if constexpr (std::is_floating_point_v<T>) {
-      out = select(isnan(b), b, select(isnan(a), a, out));
+      // As base_simd.h: a NaN wins, and a tie of +0 and -0 returns b.
+      // Highway's Min, FMINNM on arm64, returns -0 for that tie.
+      out.value = hn::IfThenElse(
+          hn::Or(hn::IsNaN(b.value), hn::Ge(a.value, b.value)),
+          b.value,
+          a.value);
+    } else {
+      out.value = hn::Min(a.value, b.value);
     }
     return out;
   }

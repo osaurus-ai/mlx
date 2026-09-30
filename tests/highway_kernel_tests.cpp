@@ -312,6 +312,91 @@ TEST_CASE("highway floor, ceil, trunc and round keep the sign of zero") {
   }
 }
 
+TEST_CASE(
+    "highway maximum and minimum: NaN wins, and a tie of +0 and -0 returns b") {
+  // As base_simd.h. 64 elements hold every pair in whole vectors. The NaNs
+  // differ in sign, so a NaN result shows its operand (not in bf16: one NaN).
+  const float a_values[4] = {0.0f, -0.0f, std::copysign(NAN, -1.0f), 1.0f};
+  const float b_values[4] = {-0.0f, 0.0f, 1.0f, NAN};
+  std::vector<float> as, bs;
+  for (int i = 0; i < 64; ++i) {
+    as.push_back(a_values[i % 4]);
+    bs.push_back(b_values[(i / 4) % 4]);
+  }
+  auto reference = [](float a, float b, bool is_max) {
+    if (std::isnan(b)) {
+      return b;
+    }
+    if (std::isnan(a)) {
+      return a;
+    }
+    return (is_max ? a > b : a < b) ? a : b;
+  };
+  auto at = [](const array& a, int i) {
+    return slice(astype(a, float32), {i}, {i + 1}).item<float>();
+  };
+  for (auto dtype : {float32, float64, bfloat16, float16}) {
+    auto a = array(as.begin(), {64}, dtype);
+    auto b = array(bs.begin(), {64}, dtype);
+    auto hi = maximum(a, b);
+    auto lo = minimum(a, b);
+    for (int i = 0; i < 64; ++i) {
+      // One element takes base_simd.h's scalar path.
+      auto a1 = slice(a, {i}, {i + 1});
+      auto b1 = slice(b, {i}, {i + 1});
+      for (bool is_max : {true, false}) {
+        const float got = at(is_max ? hi : lo, i);
+        const float want = reference(as[i], bs[i], is_max);
+        const float scalar = at(is_max ? maximum(a1, b1) : minimum(a1, b1), 0);
+        CAPTURE(dtype);
+        CAPTURE(is_max);
+        CAPTURE(as[i]);
+        CAPTURE(bs[i]);
+        CAPTURE(got);
+        CAPTURE(scalar);
+        CHECK(std::isnan(got) == std::isnan(want));
+        CHECK(std::signbit(got) == std::signbit(scalar));
+        if (!std::isnan(want)) {
+          CHECK(got == want);
+          CHECK(std::signbit(got) == std::signbit(want));
+        }
+      }
+    }
+  }
+  // Integers take Highway's Max and Min.
+  std::vector<int32_t> xs(64), ys(64), hi_want(64), lo_want(64);
+  for (int i = 0; i < 64; ++i) {
+    xs[i] = i % 7 - 3;
+    ys[i] = 2 - i % 5;
+    hi_want[i] = std::max(xs[i], ys[i]);
+    lo_want[i] = std::min(xs[i], ys[i]);
+  }
+  auto x = array(xs.begin(), {64}, int32);
+  auto y = array(ys.begin(), {64}, int32);
+  CHECK(array_equal(maximum(x, y), array(hi_want.begin(), {64}, int32))
+            .item<bool>());
+  CHECK(array_equal(minimum(x, y), array(lo_want.begin(), {64}, int32))
+            .item<bool>());
+}
+
+TEST_CASE("highway max and min reductions return NaN from any position") {
+  // 67 elements: every lane of whole vectors, and a scalar tail.
+  for (auto dtype : {float32, float64, bfloat16, float16}) {
+    for (int p = 0; p < 67; ++p) {
+      std::vector<float> xs(67);
+      for (int i = 0; i < 67; ++i) {
+        xs[i] = 0.5f * (i % 9) - 2.0f;
+      }
+      xs[p] = NAN;
+      auto x = array(xs.begin(), {67}, dtype);
+      CAPTURE(dtype);
+      CAPTURE(p);
+      CHECK(std::isnan(astype(max(x), float32).item<float>()));
+      CHECK(std::isnan(astype(min(x), float32).item<float>()));
+    }
+  }
+}
+
 TEST_CASE("highway fp32 matmul splits short inputs by columns, exactly") {
   namespace hi = mlx::core::cpu::highway_info;
   const int k = 256;
