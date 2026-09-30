@@ -104,3 +104,12 @@ TEST_CASE("highway norms and rope compose float64 through the fallback") {
     CHECK(hi::stats(family).fallback_calls > 0);
   }
 }
+
+TEST_CASE("highway compiles no SVE target") {
+  // The dispatched kernels are not vector-length agnostic yet.
+  for (auto t : bits_of(hi::compiled_targets())) {
+    const std::string name = hi::target_name(t);
+    CAPTURE(name);
+    CHECK_FALSE(name.starts_with("SVE"));
+  }
+}

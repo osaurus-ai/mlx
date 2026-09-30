@@ -42,10 +42,12 @@ option(MLX_BUILD_GGUF "Include support for GGUF format" ON)
 option(MLX_BUILD_SAFETENSORS "Include support for safetensors format" ON)
 option(MLX_BUILD_PYTHON_STUBS "Build stub files for python bindings" ON)
 option(MLX_METAL_JIT "Use JIT compilation for Metal kernels" OFF)
-# Highway SIMD kernels for the CPU backend, on by default for Linux x86-64.
+# Highway SIMD kernels for the CPU backend, on by default for Linux x86-64 and
+# arm64.
 if(MLX_BUILD_CPU
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
-   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES
+       "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
   set(_MLX_USE_HIGHWAY_DEFAULT ON)
 else()
   set(_MLX_USE_HIGHWAY_DEFAULT OFF)

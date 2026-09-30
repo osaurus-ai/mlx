@@ -21,8 +21,8 @@
 #include "mlx/utils.h"
 
 // ISA-specific SIMD implementations (int8 kernels, dequant, LUT lookups).
-// Highway kernels are compiled as runtime-dispatched translation units when x86
-// CPU SIMD is enabled.
+// Highway kernels are compiled as runtime-dispatched translation units when
+// MLX_USE_HIGHWAY_KERNELS is defined.
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/quantized_highway.h"
 #else
