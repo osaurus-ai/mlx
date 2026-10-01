@@ -374,8 +374,8 @@ void GatherMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& a_pre = inputs[0];
   auto& b_pre = inputs[1];
 
-  // Return 0s if either input is empty.
-  if (a_pre.size() == 0 || b_pre.size() == 0) {
+  // Return 0s if the output or either input is empty.
+  if (out.size() == 0 || a_pre.size() == 0 || b_pre.size() == 0) {
     array zero(0, a_pre.dtype());
     encoder.add_temporary(zero);
     fill_gpu(zero, out, s);
@@ -421,7 +421,7 @@ void GatherMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     return;
   }
 
-  cutlass_gather_mm(
+  gather_mm(
       a_transposed, b_transposed, a, b, lhs_indices, rhs_indices, out, encoder);
 }
 

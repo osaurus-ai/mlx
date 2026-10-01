@@ -2,6 +2,9 @@
 
 #include "doctest/doctest.h"
 
+#include <atomic>
+#include <thread>
+
 #include "mlx/mlx.h"
 #include "mlx/scheduler.h"
 
@@ -69,11 +72,7 @@ TEST_CASE("test default stream in threads") {
 }
 
 TEST_CASE("test access stream in other thread") {
-  if (!gpu::is_available()) {
-    return;
-  }
-
-  auto main_thread_stream = new_stream(Device::gpu);
+  auto main_thread_stream = new_stream(default_device());
   eval(arange(10, main_thread_stream));
 
   bool error_caught = false;
@@ -102,6 +101,49 @@ TEST_CASE("test new stream in threads") {
   for (auto& t : threads) {
     t.join();
   }
+}
+
+TEST_CASE("test thread unsafe stream") {
+  auto s = new_thread_unsafe_stream(default_device());
+  int expected = sum(arange(10, s)).item<int>();
+
+  int actual = 0;
+  std::thread t([&] {
+    actual = sum(arange(10, s)).item<int>();
+    clear_streams();
+  });
+  t.join();
+
+  CHECK_EQ(expected, actual);
+}
+
+TEST_CASE("test eval does not create default stream") {
+  auto s = new_thread_unsafe_stream(default_device());
+  size_t num_streams = get_streams().size();
+
+  std::thread t([&] {
+    async_eval(arange(10, s));
+    eval(arange(10, s));
+  });
+  t.join();
+
+  CHECK_EQ(get_streams().size(), num_streams);
+}
+
+TEST_CASE("test compile does not create default stream") {
+  auto s = new_thread_unsafe_stream(default_device());
+  size_t num_streams = get_streams().size();
+
+  std::function<std::vector<array>(const std::vector<array>&)> fun =
+      [s](const std::vector<array>& inputs) {
+        return std::vector<array>{abs(inputs[0], s)};
+      };
+  auto cfun = compile(fun);
+
+  std::thread t([&] { eval(cfun({array({-1, 2})})); });
+  t.join();
+
+  CHECK_EQ(get_streams().size(), num_streams);
 }
 
 TEST_CASE("test thread local stream") {
@@ -238,4 +280,79 @@ TEST_CASE("test scheduler races") {
     y = exp(y);
   }
   eval(a, y);
+}
+
+TEST_CASE("test concurrent scheduler active task observations") {
+  // Use an independent actual Scheduler so other test streams cannot change
+  // this counter. No tasks are enqueued and no GPU work is required.
+  scheduler::Scheduler scheduler;
+  const Stream stream(0, Device::cpu);
+  std::atomic<bool> start{false};
+  bool invalid_observation = false;
+  constexpr int iterations = 1000000;
+
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < iterations; ++i) {
+      scheduler.notify_new_task(stream);
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+      scheduler.notify_task_completion(stream);
+    }
+  });
+  std::thread reader([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < iterations; ++i) {
+      const int active = scheduler.n_active_tasks();
+      invalid_observation |= active < 0 || active > 1;
+      if ((i & 63) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  });
+  start.store(true, std::memory_order_release);
+  writer.join();
+  reader.join();
+
+  // TSan detects the unsynchronized getter even if all observed values happen
+  // to be in range. Ordinary builds additionally check the count contract.
+  CHECK_FALSE(invalid_observation);
+  CHECK_EQ(scheduler.n_active_tasks(), 0);
+  scheduler.wait_for_one();
+  scheduler.notify_new_task(stream);
+  CHECK_EQ(scheduler.n_active_tasks(), 1);
+  scheduler.wait_for_one();
+  scheduler.notify_task_completion(stream);
+  CHECK_EQ(scheduler.n_active_tasks(), 0);
+}
+
+// The fence orders work between two streams. Check that the consumer sees the
+// producer result for every combination of producer and consumer device.
+TEST_CASE("test cross stream fence ordering") {
+  if (!gpu::is_available()) {
+    return;
+  }
+  std::vector<Device::DeviceType> devices = {Device::cpu, Device::gpu};
+
+  for (auto pd : devices) {
+    for (auto cd : devices) {
+      auto ps = new_stream(pd);
+      auto cs = new_stream(cd);
+
+      array one = full({1}, 1.0f, float32, ps);
+      array x = full({64, 64}, 1.0f, float32, ps);
+      for (int i = 0; i < 20; ++i) {
+        x = add(x, one, ps);
+      }
+
+      // The consumer is on the other stream, so eval builds a fence.
+      array y = sum(x, cs);
+      CHECK_EQ(y.item<float>(), doctest::Approx(64 * 64 * 21.0f));
+    }
+  }
 }

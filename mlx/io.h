@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 
 #include "mlx/api.h"
@@ -39,6 +41,44 @@ MLX_API SafetensorsLoad
 load_safetensors(std::shared_ptr<io::Reader> in_stream, StreamOrDevice s = {});
 MLX_API SafetensorsLoad
 load_safetensors(const std::string& file, StreamOrDevice s = {});
+MLX_API SafetensorsLoad load_safetensors_excluding(
+    const std::string& file,
+    const std::unordered_set<std::string>& excluded_keys,
+    StreamOrDevice s = {});
+MLX_API SafetensorsLoad load_safetensors_excluding(
+    const std::string& file,
+    const std::unordered_set<std::string>& excluded_keys,
+    bool exact_tensor_buffers,
+    StreamOrDevice s = {});
+
+MLX_API int64_t
+safetensors_mmap_advise_routed(int32_t advice, int32_t cold_pct);
+MLX_API int64_t safetensors_mmap_advise_experts(
+    int32_t advice,
+    const int32_t* layers,
+    const int32_t* experts,
+    int64_t count);
+MLX_API int64_t safetensors_mmap_advise_layer(int32_t advice, int32_t layer);
+MLX_API int64_t safetensors_mmap_tracked_buffer_bytes();
+MLX_API array mmap_file_region(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype);
+
+// Named JANGH banks participate in canonical layer/expert cold-page advice.
+// Valid names are
+// model.layers.N.mlp.switch_mlp.{gate,up,down}_proj.tq2_{packed,scales}. The
+// array owns its mapping; registry entries hold only weak references. Advice
+// uses the existing process-global layer/expert namespace, not a model ID.
+MLX_API array mmap_file_region_named(
+    const std::string& file,
+    uint64_t offset,
+    size_t length,
+    Shape shape,
+    Dtype dtype,
+    const std::string& tensor_name);
 
 MLX_API void save_safetensors(
     std::shared_ptr<io::Writer> in_stream,

@@ -1,4 +1,4 @@
-// Copyright © 2025 Apple Inc.
+// Copyright © 2025-2026 Apple Inc.
 
 #include "mlx/backend/cuda/quantized/quantized.h"
 #include "mlx/backend/cuda/device.h"
@@ -17,7 +17,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& encoder = cu::get_command_encoder(s);
 
-  const array& x = inputs[0];
+  array x = ensure_row_contiguous(inputs[0], encoder, s);
   const array& w = inputs[1];
   const array& scales = inputs[2];
   std::optional<array> biases;
@@ -72,6 +72,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         biases,
         std::nullopt,
         std::nullopt,
+        std::nullopt,
         out,
         transpose_,
         bits_,
@@ -84,7 +85,16 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     if (can_use_fp_qmv) {
       fp_qmv(x, w, scales, out, bits_, group_size_, encoder, s);
     } else {
-      qmv(x, w, scales, biases, out, bits_, group_size_, mode_, encoder);
+      qmv(x,
+          w,
+          scales,
+          biases,
+          std::nullopt,
+          out,
+          bits_,
+          group_size_,
+          mode_,
+          encoder);
     }
   };
 
@@ -146,15 +156,21 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& encoder = cu::get_command_encoder(s);
 
-  const array& x = inputs[0];
+  array x = ensure_row_contiguous(inputs[0], encoder, s);
   const array& w = inputs[1];
   const array& scales = inputs[2];
+  // Affine gets biases at index 3, nvfp4 an optional global scale.
   std::optional<array> biases;
-  if (inputs.size() == 6) {
+  std::optional<array> global_scale;
+  if (mode_ == QuantizationMode::Affine) {
     biases = inputs[3];
+  } else if (inputs.size() == 6) {
+    global_scale = ensure_row_contiguous(inputs[3], encoder, s);
   }
-  array lhs_indices = ensure_contiguous(inputs[inputs.size() - 2], encoder, s);
-  array rhs_indices = ensure_contiguous(inputs[inputs.size() - 1], encoder, s);
+  array lhs_indices =
+      ensure_row_contiguous(inputs[inputs.size() - 2], encoder, s);
+  array rhs_indices =
+      ensure_row_contiguous(inputs[inputs.size() - 1], encoder, s);
 
   int M = out.ndim() > 1 ? out.shape(-2) : 1;
   int N = out.shape(-1);
@@ -174,7 +190,10 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         mode_,
         encoder.device());
   };
-  bool can_use_qmm_sm80 = supports(supports_qmm_sm80);
+  // qmm_sm80 does not apply global scales yet; route such calls to the
+  // naive kernel until it does.
+  bool can_use_qmm_sm80 =
+      !global_scale.has_value() && supports(supports_qmm_sm80);
   bool can_use_qmm_naive = supports(supports_qmm_naive);
   bool can_use_qmv = supports(supports_qmv);
 
@@ -200,6 +219,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         w,
         scales,
         biases,
+        global_scale,
         lhs_indices,
         rhs_indices,
         out,
@@ -216,6 +236,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         w,
         scales,
         biases,
+        global_scale,
         lhs_indices,
         rhs_indices,
         out,

@@ -50,11 +50,18 @@ if [ -n "$HDRS" ]; then
   fi
 fi
 
-# Remove any included system frameworks (for MetalPerformancePrimitive headers)
-HDRS=$(echo "$HDRS" | grep -v "Xcode")
+# Expand only pinned project headers. System headers can also live in the
+# downloadable Metal toolchain's cryptex, not just Xcode.app. Treating those
+# absolute paths as SRC_DIR-relative silently emits empty source sections.
+# System angle-bracket includes remain for the runtime compiler to resolve.
+HDRS=$(echo "$HDRS" | awk -v root="$SRC_DIR/" \
+  '{ path=$0; sub(/^[.]+ /, "", path); if (index(path, root) == 1) print }')
 
 # Use the header depth to sort the files in order of inclusion
-declare -a HDRS_LIST=($HDRS)
+declare -a HDRS_LIST=()
+while read -r dots path; do
+  [ -n "$dots" ] && HDRS_LIST+=("$dots" "$path")
+done <<< "$HDRS"
 declare -a HDRS_STACK=()
 declare -a HDRS_SORTED=()
 
@@ -96,6 +103,13 @@ done
 
 # Make sure the given metal header is also expanded in the source content
 HDRS_SORTED+=("${INPUT_FILE#$SRC_DIR/}")
+
+for header in "${HDRS_SORTED[@]}"; do
+  if [ ! -r "${SRC_DIR}/${header}" ]; then
+    echo "Error: missing pinned Metal header ${SRC_DIR}/${header}" >&2
+    exit 1
+  fi
+done
 
 # Expand the headers in order of inclusion 
 CONTENT=$(
