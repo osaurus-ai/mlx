@@ -1,8 +1,14 @@
 // Copyright © 2025 Apple Inc.
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/common/utils.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/backend/cpu/gemm.h"
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/gemms/simd_gemm.h"
+#else
+#include "mlx/backend/cpu/gemms/simd_low_precision_gemm.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 
 namespace mlx::core {
 
@@ -23,6 +29,7 @@ void matmul<float16_t>(
     const Strides& a_strides,
     const Shape& b_shape,
     const Strides& b_strides) {
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   auto ndim = a_shape.size();
   size_t M = a_shape[ndim - 2];
   size_t N = b_shape[ndim - 1];
@@ -40,6 +47,24 @@ void matmul<float16_t>(
         alpha,
         beta);
   }
+#else
+  detail::matmul_lowp(
+      a,
+      b,
+      out,
+      a_transposed,
+      b_transposed,
+      lda,
+      ldb,
+      ldc,
+      alpha,
+      beta,
+      batch_size,
+      a_shape,
+      a_strides,
+      b_shape,
+      b_strides);
+#endif // MLX_USE_HIGHWAY_KERNELS
 }
 
 } // namespace mlx::core

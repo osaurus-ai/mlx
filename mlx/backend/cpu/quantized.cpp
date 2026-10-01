@@ -1,4 +1,6 @@
 // Copyright © 2023-2026 Apple Inc.
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
+// Builds with Highway compile quantized_highway_backend.cpp instead.
 
 #include "mlx/backend/common/quantized.h"
 #include "mlx/backend/common/unary.h"
@@ -1373,3 +1375,4 @@ void GatherQQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 } // namespace mlx::core
+#endif // !defined(MLX_USE_HIGHWAY_KERNELS)

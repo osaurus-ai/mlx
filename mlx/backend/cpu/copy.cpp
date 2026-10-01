@@ -7,6 +7,9 @@
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/backend/cpu/simd/simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+#include "mlx/backend/cpu/threading/common.h"
+#endif // MLX_USE_HIGHWAY_KERNELS
 #include "mlx/dtype_utils.h"
 
 namespace mlx::core {
@@ -109,10 +112,13 @@ void copy_general_general(
 
   auto size = std::accumulate(
       shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   ContiguousIterator in(shape, strides[0], ndim - 3);
   ContiguousIterator out(shape, strides[1], ndim - 3);
+#endif // MLX_USE_HIGHWAY_KERNELS
   auto stride = std::accumulate(
       shape.end() - 3, shape.end(), 1, std::multiplies<int64_t>());
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
   for (int64_t elem = 0; elem < size; elem += stride) {
     copy_dims<SrcT, DstT, 3>(
         src_ptr + in.loc,
@@ -123,6 +129,59 @@ void copy_general_general(
         ndim - 3);
     in.step();
     out.step();
+#else
+  int64_t num_iterations = size / stride;
+
+  // Check if parallelization is beneficial
+  auto& pool = cpu::ThreadPool::instance();
+  int n_threads = cpu::effective_threads(
+      static_cast<size_t>(num_iterations * stride), pool.max_threads());
+
+  if (n_threads > 1 && num_iterations >= n_threads) {
+    // Parallel path: each thread processes a chunk of iterations
+    pool.parallel_for(n_threads, [&](int tid, int nth) {
+      int64_t chunk = (num_iterations + nth - 1) / nth;
+      int64_t start_iter = chunk * tid;
+      int64_t end_iter = std::min(start_iter + chunk, num_iterations);
+
+      if (start_iter >= end_iter) {
+        return;
+      }
+
+      // Create iterators and seek to starting position
+      ContiguousIterator in(shape, strides[0], ndim - 3);
+      ContiguousIterator out(shape, strides[1], ndim - 3);
+      in.seek(start_iter);
+      out.seek(start_iter);
+
+      for (int64_t iter = start_iter; iter < end_iter; ++iter) {
+        copy_dims<SrcT, DstT, 3>(
+            src_ptr + in.loc,
+            dst_ptr + out.loc,
+            shape,
+            strides[0],
+            strides[1],
+            ndim - 3);
+        in.step();
+        out.step();
+      }
+    });
+  } else {
+    // Sequential path
+    ContiguousIterator in(shape, strides[0], ndim - 3);
+    ContiguousIterator out(shape, strides[1], ndim - 3);
+    for (int64_t elem = 0; elem < size; elem += stride) {
+      copy_dims<SrcT, DstT, 3>(
+          src_ptr + in.loc,
+          dst_ptr + out.loc,
+          shape,
+          strides[0],
+          strides[1],
+          ndim - 3);
+      in.step();
+      out.step();
+    }
+#endif // MLX_USE_HIGHWAY_KERNELS
   }
 }
 
