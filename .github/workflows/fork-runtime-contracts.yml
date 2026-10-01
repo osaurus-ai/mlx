@@ -12,6 +12,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Install CPU linear algebra headers
+        run: sudo apt-get update && sudo apt-get install -y liblapacke-dev libopenblas-dev
       - name: Build native CPU tests
         run: |
           cmake -S . -B build-contracts -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_METAL=OFF -DMLX_BUILD_CUDA=OFF -DMLX_BUILD_TESTS=ON -DMLX_BUILD_EXAMPLES=OFF

@@ -112,8 +112,8 @@ void GatedDeltaUpdate::eval_gpu(
       std::string hash_name = base_name;
       metal::MTLFCList func_consts = {};
 
-      auto delta_kernel =
-          get_gated_delta_nax_kernel(d, base_name, hash_name, func_consts, q, v, C);
+      auto delta_kernel = get_gated_delta_nax_kernel(
+          d, base_name, hash_name, func_consts, q, v, C);
       compute_encoder.set_compute_pipeline_state(delta_kernel);
       break;
     }
