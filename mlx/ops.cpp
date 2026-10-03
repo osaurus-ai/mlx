@@ -5593,11 +5593,6 @@ array gather_qmm(
       quantization_params_from_mode(qmode, group_size_, bits_);
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "gather_qmm", x, w, scales, biases, transpose, group_size, bits);
-  const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
-      transpose && x.dtype() == bfloat16 && out_type == float16 && biases &&
-      biases->dtype() == float16 && group_size == 64 &&
-      (bits == 4 || bits == 8) && x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
-      w_outer_dims % 8 == 0;
   if (global_scale) {
     if (qmode != QuantizationMode::Nvfp4) {
       throw std::invalid_argument(
@@ -5624,6 +5619,28 @@ array gather_qmm(
           "[gather_qmm] Global scale is only supported on the GPU.");
     }
   }
+  // Extract indices and broadcast them
+  array lhs_indices = indices_or_default("[gather_qmm]", lhs_indices_, x, s);
+  array rhs_indices = indices_or_default("[gather_qmm]", rhs_indices_, w, s);
+  std::tie(lhs_indices, rhs_indices) =
+      broadcast_arrays(lhs_indices, rhs_indices, s);
+
+  // Match GatherQMM::eval_gpu: only Metal's vector consumer supports mixed
+  // BF16/F16 storage. Sorted matrix rows need normal dtype promotion.
+  const auto experts = std::accumulate(
+      w.shape().begin(),
+      w.shape().end() - 2,
+      size_t{1},
+      std::multiplies<size_t>{});
+  const bool sorted_rhs_matrix = sorted_indices && !lhs_indices_ &&
+      x.shape(-2) == 1 && rhs_indices.size() >= 16 && experts > 0 &&
+      rhs_indices.size() / experts >= 4;
+  const bool mixed_bf16_f16_qmv = to_stream(s).device == Device::gpu &&
+      metal::is_available() && !sorted_rhs_matrix &&
+      qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
+      out_type == float16 && biases && biases->dtype() == float16 &&
+      group_size == 64 && (bits == 4 || bits == 8) && x.shape(-2) == 1 &&
+      w_inner_dims % 512 == 0 && w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
     out_type =
         mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), out_type);
@@ -5637,12 +5654,6 @@ array gather_qmm(
         << "x.dtype() == " << x.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
-
-  // Extract indices and broadcast them
-  array lhs_indices = indices_or_default("[gather_qmm]", lhs_indices_, x, s);
-  array rhs_indices = indices_or_default("[gather_qmm]", rhs_indices_, w, s);
-  std::tie(lhs_indices, rhs_indices) =
-      broadcast_arrays(lhs_indices, rhs_indices, s);
 
   // Compute the full output shape
   auto out_shape = lhs_indices.shape();
