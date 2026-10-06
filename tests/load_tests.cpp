@@ -746,6 +746,57 @@ TEST_CASE("named mmap banks register expert ranges and release weak owners") {
   }
 }
 
+TEST_CASE("dense named mmap keeps one-expert ownership and layer advice") {
+  NamedMmapFixture file;
+  constexpr int32_t layer = 1900000001;
+  const auto prefix = "model.layers.1900000001.mlp.down_proj.tq2_";
+  const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  for (bool packed : {true, false}) {
+    const Shape shape = packed ? Shape{1, static_cast<int>(file.page / 4), 1}
+                               : Shape{1, static_cast<int>(file.page / 2)};
+    const auto name = std::string(prefix) + (packed ? "packed" : "scales");
+    if (!metal::is_available()) {
+      CHECK_THROWS_WITH_AS(
+          mmap_file_region_named(
+              file.path, file.page, file.page, shape,
+              packed ? uint32 : float16, name),
+          ("[mmap_file_region] make_buffer failed: " + file.path).c_str(),
+          std::runtime_error);
+      CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+      continue;
+    }
+    {
+      auto bank = mmap_file_region_named(
+          file.path, file.page, file.page, shape,
+          packed ? uint32 : float16, name);
+      CHECK_EQ(bank.shape(), shape);
+      CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline + file.page);
+      CHECK_EQ(safetensors_mmap_advise_layer(1, layer), file.page);
+      int32_t selected_layer = layer;
+      int32_t expert = 0;
+      CHECK_EQ(safetensors_mmap_advise_experts(1, &selected_layer, &expert, 1),
+          file.page);
+      expert = 1;
+      CHECK_EQ(safetensors_mmap_advise_experts(1, &selected_layer, &expert, 1), 0);
+    }
+    CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+    CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 0);
+  }
+  const Shape one{1, static_cast<int>(file.page / 4), 1};
+  for (const auto& name : {
+           "model.layers.0.mlp.gate_proj.tq2_packed",
+           "model.layers.0.mlp.up_proj.tq2_packed",
+           "model.layers.00.mlp.down_proj.tq2_packed",
+           "model.layers.2147483648.mlp.down_proj.tq2_packed"}) {
+    CHECK_THROWS(mmap_file_region_named(file.path, 0, file.page, one, uint32, name));
+  }
+  CHECK_THROWS(mmap_file_region_named(
+      file.path, 0, 2 * file.page,
+      {2, static_cast<int>(file.page / 4), 1}, uint32,
+      "model.layers.0.mlp.down_proj.tq2_packed"));
+  CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+}
+
 TEST_CASE("named mmap rejects invalid contract before registering") {
   NamedMmapFixture file;
   const auto baseline = safetensors_mmap_tracked_buffer_bytes();

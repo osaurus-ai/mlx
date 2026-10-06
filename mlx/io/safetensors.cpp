@@ -1119,14 +1119,20 @@ array mmap_file_region_named(
     Shape shape,
     Dtype dtype,
     const std::string& tensor_name) {
-  // This additive API admits only the prevalidated JANGH stacked-bank
-  // namespace. The old loader's name matching and unnamed API are unchanged.
+  // Admit routed banks and one-expert dense down banks. The old loader's
+  // name matching and unnamed API are unchanged.
   static const std::regex canonical(
       R"(^model\.layers\.(0|[1-9][0-9]*)\.mlp\.switch_mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
+  static const std::regex dense_canonical(
+      R"(^model\.layers\.(0|[1-9][0-9]*)\.mlp\.(down)_proj\.tq2_(packed|scales)$)");
   std::smatch match;
+  bool dense = false;
   if (!std::regex_match(tensor_name, match, canonical)) {
-    throw std::invalid_argument(
-        "[mmap_file_region_named] invalid canonical bank name.");
+    if (!std::regex_match(tensor_name, match, dense_canonical)) {
+      throw std::invalid_argument(
+          "[mmap_file_region_named] invalid canonical bank name.");
+    }
+    dense = true;
   }
   const auto layer_value = std::stoull(match[1].str());
   if (layer_value >
@@ -1136,7 +1142,8 @@ array mmap_file_region_named(
   }
   const bool packed = match[3].str() == "packed";
   if (shape.size() != (packed ? 3 : 2) ||
-      dtype != (packed ? uint32 : float16)) {
+      dtype != (packed ? uint32 : float16) ||
+      (dense && shape[0] != 1)) {
     throw std::invalid_argument(
         "[mmap_file_region_named] bank rank/dtype mismatch.");
   }
