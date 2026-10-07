@@ -1,6 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
 import math
+import unittest
 from itertools import combinations, permutations
 
 import mlx.core as mx
@@ -338,6 +339,12 @@ class TestReduce(mlx_tests.MLXTestCase):
                 getattr(mx, op)(x_mx, axis=1).tolist(),
                 getattr(np, op)(x_np, axis=1).tolist(),
             )
+
+    @unittest.skipIf(not mx.metal.is_available(), "requires Metal")
+    def test_init_reduce_large_output(self):
+        out = mx.all(mx.zeros((0, 4, 2**30), dtype=mx.bool_), axis=0)
+        mx.eval(out)
+        self.assertTrue(mx.all(out).item())
 
 
 if __name__ == "__main__":
