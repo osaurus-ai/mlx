@@ -1147,8 +1147,7 @@ array mmap_file_region_named(
   }
   const bool packed = match[3].str() == "packed";
   if (shape.size() != (packed ? 3 : 2) ||
-      dtype != (packed ? uint32 : float16) ||
-      (dense && shape[0] != 1)) {
+      dtype != (packed ? uint32 : float16) || (dense && shape[0] != 1)) {
     throw std::invalid_argument(
         "[mmap_file_region_named] bank rank/dtype mismatch.");
   }
