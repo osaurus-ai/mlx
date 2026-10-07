@@ -1123,8 +1123,13 @@ array mmap_file_region_named(
   // name matching and unnamed API are unchanged.
   static const std::regex canonical(
       R"(^model\.layers\.(0|[1-9][0-9]*)\.mlp\.switch_mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
+  // Dense one-expert banks: K2 down projections
+  // (`model.layers.L.mlp.down_proj`) and the Qwen3.5-family dense JANGH MLP
+  // (`language_model.model.layers.L.mlp.{gate,up,down}_proj`, Qwen3.8-27B
+  // JANGH2, 2026-10-06). The layer index stays capture group 1 for the
+  // JangPress layer registry.
   static const std::regex dense_canonical(
-      R"(^model\.layers\.(0|[1-9][0-9]*)\.mlp\.(down)_proj\.tq2_(packed|scales)$)");
+      R"(^(?:language_model\.)?model\.layers\.(0|[1-9][0-9]*)\.mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
   std::smatch match;
   bool dense = false;
   if (!std::regex_match(tensor_name, match, canonical)) {
@@ -1142,8 +1147,7 @@ array mmap_file_region_named(
   }
   const bool packed = match[3].str() == "packed";
   if (shape.size() != (packed ? 3 : 2) ||
-      dtype != (packed ? uint32 : float16) ||
-      (dense && shape[0] != 1)) {
+      dtype != (packed ? uint32 : float16) || (dense && shape[0] != 1)) {
     throw std::invalid_argument(
         "[mmap_file_region_named] bank rank/dtype mismatch.");
   }

@@ -32,6 +32,7 @@ jobs:
               "test siblings circular references released by overwrite",
               "test assigning a sibling over the last reference keeps the cycle",
               "named mmap banks register expert ranges and release weak owners",
+              "dense named mmap keeps one-expert ownership and layer advice",
               "named mmap rejects invalid contract before registering",
               "unnamed mmap regions retain their unregistered behavior",
               "test safetensors file boundary validation",
