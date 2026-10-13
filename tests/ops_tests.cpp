@@ -4705,3 +4705,50 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+TEST_CASE("test integer floor_divide and remainder by zero in whole vectors") {
+  // 67 elements give whole vectors at the build's static target, then a
+  // scalar tail; 67 covers widths up to 16. Zero divisors sit in both.
+  StreamOrDevice cpu = Device::cpu;
+  std::vector<int> an(67), as(67), bs(67);
+  for (int i = 0; i < 67; ++i) {
+    an[i] = (7 * i + 3) % 100;
+    as[i] = (i % 2 == 0 ? 1 : -1) * an[i];
+    bs[i] = (i % 8 == 5 || i == 65) ? 0 : (i % 3 == 0 ? -3 : 5);
+  }
+  auto apply = [cpu](int op, const array& a, const array& b) {
+    return op == 0 ? floor_divide(a, b, cpu) : remainder(a, b, cpu);
+  };
+  // The integer types that have Highway vectors.
+  std::vector<std::pair<std::string, Dtype>> types = {
+      {"int32", int32}, {"uint32", uint32}, {"uint8", uint8}};
+  for (const auto& type : types) {
+    const std::string& name = type.first;
+    Dtype t = type.second;
+    CAPTURE(name);
+    auto a = astype(array(as.begin(), {67}), t, cpu);
+    auto n = astype(array(an.begin(), {67}), t, cpu);
+    auto b = astype(array(bs.begin(), {67}), t, cpu);
+    auto zero = equal(b, array(0, t), cpu);
+    // As base_simd.h: a remainder by zero is the dividend, and a quotient by
+    // zero is 0 (floor_divide adjusts it for a negative dividend).
+    CHECK(array_equal(where(zero, remainder(a, b, cpu), a, cpu), a, cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              where(zero, floor_divide(n, b, cpu), array(0, t), cpu),
+              zeros({67}, t, cpu),
+              cpu)
+              .item<bool>());
+    for (int op = 0; op < 2; ++op) {
+      auto whole = apply(op, a, b);
+      for (int i = 0; i < 67; ++i) {
+        CAPTURE(op);
+        CAPTURE(i);
+        auto one =
+            apply(op, slice(a, {i}, {i + 1}, cpu), slice(b, {i}, {i + 1}, cpu));
+        CHECK(array_equal(slice(whole, {i}, {i + 1}, cpu), one, cpu)
+                  .item<bool>());
+      }
+    }
+  }
+}

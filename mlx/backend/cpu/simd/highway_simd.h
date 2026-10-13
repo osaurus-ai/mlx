@@ -519,6 +519,18 @@ inline Simd<T, N> operator/(Simd<T, N> a, Simd<T, N> b) {
   }
 }
 
+// As base_simd.h's divide: an integer quotient by zero is 0. Each lane divides
+// as a scalar: hn::Div is implementation-defined for y == 0 and INT_MIN / -1.
+template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
+inline Simd<T, N> divide(Simd<T, N> a, Simd<T, N> b) {
+  if constexpr (std::is_integral_v<T>) {
+    return highway_detail::map_integer_binary(
+        a, b, [](T x, T y) { return y == 0 ? T(0) : static_cast<T>(x / y); });
+  } else {
+    return a / b;
+  }
+}
+
 template <typename T, int N, typename U, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> operator/(Simd<T, N> a, U b) {
   return a / Simd<T, N>(b);
@@ -805,6 +817,10 @@ template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> remainder(Simd<T, N> a, Simd<T, N> b) {
   if constexpr (std::is_integral_v<T>) {
     return highway_detail::map_integer_binary(a, b, [](T x, T y) {
+      // As base_simd.h: a remainder by zero is the dividend.
+      if (y == 0) {
+        return x;
+      }
       T r = static_cast<T>(x % y);
       if constexpr (std::is_signed_v<T>) {
         if (r != 0 && ((r < 0) != (y < 0))) {
