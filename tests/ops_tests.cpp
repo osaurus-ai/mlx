@@ -4752,3 +4752,106 @@ TEST_CASE("test integer floor_divide and remainder by zero in whole vectors") {
     }
   }
 }
+
+TEST_CASE(
+    "test fp8 weights and nvfp4 scales give NaN for 0x7F and 0xFF in matmuls") {
+  StreamOrDevice cpu = Device::cpu;
+  // mxfp8: eight rows of 64 E4M3 codes (two groups of 32), scales of 1 (E8M0
+  // 127). Row 0 holds 0x7F at column 5, row 1 holds 0xFF at column 40.
+  std::vector<uint8_t> codes(8 * 64);
+  for (int i = 0; i < 8 * 64; ++i) {
+    codes[i] = static_cast<uint8_t>((i * 37) % 0x7E);
+  }
+  codes[5] = 0x7F;
+  codes[64 + 40] = 0xFF;
+  auto w = view(array(codes.begin(), {8, 64}, uint8), uint32, cpu);
+  auto scales = full({8, 2}, 127, uint8, cpu);
+  for (int m : {1, 32}) {
+    CAPTURE(m);
+    auto y = quantized_matmul(
+        ones({m, 64}, float32, cpu),
+        w,
+        scales,
+        std::nullopt,
+        true,
+        32,
+        8,
+        "mxfp8",
+        cpu);
+    CHECK(all(isnan(slice(y, {0, 0}, {m, 2}, cpu), cpu), cpu).item<bool>());
+    CHECK_FALSE(
+        any(isnan(slice(y, {0, 2}, {m, 8}, cpu), cpu), cpu).item<bool>());
+    // dequantize does not read FP8_LUT. Every sum is a multiple of 2^-9 below
+    // 2^15, so float32 gives it exactly in any order.
+    auto ref = matmul(
+        ones({m, 64}, float32, cpu),
+        transpose(
+            dequantize(
+                w,
+                scales,
+                std::nullopt,
+                32,
+                8,
+                "mxfp8",
+                std::nullopt,
+                std::nullopt,
+                cpu),
+            cpu),
+        cpu);
+    CHECK(
+        array_equal(
+            slice(y, {0, 2}, {m, 8}, cpu), slice(ref, {0, 2}, {m, 8}, cpu), cpu)
+            .item<bool>());
+  }
+  // nvfp4: E2M1 1.0 everywhere, E4M3 scales of 1 (0x38) in groups of 16, but
+  // 0x7F for row 0's second group and 0xFF for row 1's first.
+  std::vector<uint8_t> s4(8 * 4, 0x38);
+  s4[1] = 0x7F;
+  s4[4] = 0xFF;
+  auto w4 = full({8, 8}, 0x22222222u, uint32, cpu);
+  auto sc4 = array(s4.begin(), {8, 4}, uint8);
+  auto y4 = quantized_matmul(
+      ones({1, 64}, float32, cpu),
+      w4,
+      sc4,
+      std::nullopt,
+      true,
+      16,
+      4,
+      "nvfp4",
+      cpu);
+  CHECK(all(isnan(slice(y4, {0, 0}, {1, 2}, cpu), cpu), cpu).item<bool>());
+  CHECK_FALSE(
+      any(isnan(slice(y4, {0, 2}, {1, 8}, cpu), cpu), cpu).item<bool>());
+  CHECK(
+      array_equal(slice(y4, {0, 2}, {1, 8}, cpu), full({1, 6}, 64.0f, cpu), cpu)
+          .item<bool>());
+  // mxfp8: every E4M3 code but 0x7F and 0xFF (0 in their places), code c at
+  // row c / 64, column c % 64. Identity activations output each weight once.
+  std::vector<uint8_t> finite(4 * 64);
+  for (int c = 0; c < 4 * 64; ++c) {
+    finite[c] = (c & 0x7F) == 0x7F ? 0 : static_cast<uint8_t>(c);
+  }
+  auto wf = view(array(finite.begin(), {4, 64}, uint8), uint32, cpu);
+  auto sf = full({4, 2}, 127, uint8, cpu);
+  auto rf = astype(
+      dequantize(
+          wf,
+          sf,
+          std::nullopt,
+          32,
+          8,
+          "mxfp8",
+          std::nullopt,
+          std::nullopt,
+          cpu),
+      float32,
+      cpu);
+  auto yf = quantized_matmul(
+      eye(64, float32, cpu), wf, sf, std::nullopt, true, 32, 8, "mxfp8", cpu);
+  CHECK(array_equal(yf, transpose(rf, cpu), cpu).item<bool>());
+  // Not transposed: fp_qmm decodes the weights through FP8_LUT.
+  auto yn = quantized_matmul(
+      eye(4, float32, cpu), wf, sf, std::nullopt, false, 32, 8, "mxfp8", cpu);
+  CHECK(array_equal(yn, rf, cpu).item<bool>());
+}

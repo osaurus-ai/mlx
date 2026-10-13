@@ -121,9 +121,8 @@ const static float FP4_LUT[16] = {
     -6.0f};
 
 // FP8 E4M3 -> float32 lookup table (256 entries, 1KB).
-// Precomputed from the FromFP8 decode: strip sign, interpret lower 7 bits
-// as float16 mantissa/exponent (<<7), multiply by 256, apply sign.
-// Used by FP quantized matmul for O(1) FP8 weight decoding.
+// The values MLX's FromFP8 gives (#4376): 0x7F and 0xFF are NaN.
+// Read by the non-transposed fp_qmm path and for nvfp4 scales.
 // clang-format off
 const static float FP8_LUT[256] = {
        0.0f, 0.001953125f, 0.00390625f, 0.005859375f, 0.0078125f, 0.009765625f, 0.01171875f, 0.013671875f,
@@ -141,7 +140,7 @@ const static float FP8_LUT[256] = {
       32.0f,        36.0f,        40.0f,       44.0f,       48.0f,       52.0f,       56.0f,       60.0f,
       64.0f,        72.0f,        80.0f,       88.0f,       96.0f,      104.0f,      112.0f,      120.0f,
      128.0f,       144.0f,       160.0f,      176.0f,      192.0f,      208.0f,      224.0f,      240.0f,
-     256.0f,       288.0f,       320.0f,      352.0f,      384.0f,      416.0f,      448.0f,      480.0f,
+     256.0f,       288.0f,       320.0f,      352.0f,      384.0f,      416.0f,      448.0f,         NAN,
       -0.0f,-0.001953125f,-0.00390625f,-0.005859375f,-0.0078125f,-0.009765625f,-0.01171875f,-0.013671875f,
  -0.015625f,-0.017578125f,-0.01953125f,-0.021484375f,-0.0234375f,-0.025390625f,-0.02734375f,-0.029296875f,
   -0.03125f, -0.03515625f, -0.0390625f, -0.04296875f, -0.046875f, -0.05078125f, -0.0546875f, -0.05859375f,
@@ -157,7 +156,7 @@ const static float FP8_LUT[256] = {
      -32.0f,       -36.0f,      -40.0f,      -44.0f,      -48.0f,      -52.0f,      -56.0f,      -60.0f,
      -64.0f,       -72.0f,      -80.0f,      -88.0f,      -96.0f,     -104.0f,     -112.0f,     -120.0f,
     -128.0f,      -144.0f,     -160.0f,     -176.0f,     -192.0f,     -208.0f,     -224.0f,     -240.0f,
-    -256.0f,      -288.0f,     -320.0f,     -352.0f,     -384.0f,     -416.0f,     -448.0f,     -480.0f,
+    -256.0f,      -288.0f,     -320.0f,     -352.0f,     -384.0f,     -416.0f,     -448.0f,        -NAN,
 };
 // clang-format on
 

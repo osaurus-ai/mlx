@@ -869,6 +869,7 @@ hn::Vec<DF> load_fp8_weight_values(
     const float* fp8_lut) {
   const hn::Rebind<uint8_t, DF> du8;
   const hn::Rebind<uint16_t, DF> du16;
+  const hn::Rebind<uint32_t, DF> du32;
   const hn::Rebind<hwy::float16_t, DF> df16;
   const size_t lanes = hn::Lanes(df);
   const auto* bytes = reinterpret_cast<const uint8_t*>(w);
@@ -878,9 +879,13 @@ hn::Vec<DF> load_fp8_weight_values(
   const auto payload =
       hn::ShiftLeft<7>(hn::And(encoded16, hn::Set(du16, 0x7F)));
   const auto sign = hn::ShiftLeft<8>(hn::And(encoded16, hn::Set(du16, 0x80)));
-  return hn::Mul(
+  const auto decoded = hn::Mul(
       hn::PromoteTo(df, hn::BitCast(df16, hn::Or(payload, sign))),
       hn::Set(df, 256.0f));
+  // 0x7F and 0xFF are NaN, not ±480; a select avoids a per-lane table gather.
+  const auto low = hn::And(hn::PromoteTo(du32, encoded), hn::Set(du32, 0x7F));
+  const auto is_nan = hn::RebindMask(df, hn::Eq(low, hn::Set(du32, 0x7F)));
+  return hn::IfThenElse(is_nan, hn::NaN(df), decoded);
 }
 
 template <int group_size>
