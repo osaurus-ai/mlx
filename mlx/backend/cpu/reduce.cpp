@@ -74,11 +74,18 @@ const complex64_t Limits<complex64_t>::min =
 template <typename T, typename U, typename Op>
 struct ReductionAccumulator {
   static constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  // The facade's float16 arithmetic already runs in float: widen float16 sums
+  // and products at every width.
+  static constexpr bool widen_to_float =
+      std::is_same_v<T, bfloat16_t> || std::is_same_v<T, float16_t>;
+#else
   // Widen to float32 only if the input is float16 (with N=1) or bfloat16 as it
   // improves performance.
   static constexpr bool widen_to_float =
       (std::is_same_v<T, bfloat16_t> ||
        (N == 1 && std::is_same_v<T, float16_t>));
+#endif // MLX_USE_HIGHWAY_KERNELS
 
   using type = std::conditional_t<widen_to_float, float, U>;
 };

@@ -175,6 +175,32 @@ TEST_CASE("highway fp16 sum keeps each thread's partial in float") {
   CHECK(astype(sum(x, cpu), float32, cpu).item<float>() == 0.1875f);
 }
 
+TEST_CASE("highway fp16 strided sum and prod accumulate in float") {
+  // Down each column, float16 steps stop at 2048 (2049 is no float16) and
+  // 256 * 256 overflows; in float the sums are 4096 and the products 1.
+  StreamOrDevice cpu = Device::cpu;
+  auto x = ones({4096, 8}, float16, cpu);
+  auto s = sum(x, 0, false, cpu);
+  CHECK(s.shape() == Shape{8});
+  CHECK(array_equal(
+            astype(s, float32, cpu),
+            sum(astype(x, float32, cpu), 0, false, cpu),
+            cpu)
+            .item<bool>());
+  std::vector<float> v;
+  for (float r : {256.0f, 256.0f, 1.0f / 256, 1.0f / 256}) {
+    v.insert(v.end(), 8, r);
+  }
+  auto y = astype(array(v.begin(), {4, 8}), float16, cpu);
+  auto p = prod(y, 0, false, cpu);
+  CHECK(p.shape() == Shape{8});
+  CHECK(array_equal(
+            astype(p, float32, cpu),
+            prod(astype(y, float32, cpu), 0, false, cpu),
+            cpu)
+            .item<bool>());
+}
+
 TEST_CASE("highway bf16 sum does not depend on the thread count") {
   // 2^20 + 3 ones, then -2^20: exactly 3. Partials rounded to bf16 gave 0 with
   // 8 threads, and -8192 with 9 or 12. Widen before item<float>.
