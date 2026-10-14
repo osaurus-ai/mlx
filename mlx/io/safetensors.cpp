@@ -1124,7 +1124,7 @@ array mmap_file_region_named(
   // Routed banks may sit under a VLM `language_model.` wrapper (MiniCPM-V 4.7
   // 35B-A3B JANGH2, 2026-10-12). The layer index stays capture group 1.
   static const std::regex canonical(
-      R"(^(?:language_model\.)?model\.layers\.(0|[1-9][0-9]*)\.mlp\.switch_mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
+      R"(^(?:language_model\.)?model\.layers\.(0|[1-9][0-9]*)\.(?:mlp|feed_forward)\.switch_mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
   // Dense one-expert banks: K2 down projections
   // (`model.layers.L.mlp.down_proj`) and the Qwen3.5-family dense JANGH MLP
   // (`language_model.model.layers.L.mlp.{gate,up,down}_proj`, Qwen3.8-27B
