@@ -495,6 +495,9 @@ void RMSNorm::eval_cpu(
       x.strides(),
       x.flags());
 
+  if (x.size() == 0) {
+    return;
+  }
   int width = x.shape(-1);
   int num_rows = x.data_size() / width;
   bool has_weight = weight.ndim() > 0;
@@ -657,6 +660,9 @@ void LayerNorm::eval_cpu(
       x.strides(),
       x.flags());
 
+  if (x.size() == 0) {
+    return;
+  }
   int width = x.shape(-1);
   int num_rows = x.data_size() / width;
   bool has_weight = weight.ndim() > 0;

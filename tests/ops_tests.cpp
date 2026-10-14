@@ -4931,3 +4931,27 @@ TEST_CASE(
   CHECK(all(isnan(slice(deq4, {1, 0}, {2, 16}, cpu), cpu), cpu).item<bool>());
   CHECK(astype(sum(isnan(deq4, cpu), cpu), int32, cpu).item<int>() == 32);
 }
+
+TEST_CASE("test empty arrays in the Highway CPU kernels") {
+  // Each input keeps a zero-sized dimension through the collapse, or ends
+  // in one, so the kernels' inner extent is 0. Each pair of checks forces
+  // one kernel, in this order: binary, copy, rms_norm, layer_norm.
+  StreamOrDevice cpu = Device::cpu;
+  auto a =
+      add(transpose(zeros({0, 3, 3, 3}, float32, cpu), {2, 1, 0, 3}, cpu),
+          zeros({3, 3, 0, 3}, float32, cpu),
+          cpu);
+  CHECK(a.shape() == Shape{3, 3, 0, 3});
+  CHECK(array_equal(a, zeros({3, 3, 0, 3}, float32, cpu), cpu).item<bool>());
+  auto c = contiguous(
+      transpose(zeros({0, 3, 3}, float32, cpu), {1, 0, 2}, cpu), false, cpu);
+  CHECK(c.shape() == Shape{3, 0, 3});
+  CHECK(array_equal(c, zeros({3, 0, 3}, float32, cpu), cpu).item<bool>());
+  auto x = zeros({3, 0}, float32, cpu);
+  auto r = fast::rms_norm(x, std::nullopt, 1e-5f, cpu);
+  CHECK(r.shape() == Shape{3, 0});
+  CHECK(array_equal(r, x, cpu).item<bool>());
+  auto l = fast::layer_norm(x, std::nullopt, std::nullopt, 1e-5f, cpu);
+  CHECK(l.shape() == Shape{3, 0});
+  CHECK(array_equal(l, x, cpu).item<bool>());
+}

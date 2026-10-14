@@ -108,6 +108,9 @@ void unary_op(const array& a, array& out, Op) {
       it.step();
 #else
 
+    if (a.size() == 0) {
+      return;
+    }
     size_t num_iterations = a.size() / inner_shape;
 
     // Check if parallelization is beneficial

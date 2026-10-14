@@ -175,6 +175,9 @@ void binary_op_dispatch_dims(
     a_it.step();
     b_it.step();
 #else
+  if (size == 0) {
+    return;
+  }
   int64_t num_iterations = size / stride;
 
   // Check if parallelization is beneficial

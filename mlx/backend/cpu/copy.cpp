@@ -130,6 +130,9 @@ void copy_general_general(
     in.step();
     out.step();
 #else
+  if (size == 0) {
+    return;
+  }
   int64_t num_iterations = size / stride;
 
   // Check if parallelization is beneficial
