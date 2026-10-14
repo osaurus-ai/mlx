@@ -4955,3 +4955,41 @@ TEST_CASE("test empty arrays in the Highway CPU kernels") {
   CHECK(l.shape() == Shape{3, 0});
   CHECK(array_equal(l, x, cpu).item<bool>());
 }
+
+TEST_CASE("test norms of a non-contiguous input") {
+  // A transposed input makes the native norms copy it; with no buffer cache, a
+  // copy freed before its tasks run is freed for real, which ASan reports.
+  struct RestoreCacheLimit {
+    size_t limit;
+    ~RestoreCacheLimit() {
+      set_cache_limit(limit);
+    }
+  } restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  // Values -3 to 3 keep every sum exact, so both layouts give the same bits.
+  auto input = [cpu]() {
+    auto v =
+        subtract(remainder(arange(6144, cpu), array(7), cpu), array(3), cpu);
+    return transpose(reshape(astype(v, float32, cpu), {64, 96}, cpu), cpu);
+  };
+  for (int i = 0; i < 50; i++) {
+    auto x = input();
+    CHECK(
+        array_equal(
+            fast::rms_norm(x, std::nullopt, 1e-5f, cpu),
+            fast::rms_norm(contiguous(x, false, cpu), std::nullopt, 1e-5f, cpu),
+            cpu)
+            .item<bool>());
+    auto y = input();
+    CHECK(array_equal(
+              fast::layer_norm(y, std::nullopt, std::nullopt, 1e-5f, cpu),
+              fast::layer_norm(
+                  contiguous(y, false, cpu),
+                  std::nullopt,
+                  std::nullopt,
+                  1e-5f,
+                  cpu),
+              cpu)
+              .item<bool>());
+  }
+}

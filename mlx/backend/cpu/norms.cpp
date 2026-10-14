@@ -486,6 +486,7 @@ void RMSNorm::eval_cpu(
   array x = in_x;
   if (!in_x.flags().contiguous || in_x.strides()[in_x.ndim() - 1] != 1) {
     x = contiguous_copy_cpu(in_x, stream());
+    cpu::get_command_encoder(stream()).add_temporary(x);
   }
 
   // Allocate output with same layout as (contiguous) input
@@ -651,6 +652,7 @@ void LayerNorm::eval_cpu(
   array x = in_x;
   if (!in_x.flags().contiguous || in_x.strides()[in_x.ndim() - 1] != 1) {
     x = contiguous_copy_cpu(in_x, stream());
+    cpu::get_command_encoder(stream()).add_temporary(x);
   }
 
   // Allocate output with same layout as (contiguous) input
