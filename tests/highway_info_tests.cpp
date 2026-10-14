@@ -28,6 +28,14 @@ float relative_error(const array& got, const array& reference) {
   auto r = astype(reference, float32);
   return (max(abs(subtract(g, r))) / max(abs(r))).item<float>();
 }
+
+// Unpins the dispatch targets however a case ends, an exception included, so
+// that no later case runs pinned to one target.
+struct UnpinTargets {
+  ~UnpinTargets() {
+    hi::set_targets_for_test(0);
+  }
+};
 } // namespace
 
 TEST_CASE("highway info names what was compiled and what the CPU supports") {
@@ -40,6 +48,7 @@ TEST_CASE("highway info names what was compiled and what the CPU supports") {
 }
 
 TEST_CASE("highway rms_norm records the target that ran, on every target") {
+  UnpinTargets unpin;
   hi::set_targets_for_test(0);
   auto runnable = hi::compiled_targets() & hi::supported_targets();
   auto x = random::normal({4, 512}, float32, 0.0f, 1.0f, random::key(31));
@@ -56,7 +65,80 @@ TEST_CASE("highway rms_norm records the target that ran, on every target") {
     CHECK(s.highway_calls > 0);
     CHECK(s.fallback_calls == 0);
   }
+}
+
+TEST_CASE("highway mxfp8 matmul decodes every E4M3 code on every target") {
+  // The kernels widen float16 natively or by emulation, depending on the
+  // target, and select NaN for 0x7F and 0xFF.
+  UnpinTargets unpin;
+  StreamOrDevice cpu = Device::cpu;
+  auto deq = [&](const array& wq, const array& sc) {
+    return astype(
+        transpose(
+            dequantize(
+                wq,
+                sc,
+                std::nullopt,
+                32,
+                8,
+                "mxfp8",
+                std::nullopt,
+                std::nullopt,
+                cpu),
+            cpu),
+        float32,
+        cpu);
+  };
+  // Eight rows of 64 codes, scales of 1 (E8M0 127); 0x7F in row 0, 0xFF in 1.
+  std::vector<uint8_t> codes(8 * 64);
+  for (int i = 0; i < 8 * 64; ++i) {
+    codes[i] = static_cast<uint8_t>((i * 37) % 0x7E);
+  }
+  codes[5] = 0x7F;
+  codes[64 + 40] = 0xFF;
+  auto w = view(array(codes.begin(), {8, 64}, uint8), uint32, cpu);
+  auto scales = full({8, 2}, 127, uint8, cpu);
+  auto x = ones({1, 64}, float32, cpu);
+  // Every sum is a multiple of 2^-9 below 2^15: exact in float32.
+  auto ref = matmul(x, deq(w, scales), cpu);
+  // Every other code once, at row c / 64 and column c % 64; 0 for 0x7F, 0xFF.
+  std::vector<uint8_t> finite(4 * 64);
+  for (int c = 0; c < 4 * 64; ++c) {
+    finite[c] = (c & 0x7F) == 0x7F ? 0 : static_cast<uint8_t>(c);
+  }
+  auto wf = view(array(finite.begin(), {4, 64}, uint8), uint32, cpu);
+  auto sf = full({4, 2}, 127, uint8, cpu);
+  auto rf = deq(wf, sf);
+  // Compute both references before any target is pinned.
+  sum(ref, cpu).item<float>();
+  sum(rf, cpu).item<float>();
   hi::set_targets_for_test(0);
+  auto runnable = hi::compiled_targets() & hi::supported_targets();
+  for (auto target : bits_of(runnable)) {
+    CAPTURE(
+        std::string(
+            hi::target_name(target))); // doctest prints a char* as an address
+    MESSAGE(std::string(hi::target_name(target)));
+    hi::set_targets_for_test(target);
+    hi::reset_stats();
+    auto y =
+        quantized_matmul(x, w, scales, std::nullopt, true, 32, 8, "mxfp8", cpu);
+    CHECK(all(isnan(slice(y, {0, 0}, {1, 2}, cpu), cpu), cpu).item<bool>());
+    CHECK_FALSE(
+        any(isnan(slice(y, {0, 2}, {1, 8}, cpu), cpu), cpu).item<bool>());
+    CHECK(
+        array_equal(
+            slice(y, {0, 2}, {1, 8}, cpu), slice(ref, {0, 2}, {1, 8}, cpu), cpu)
+            .item<bool>());
+    CHECK(hi::stats(hi::Family::QmmFp).executed == target);
+    hi::reset_stats();
+    auto yf = quantized_matmul(
+        eye(64, float32, cpu), wf, sf, std::nullopt, true, 32, 8, "mxfp8", cpu);
+    CHECK(array_equal(yf, rf, cpu).item<bool>());
+    auto s = hi::stats(hi::Family::QmmFp);
+    CHECK(s.executed == target);
+    CHECK(s.fallback_calls == 0);
+  }
 }
 
 TEST_CASE("highway int8 family records only when the int8 path ran") {
