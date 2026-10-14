@@ -4855,3 +4855,79 @@ TEST_CASE(
       eye(4, float32, cpu), wf, sf, std::nullopt, false, 32, 8, "mxfp8", cpu);
   CHECK(array_equal(yn, rf, cpu).item<bool>());
 }
+
+TEST_CASE(
+    "test from_fp8 decodes 0x7F and 0xFF as NaN in vectors and the tail") {
+  // 256 codes fill whole vectors at every width up to 16; 0x7F, 0xFF and 0x80
+  // follow in the scalar tail.
+  StreamOrDevice cpu = Device::cpu;
+  std::vector<uint8_t> codes(256);
+  for (int i = 0; i < 256; ++i) {
+    codes[i] = static_cast<uint8_t>(i);
+  }
+  codes.insert(codes.end(), {0x7F, 0xFF, 0x80});
+  // E4M3: a sign, four exponent bits (bias 7), three mantissa bits.
+  std::vector<float> want;
+  for (auto c : codes) {
+    int e = (c >> 3) & 15;
+    int m = c & 7;
+    float v =
+        e == 0 ? std::ldexp(m / 8.0f, -6) : std::ldexp(1.0f + m / 8.0f, e - 7);
+    if (e == 15 && m == 7) {
+      v = NAN;
+    }
+    want.push_back((c & 0x80) ? -v : v);
+  }
+  auto x = array(codes.begin(), {259}, uint8);
+  auto expected = array(want.begin(), {259});
+  auto bits = [cpu](const array& a) {
+    return where(isnan(a, cpu), array(0u, uint32), view(a, uint32, cpu), cpu);
+  };
+  for (auto t : {float32, float16, bfloat16}) {
+    auto got = astype(from_fp8(x, t, cpu), float32, cpu);
+    for (int i : {0x7F, 0xFF, 256, 257}) {
+      CAPTURE(t);
+      CAPTURE(i);
+      CHECK(std::isnan(slice(got, {i}, {i + 1}, cpu).item<float>()));
+    }
+    // Every other code exactly, the sign of zero included.
+    CHECK(array_equal(isnan(got, cpu), isnan(expected, cpu), cpu).item<bool>());
+    CHECK(array_equal(bits(got), bits(expected), cpu).item<bool>());
+  }
+  // dequantize composes from_fp8: mxfp8 weights, and nvfp4 scales.
+  std::vector<uint8_t> w8(8 * 64);
+  for (int i = 0; i < 8 * 64; ++i) {
+    w8[i] = static_cast<uint8_t>((i * 37) % 0x7E);
+  }
+  w8[5] = 0x7F;
+  w8[64 + 40] = 0xFF;
+  auto deq = dequantize(
+      view(array(w8.begin(), {8, 64}, uint8), uint32, cpu),
+      full({8, 2}, 127, uint8, cpu),
+      std::nullopt,
+      32,
+      8,
+      "mxfp8",
+      std::nullopt,
+      float32,
+      cpu);
+  CHECK(std::isnan(slice(deq, {0, 5}, {1, 6}, cpu).item<float>()));
+  CHECK(std::isnan(slice(deq, {1, 40}, {2, 41}, cpu).item<float>()));
+  CHECK(astype(sum(isnan(deq, cpu), cpu), int32, cpu).item<int>() == 2);
+  std::vector<uint8_t> s4(8 * 4, 0x38);
+  s4[1] = 0x7F;
+  s4[4] = 0xFF;
+  auto deq4 = dequantize(
+      full({8, 8}, 0x22222222u, uint32, cpu),
+      array(s4.begin(), {8, 4}, uint8),
+      std::nullopt,
+      16,
+      4,
+      "nvfp4",
+      std::nullopt,
+      float32,
+      cpu);
+  CHECK(all(isnan(slice(deq4, {0, 16}, {1, 32}, cpu), cpu), cpu).item<bool>());
+  CHECK(all(isnan(slice(deq4, {1, 0}, {2, 16}, cpu), cpu), cpu).item<bool>());
+  CHECK(astype(sum(isnan(deq4, cpu), cpu), int32, cpu).item<int>() == 32);
+}

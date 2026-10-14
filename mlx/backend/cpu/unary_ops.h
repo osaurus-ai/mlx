@@ -163,10 +163,10 @@ struct ToFP8 {
 struct FromFP8 {
   template <int N>
   Simd<float, N> operator()(Simd<uint8_t, N> x) {
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
     auto v = Simd<uint16_t, N>(x & 127);
     auto sign_bit = Simd<uint16_t, N>((x >> 7) & 1) << 15;
     auto u = (v << 7) | (((v + 1) >> 7) << 14) | sign_bit;
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
     Simd<float, N> out;
     if constexpr (simd::max_size<float16_t> >= N) {
       auto converted = *(Simd<float16_t, N>*)(&u);
@@ -179,12 +179,8 @@ struct FromFP8 {
     }
     return out;
 #else
-    auto v = Simd<uint16_t, N>(x & 127) << 7;
-    auto converted = *(Simd<float16_t, N>*)(&v);
-    converted = converted * 256.0;
-    auto sign = Simd<bool, N>(x & 128);
-    Simd<float, N> out = select(sign, -converted, converted);
-    return out;
+    auto converted = *(Simd<float16_t, N>*)(&u);
+    return Simd<float, N>(converted) * 256.0f;
 #endif // MLX_USE_HIGHWAY_KERNELS
   }
   float operator()(uint8_t x) {
