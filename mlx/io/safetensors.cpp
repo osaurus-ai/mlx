@@ -1132,9 +1132,15 @@ array mmap_file_region_named(
   // JangPress layer registry.
   static const std::regex dense_canonical(
       R"(^(?:language_model\.)?model\.layers\.(0|[1-9][0-9]*)\.mlp\.(gate|up|down)_proj\.tq2_(packed|scales)$)");
+  // Nemotron-H latent MoE (Nemotron 3.5 Bolt JANGH2): gate-less relu2 routed
+  // banks at `backbone.layers.L.mixer.switch_mlp.{fc1,fc2}`. The layer index
+  // stays capture group 1 and the packed/scales tag group 3.
+  static const std::regex relu2_canonical(
+      R"(^backbone\.layers\.(0|[1-9][0-9]*)\.mixer\.switch_mlp\.(fc1|fc2)\.tq2_(packed|scales)$)");
   std::smatch match;
   bool dense = false;
-  if (!std::regex_match(tensor_name, match, canonical)) {
+  if (!std::regex_match(tensor_name, match, canonical) &&
+      !std::regex_match(tensor_name, match, relu2_canonical)) {
     if (!std::regex_match(tensor_name, match, dense_canonical)) {
       throw std::invalid_argument(
           "[mmap_file_region_named] invalid canonical bank name.");
