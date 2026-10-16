@@ -4793,12 +4793,13 @@ array quantized_matmul(
     const char* value = std::getenv("VMLX_DISABLE_MIXED_Q6");
     return !(value && value[0] == '1' && value[1] == '\0');
   }();
-  const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
-      transpose && x.dtype() == bfloat16 && dtype == float16 && biases &&
+  // The mixed path hands f16 scales and biases to the kernels unconverted.
+  // Only the Metal kernels read that layout; every other device promotes them.
+  const bool mixed_bf16_f16_qmv = to_stream(s).device == Device::gpu &&
+      metal::is_available() && qmode == QuantizationMode::Affine && transpose &&
+      x.dtype() == bfloat16 && dtype == float16 && biases &&
       biases->dtype() == float16 && group_size == 64 &&
-      (bits == 4 || bits == 8 ||
-       (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu &&
-        metal::is_available())) &&
+      (bits == 4 || bits == 8 || (bits == 6 && mixed_q6_enabled)) &&
       x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
