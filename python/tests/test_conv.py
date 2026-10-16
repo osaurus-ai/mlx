@@ -352,6 +352,8 @@ class TestConv(mlx_tests.MLXTestCase):
                 (1, 6, 1),
                 (1, 1, 6),
                 (4, 32, 64),
+                (1, 128, 48),
+                (1, 128, 96),
             ):
                 for idim, kdim, stride, padding in (
                     ((1, 1), (1, 1), (1, 1), (0, 0)),
@@ -359,6 +361,8 @@ class TestConv(mlx_tests.MLXTestCase):
                     ((31, 31), (5, 5), (5, 5), (2, 2)),
                 ):
                     run_conv2D(N, C, O, idim, kdim, stride, padding, dtype=dtype)
+
+            run_conv2D(1, 128, 32, (1, 9601), (1, 7), (1, 1), (0, 3), dtype=dtype)
 
             # Groups tests
             N, C, O = (4, 32, 64)
