@@ -858,6 +858,57 @@ TEST_CASE("LFM named mmap admits canonical feed_forward expert banks") {
   CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
 }
 
+TEST_CASE("Nemotron-H named mmap admits canonical relu2 fc1/fc2 expert banks") {
+  NamedMmapFixture file;
+  constexpr int32_t layer = 1900000003;
+  const auto baseline = safetensors_mmap_tracked_buffer_bytes();
+  for (const auto* role : {"fc1", "fc2"}) {
+    for (bool packed : {true, false}) {
+      const Shape shape = packed ? Shape{2, static_cast<int>(file.page / 4), 1}
+                                 : Shape{2, static_cast<int>(file.page / 2)};
+      const auto name = "backbone.layers.1900000003.mixer.switch_mlp." +
+          std::string(role) + ".tq2_" + (packed ? "packed" : "scales");
+      if (!metal::is_available()) {
+        CHECK_THROWS_WITH_AS(
+            mmap_file_region_named(file.path, file.page, 2 * file.page, shape,
+                                   packed ? uint32 : float16, name),
+            ("[mmap_file_region] make_buffer failed: " + file.path).c_str(),
+            std::runtime_error);
+        CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+        continue;
+      }
+      {
+        auto bank = mmap_file_region_named(file.path, file.page, 2 * file.page,
+                                          shape, packed ? uint32 : float16, name);
+        CHECK_EQ(bank.shape(), shape);
+        CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline + 2 * file.page);
+        int32_t selected_layer = layer, expert = 1;
+        CHECK_EQ(safetensors_mmap_advise_experts(1, &selected_layer, &expert, 1), file.page);
+        CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 2 * file.page);
+      }
+      CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+      CHECK_EQ(safetensors_mmap_advise_layer(1, layer), 0);
+    }
+  }
+  for (const auto* name : {
+           "backbone.layers.00.mixer.switch_mlp.fc1.tq2_packed",
+           "backbone.layers.2147483648.mixer.switch_mlp.fc1.tq2_packed",
+           "backbone.layers.0.mixer.fc1.tq2_packed",
+           "backbone.layers.0.mixer.switch_mlp.fc3.tq2_packed",
+           "backbone.layers.0.mixer.switch_mlp.gate_proj.tq2_packed",
+           "language_model.backbone.layers.0.mixer.switch_mlp.fc1.tq2_packed",
+           "backbone.layers.0.mixer.switch_mlp.fc1.weight"}) {
+    CHECK_THROWS_AS(mmap_file_region_named(file.path, file.page, 2 * file.page,
+                                          {2, static_cast<int>(file.page / 4), 1}, uint32, name),
+                    std::invalid_argument);
+  }
+  CHECK_THROWS_AS(mmap_file_region_named(file.path, file.page, 2 * file.page,
+                                        {2, static_cast<int>(file.page / 4), 1}, float32,
+                                        "backbone.layers.0.mixer.switch_mlp.fc1.tq2_packed"),
+                  std::invalid_argument);
+  CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
+}
+
 TEST_CASE("dense named mmap keeps one-expert ownership and layer advice") {
   NamedMmapFixture file;
   constexpr int32_t layer = 1900000001;
