@@ -71,7 +71,7 @@ void matmul_bnns(
           /* BNNSDataLayout layout = */ BNNSDataLayoutRowMajorMatrix,
 
           /* size_t size[BNNS_MAX_TENSOR_DIMENSION] = */
-          {lda, (M * K) / lda, 0, 0, 0, 0, 0, 0},
+          {a_transposed ? M : K, a_transposed ? K : M, 0, 0, 0, 0, 0, 0},
           /* size_t stride[BNNS_MAX_TENSOR_DIMENSION] = */
           {1, lda, 0, 0, 0, 0, 0, 0},
 
@@ -90,7 +90,7 @@ void matmul_bnns(
           /* BNNSDataLayout layout = */ BNNSDataLayoutRowMajorMatrix,
 
           /* size_t size[BNNS_MAX_TENSOR_DIMENSION] = */
-          {ldb, (K * N) / ldb, 0, 0, 0, 0, 0, 0},
+          {b_transposed ? K : N, b_transposed ? N : K, 0, 0, 0, 0, 0, 0},
           /* size_t stride[BNNS_MAX_TENSOR_DIMENSION] = */
           {1, ldb, 0, 0, 0, 0, 0, 0},
 
