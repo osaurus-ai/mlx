@@ -4768,6 +4768,18 @@ void validate_global_scale(
   }
 }
 
+namespace {
+
+// The CPU kernels and Metal's qmv kernels read bf16 x with f16 scales and
+// biases. CUDA's qmv reads them as the output type, so CUDA promotes. The
+// CPU shares Metal's shape conditions so the output dtype matches.
+bool reads_mixed_bf16_f16(const Stream& s) {
+  return s.device == Device::cpu ||
+      (s.device == Device::gpu && metal::is_available());
+}
+
+} // namespace
+
 array quantized_matmul(
     const array& x,
     const array& w,
@@ -4796,7 +4808,7 @@ array quantized_matmul(
   const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
       transpose && x.dtype() == bfloat16 && dtype == float16 && biases &&
       biases->dtype() == float16 && group_size == 64 &&
-      (bits == 4 || bits == 8 ||
+      (((bits == 4 || bits == 8) && reads_mixed_bf16_f16(to_stream(s))) ||
        (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu &&
         metal::is_available())) &&
       x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&

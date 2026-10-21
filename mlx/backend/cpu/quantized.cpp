@@ -151,16 +151,18 @@ void _qmm(
   }
 }
 
-template <typename T, int bits, int group_size>
+template <typename T, typename ScaleT, int bits, int group_size>
 void _qmm_t(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K) {
+  // Mixed types sum in float32 and round once, as the Metal kernels do.
+  using AccT = std::conditional_t<std::is_same_v<T, ScaleT>, T, float>;
   constexpr int bitmask = (1 << bits) - 1;
 
   constexpr int pack_factor = get_pack_factor(bits, 8);
@@ -169,23 +171,23 @@ void _qmm_t(
 
   for (int m = 0; m < M; m++) {
     const uint8_t* w_local = (const uint8_t*)w;
-    const T* scales_local = scales;
-    const T* biases_local = biases;
+    const ScaleT* scales_local = scales;
+    const ScaleT* biases_local = biases;
 
     for (int n = 0; n < N; n++) {
       const T* x_local = x;
-      T sum = 0;
+      AccT sum = 0;
       for (int k = 0; k < K; k += group_size) {
-        T scale = *scales_local++;
-        T bias = *biases_local++;
+        AccT scale = static_cast<AccT>(*scales_local++);
+        AccT bias = static_cast<AccT>(*biases_local++);
 
         for (int kw = 0; kw < packs_in_group; kw++) {
           if constexpr (bits == 3 || bits == 5 || bits == 6) {
-            T wl[pack_factor];
-            extract_bits<T, bits>(w_local, wl);
+            AccT wl[pack_factor];
+            extract_bits<AccT, bits>(w_local, wl);
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
-              sum += x_local[p] * (scale * wl[p] + bias);
+              sum += static_cast<AccT>(x_local[p]) * (scale * wl[p] + bias);
             }
             w_local += bytes_per_pack;
             x_local += pack_factor;
@@ -194,8 +196,8 @@ void _qmm_t(
             uint8_t wi = *w_local++;
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
-              sum +=
-                  (*x_local++) * (scale * static_cast<T>(wi & bitmask) + bias);
+              sum += static_cast<AccT>(*x_local++) *
+                  (scale * static_cast<AccT>(wi & bitmask) + bias);
               if (bits != 8) {
                 wi >>= bits;
               }
@@ -203,7 +205,7 @@ void _qmm_t(
           }
         }
       }
-      *result = sum;
+      *result = static_cast<T>(sum);
       result++;
     }
 
@@ -283,36 +285,42 @@ void _qmm_t_simd(
   }
 }
 
-template <typename T, int bits, int group_size>
+template <typename T, typename ScaleT, int bits, int group_size>
 void _qmm_dispatch_transpose(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
     bool transposed_w) {
   if (transposed_w) {
     // the simd size must be a multiple of the number of elements per word
-    if constexpr (32 % bits == 0 && simd::max_size<T> % (32 / bits) == 0) {
+    if constexpr (
+        std::is_same_v<T, ScaleT> && 32 % bits == 0 &&
+        simd::max_size<T> % (32 / bits) == 0) {
       _qmm_t_simd<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
     } else {
-      _qmm_t<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
+      _qmm_t<T, ScaleT, bits, group_size>(
+          result, x, w, scales, biases, M, N, K);
     }
-  } else {
+  } else if constexpr (std::is_same_v<T, ScaleT>) {
     _qmm<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
+  } else {
+    throw std::invalid_argument(
+        "[quantized_matmul] Scales of another type than x need transposed weights.");
   }
 }
 
-template <typename T, int bits>
+template <typename T, typename ScaleT, int bits>
 void _qmm_dispatch_group(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
@@ -320,15 +328,15 @@ void _qmm_dispatch_group(
     bool transposed_w) {
   switch (group_size) {
     case 32:
-      _qmm_dispatch_transpose<T, bits, 32>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 32>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     case 64:
-      _qmm_dispatch_transpose<T, bits, 64>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 64>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     case 128:
-      _qmm_dispatch_transpose<T, bits, 128>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 128>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     default:
@@ -337,13 +345,13 @@ void _qmm_dispatch_group(
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _qmm_dispatch_typed(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
@@ -352,27 +360,27 @@ void _qmm_dispatch_typed(
     bool transposed_w) {
   switch (bits) {
     case 2:
-      _qmm_dispatch_group<T, 2>(
+      _qmm_dispatch_group<T, ScaleT, 2>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 3:
-      _qmm_dispatch_group<T, 3>(
+      _qmm_dispatch_group<T, ScaleT, 3>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 4:
-      _qmm_dispatch_group<T, 4>(
+      _qmm_dispatch_group<T, ScaleT, 4>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 5:
-      _qmm_dispatch_group<T, 5>(
+      _qmm_dispatch_group<T, ScaleT, 5>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 6:
-      _qmm_dispatch_group<T, 6>(
+      _qmm_dispatch_group<T, ScaleT, 6>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 8:
-      _qmm_dispatch_group<T, 8>(
+      _qmm_dispatch_group<T, ScaleT, 8>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     default:
@@ -380,7 +388,7 @@ void _qmm_dispatch_typed(
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _qmm_dispatch_typed(
     array& out,
     const array& x,
@@ -400,10 +408,10 @@ void _qmm_dispatch_typed(
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
   auto w_ptr = w.data<uint32_t>();
-  auto scales_ptr = scales.data<T>();
-  auto biases_ptr = biases.data<T>();
+  auto scales_ptr = scales.data<ScaleT>();
+  auto biases_ptr = biases.data<ScaleT>();
   for (int i = 0; i < batch_size; i++) {
-    _qmm_dispatch_typed<T>(
+    _qmm_dispatch_typed<T, ScaleT>(
         out_ptr + i * M * N,
         x_ptr + elem_to_loc(i * M * K, x.shape(), x.strides()),
         w_ptr + elem_to_loc(i * w_els, w.shape(), w.strides()),
@@ -437,8 +445,13 @@ void _qmm_dispatch(
           out, x, w, scales, biases, bits, group_size, transposed_w);
       break;
     case bfloat16:
-      _qmm_dispatch_typed<bfloat16_t>(
-          out, x, w, scales, biases, bits, group_size, transposed_w);
+      if (scales.dtype() == float16) {
+        _qmm_dispatch_typed<bfloat16_t, float16_t>(
+            out, x, w, scales, biases, bits, group_size, transposed_w);
+      } else {
+        _qmm_dispatch_typed<bfloat16_t>(
+            out, x, w, scales, biases, bits, group_size, transposed_w);
+      }
       break;
     default:
       throw std::invalid_argument(
