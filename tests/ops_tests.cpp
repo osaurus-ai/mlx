@@ -5035,3 +5035,40 @@ TEST_CASE("test norms of a strided weight and bias") {
               .item<bool>());
   }
 }
+
+TEST_CASE("test rope with strided offsets and freqs") {
+  // Strided offsets or freqs must match their contiguous copy. Each broadcast
+  // repeats one element of a wider array, so a stride-1 read stays in it.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  auto v = subtract(remainder(arange(1024, cpu), array(7), cpu), array(3), cpu);
+  auto x = reshape(astype(v, float32, cpu), {4, 2, 8, 16}, cpu);
+  std::vector<array> offsets = {
+      broadcast_to(slice(arange(8, cpu), {3}, {4}, cpu), {4}, cpu),
+      slice(arange(8, cpu), {0}, {8}, {2}, cpu)};
+  for (auto& off : offsets) {
+    CAPTURE(off.strides());
+    auto oc = contiguous(off, false, cpu);
+    CHECK(array_equal(
+              fast::rope(x, 16, false, 10000.0f, 1.0f, off, std::nullopt, cpu),
+              fast::rope(x, 16, false, 10000.0f, 1.0f, oc, std::nullopt, cpu),
+              cpu)
+              .item<bool>());
+  }
+  auto f2 = astype(
+      add(remainder(arange(16, cpu), array(5), cpu), array(1), cpu),
+      float32,
+      cpu);
+  std::vector<array> freqs = {
+      broadcast_to(slice(f2, {1}, {2}, cpu), {8}, cpu),
+      slice(f2, {0}, {16}, {2}, cpu)};
+  for (auto& f : freqs) {
+    CAPTURE(f.strides());
+    auto fc = contiguous(f, false, cpu);
+    CHECK(array_equal(
+              fast::rope(x, 16, false, std::nullopt, 1.0f, 0, f, cpu),
+              fast::rope(x, 16, false, std::nullopt, 1.0f, 0, fc, cpu),
+              cpu)
+              .item<bool>());
+  }
+}

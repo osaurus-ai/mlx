@@ -498,16 +498,29 @@ void RoPE::eval_cpu(
   out.set_data(allocator::malloc(out.nbytes()));
 
   // Get offset
-  auto& offset_arr = inputs[1];
+  array offset_arr = inputs[1];
   bool per_batch_offset = offset_arr.size() > 1;
   bool has_freqs = inputs.size() == 3;
+  std::optional<array> freqs;
+  if (has_freqs) {
+    freqs = inputs[2];
+  }
 
   // Set up command encoder
   auto& encoder = cpu::get_command_encoder(stream());
+  // The kernels read offsets and freqs with stride 1.
+  if (offset_arr.ndim() > 0 && offset_arr.strides()[0] != 1) {
+    offset_arr = contiguous_copy_cpu(offset_arr, stream());
+    encoder.add_temporary(offset_arr);
+  }
+  if (has_freqs && freqs->strides()[0] != 1) {
+    freqs = contiguous_copy_cpu(*freqs, stream());
+    encoder.add_temporary(*freqs);
+  }
   encoder.set_input_array(x);
   encoder.set_input_array(offset_arr);
   if (has_freqs) {
-    encoder.set_input_array(inputs[2]);
+    encoder.set_input_array(*freqs);
   }
   encoder.set_output_array(out);
   if (made_copy) {
@@ -533,7 +546,7 @@ void RoPE::eval_cpu(
     using DType = decltype(dummy);
     const DType* x_ptr = x.data<DType>();
     const int* off_ptr = offset_arr.data<int>();
-    const float* freq_ptr = has_freqs ? inputs[2].data<float>() : nullptr;
+    const float* freq_ptr = has_freqs ? freqs->data<float>() : nullptr;
     DType* out_ptr = out.data<DType>();
 
     encoder.dispatch([=, &pool]() {
