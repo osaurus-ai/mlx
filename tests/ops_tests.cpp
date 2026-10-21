@@ -4956,15 +4956,20 @@ TEST_CASE("test empty arrays in the Highway CPU kernels") {
   CHECK(array_equal(l, x, cpu).item<bool>());
 }
 
+namespace {
+// Sets the buffer cache limit back. With the cache off, a copy freed before
+// its tasks run is freed for real, which ASan reports.
+struct RestoreCacheLimit {
+  size_t limit;
+  ~RestoreCacheLimit() {
+    set_cache_limit(limit);
+  }
+};
+} // namespace
+
 TEST_CASE("test norms of a non-contiguous input") {
-  // A transposed input makes the native norms copy it; with no buffer cache, a
-  // copy freed before its tasks run is freed for real, which ASan reports.
-  struct RestoreCacheLimit {
-    size_t limit;
-    ~RestoreCacheLimit() {
-      set_cache_limit(limit);
-    }
-  } restore{set_cache_limit(0)};
+  // A transposed input makes the native norms copy it.
+  RestoreCacheLimit restore{set_cache_limit(0)};
   StreamOrDevice cpu = Device::cpu;
   // Values -3 to 3 keep every sum exact, so both layouts give the same bits.
   auto input = [cpu]() {
@@ -4989,6 +4994,43 @@ TEST_CASE("test norms of a non-contiguous input") {
                   std::nullopt,
                   1e-5f,
                   cpu),
+              cpu)
+              .item<bool>());
+  }
+}
+
+TEST_CASE("test norms of a strided weight and bias") {
+  // A strided weight or bias must match its contiguous copy. The broadcast
+  // repeats one element of w2, so a stride-1 read stays in w2.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  int width = 64;
+  auto v =
+      subtract(remainder(arange(8 * width, cpu), array(7), cpu), array(3), cpu);
+  auto x = reshape(astype(v, float32, cpu), {8, width}, cpu);
+  auto w2 = astype(
+      add(remainder(arange(2 * width, cpu), array(5), cpu), array(1), cpu),
+      float32,
+      cpu);
+  std::vector<array> params = {
+      broadcast_to(slice(w2, {1}, {2}, cpu), {width}, cpu),
+      slice(w2, {0}, {2 * width}, {2}, cpu)};
+  for (auto& p : params) {
+    CAPTURE(p.strides());
+    auto pc = contiguous(p, false, cpu);
+    CHECK(array_equal(
+              fast::rms_norm(x, p, 1e-5f, cpu),
+              fast::rms_norm(x, pc, 1e-5f, cpu),
+              cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              fast::layer_norm(x, p, std::nullopt, 1e-5f, cpu),
+              fast::layer_norm(x, pc, std::nullopt, 1e-5f, cpu),
+              cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              fast::layer_norm(x, std::nullopt, p, 1e-5f, cpu),
+              fast::layer_norm(x, std::nullopt, pc, 1e-5f, cpu),
               cpu)
               .item<bool>());
   }

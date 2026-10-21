@@ -479,7 +479,7 @@ void RMSNorm::eval_cpu(
     return;
   }
   auto& in_x = inputs[0];
-  auto& weight = inputs[1];
+  array weight = inputs[1];
   auto& out = outputs[0];
 
   // Non-contiguous inputs are copied to contiguous layout
@@ -504,6 +504,11 @@ void RMSNorm::eval_cpu(
   bool has_weight = weight.ndim() > 0;
 
   auto& encoder = cpu::get_command_encoder(stream());
+  // The kernels read the weight with stride 1.
+  if (has_weight && weight.strides()[0] != 1) {
+    weight = contiguous_copy_cpu(weight, stream());
+    encoder.add_temporary(weight);
+  }
   encoder.set_input_array(x);
   if (has_weight) {
     encoder.set_input_array(weight);
@@ -644,8 +649,8 @@ void LayerNorm::eval_cpu(
     return;
   }
   auto& in_x = inputs[0];
-  auto& weight = inputs[1];
-  auto& bias = inputs[2];
+  array weight = inputs[1];
+  array bias = inputs[2];
   auto& out = outputs[0];
 
   // Non-contiguous inputs are copied to contiguous layout
@@ -671,6 +676,15 @@ void LayerNorm::eval_cpu(
   bool has_bias = bias.ndim() > 0;
 
   auto& encoder = cpu::get_command_encoder(stream());
+  // The kernels read weight and bias with stride 1.
+  if (has_weight && weight.strides()[0] != 1) {
+    weight = contiguous_copy_cpu(weight, stream());
+    encoder.add_temporary(weight);
+  }
+  if (has_bias && bias.strides()[0] != 1) {
+    bias = contiguous_copy_cpu(bias, stream());
+    encoder.add_temporary(bias);
+  }
   encoder.set_input_array(x);
   if (has_weight) {
     encoder.set_input_array(weight);
