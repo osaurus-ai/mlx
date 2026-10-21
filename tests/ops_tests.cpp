@@ -5072,3 +5072,33 @@ TEST_CASE("test rope with strided offsets and freqs") {
               .item<bool>());
   }
 }
+
+TEST_CASE("test sdpa with strided sinks") {
+  // Strided sinks must match their contiguous copy. The broadcast repeats one
+  // element of s8, so a stride-1 read stays in s8.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  auto input = [cpu](int start, int len) {
+    auto a = remainder(arange(start, start + 64 * len, cpu), array(7), cpu);
+    auto b = astype(subtract(a, array(3), cpu), float32, cpu);
+    return reshape(b, {1, 4, len, 16}, cpu);
+  };
+  auto q = input(0, 8);
+  auto k = input(1, 16);
+  auto v = input(2, 16);
+  auto s8 = astype(arange(-4, 4, cpu), float32, cpu);
+  std::vector<array> sinks = {
+      broadcast_to(slice(s8, {1}, {2}, cpu), {4}, cpu),
+      slice(s8, {0}, {8}, {2}, cpu)};
+  for (auto& sink : sinks) {
+    CAPTURE(sink.strides());
+    auto sc = contiguous(sink, false, cpu);
+    CHECK(array_equal(
+              fast::scaled_dot_product_attention(
+                  q, k, v, 0.0625f, "", std::nullopt, sink, false, cpu),
+              fast::scaled_dot_product_attention(
+                  q, k, v, 0.0625f, "", std::nullopt, sc, false, cpu),
+              cpu)
+              .item<bool>());
+  }
+}

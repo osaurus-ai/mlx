@@ -808,9 +808,10 @@ void ScaledDotProductAttention::eval_cpu(
       ? std::optional<array>(ensure_contiguous(inputs[3]))
       : std::nullopt;
 
-  // Sinks is 1D (n_q_heads,), always contiguous
-  auto sinks_arr =
-      has_sinks_ ? std::optional<array>(inputs.back()) : std::nullopt;
+  // Sinks is 1D (n_q_heads,); the kernels read it with stride 1.
+  auto sinks_arr = has_sinks_
+      ? std::optional<array>(ensure_contiguous(inputs.back()))
+      : std::nullopt;
 
   int B = q.shape(0);
   int n_q_heads = q.shape(1);
@@ -846,6 +847,9 @@ void ScaledDotProductAttention::eval_cpu(
   }
   if (has_arr_mask && !inputs[3].flags().row_contiguous) {
     encoder.add_temporary(*mask_arr);
+  }
+  if (has_sinks_ && !inputs.back().flags().row_contiguous) {
+    encoder.add_temporary(*sinks_arr);
   }
 
   float scale = scale_;
