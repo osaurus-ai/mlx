@@ -206,20 +206,23 @@ TEST_CASE("test affine quantized matmul casts preserve explicit stream") {
 
 namespace {
 
-// bf16 x with f16 scales and biases, in the mixed path's layout. The
-// metadata needs f16's precision, and every partial sum is exact in float32.
+// bf16 x with f16 biases and, by default, f16 scales, in the mixed path's
+// layout. The f16 values need f16's precision. Every partial sum is exact
+// in float32.
 struct MixedInputs {
   array x, w, scales, biases;
   // The float32 weights the codes stand for; none at 6 bits.
   std::optional<array> deq;
 };
 
-MixedInputs mixed_inputs(int bits, Stream s) {
+MixedInputs mixed_inputs(int bits, Stream s, Dtype scales_type = float16) {
   constexpr int N = 32, K = 512;
   auto g = reshape(arange(N * K / 64, s), {N, K / 64}, s);
   auto odd = add(multiply(remainder(g, array(4), s), array(2), s), array(1), s);
-  auto scales =
-      add(divide(astype(odd, float32, s), array(256.0f), s), array(1.0f), s);
+  // Scales of other types are the integers 1 and 2.
+  auto scales = scales_type == float16
+      ? add(divide(astype(odd, float32, s), array(256.0f), s), array(1.0f), s)
+      : astype(add(remainder(g, array(2), s), array(1), s), float32, s);
   auto biases =
       add(astype(subtract(remainder(g, array(5), s), array(2), s), float32, s),
           array(1.0f / 256),
@@ -253,7 +256,7 @@ MixedInputs mixed_inputs(int bits, Stream s) {
   return {
       astype(reshape(x, {1, K}, s), bfloat16, s),
       w,
-      astype(scales, float16, s),
+      astype(scales, scales_type, s),
       astype(biases, float16, s),
       deq};
 }
@@ -367,4 +370,45 @@ TEST_CASE("test mixed bf16 and f16 gather_qmm") {
       false,
       cpu);
   CHECK(array_equal(g, ref, false, cpu).item<bool>());
+}
+
+TEST_CASE("test int16 scales with f16 biases promote") {
+  // Only f16 scales take the mixed path. Other scales promote to float32.
+  auto cpu = new_stream(Device::cpu);
+  auto expert = array({0}, uint32);
+  auto one = [&](const array& a) { return expand_dims(a, 0, cpu); };
+  for (auto device : {Device::cpu, Device::gpu}) {
+    if (!is_available(device)) {
+      continue;
+    }
+    for (int bits : {4, 8}) {
+      CAPTURE(device);
+      CAPTURE(bits);
+      auto [x, w, scales, biases, deq] = mixed_inputs(bits, cpu, int16);
+      auto ref = matmul(astype(x, float32, cpu), transpose(*deq, cpu), cpu);
+      // A failed op leaves its error on its stream, for the stream's next
+      // eval to throw. So each op gets a new stream.
+      auto y = quantized_matmul(
+          x, w, scales, biases, true, 64, bits, "affine", new_stream(device));
+      CHECK(y.dtype() == float32);
+      CHECK(array_equal(y, ref, false, cpu).item<bool>());
+      auto g = gather_qmm(
+          x,
+          one(w),
+          one(scales),
+          one(biases),
+          std::nullopt,
+          expert,
+          true,
+          64,
+          bits,
+          "affine",
+          std::nullopt,
+          false,
+          new_stream(device));
+      ref = reshape(ref, {1, 1, ref.shape(-1)}, cpu);
+      CHECK(g.dtype() == float32);
+      CHECK(array_equal(g, ref, false, cpu).item<bool>());
+    }
+  }
 }

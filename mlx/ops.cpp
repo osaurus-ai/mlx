@@ -4806,8 +4806,8 @@ array quantized_matmul(
     return !(value && value[0] == '1' && value[1] == '\0');
   }();
   const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
-      transpose && x.dtype() == bfloat16 && dtype == float16 && biases &&
-      biases->dtype() == float16 && group_size == 64 &&
+      transpose && x.dtype() == bfloat16 && scales.dtype() == float16 &&
+      biases && biases->dtype() == float16 && group_size == 64 &&
       (((bits == 4 || bits == 8) && reads_mixed_bf16_f16(to_stream(s))) ||
        (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu &&
         metal::is_available())) &&
@@ -5650,7 +5650,7 @@ array gather_qmm(
       rhs_indices.size() / experts >= 4;
   const bool mixed_bf16_f16_qmv = reads_mixed_bf16_f16(to_stream(s)) &&
       !sorted_rhs_matrix && qmode == QuantizationMode::Affine && transpose &&
-      x.dtype() == bfloat16 && out_type == float16 && biases &&
+      x.dtype() == bfloat16 && scales.dtype() == float16 && biases &&
       biases->dtype() == float16 && group_size == 64 &&
       (bits == 4 || bits == 8) && x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
       w_outer_dims % 8 == 0;

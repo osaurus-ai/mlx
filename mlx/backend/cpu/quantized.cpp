@@ -435,6 +435,14 @@ void _qmm_dispatch(
     int bits,
     int group_size,
     bool transposed_w) {
+  // The kernels read scales and biases as x's type, or as f16 for bf16 x,
+  // and write x's type.
+  const bool mixed = x.dtype() == bfloat16 && scales.dtype() == float16;
+  if (biases.dtype() != scales.dtype() ||
+      (!mixed && scales.dtype() != x.dtype()) || out.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[quantized_matmul] Unsupported scale, bias or output type.");
+  }
   switch (x.dtype()) {
     case float32:
       _qmm_dispatch_typed<float>(
@@ -770,6 +778,14 @@ void _bs_qmm_dispatch(
     int bits,
     int group_size,
     bool transposed_w) {
+  // The kernels read scales and biases as x's type, or as f16 for bf16 x,
+  // and write x's type.
+  const bool mixed = x.dtype() == bfloat16 && scales.dtype() == float16;
+  if (biases.dtype() != scales.dtype() ||
+      (!mixed && scales.dtype() != x.dtype()) || out.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[gather_qmm] Unsupported scale, bias or output type.");
+  }
   switch (x.dtype()) {
     case float32:
       _bs_qmm_dispatch_typed<float>(
