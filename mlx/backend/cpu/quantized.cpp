@@ -710,7 +710,7 @@ void fp_qmm_dispatch(
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _bs_qmm_dispatch_typed(
     array& out,
     const array& x,
@@ -732,8 +732,8 @@ void _bs_qmm_dispatch_typed(
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
   auto w_ptr = w.data<uint32_t>();
-  auto scales_ptr = scales.data<T>();
-  auto biases_ptr = biases.data<T>();
+  auto scales_ptr = scales.data<ScaleT>();
+  auto biases_ptr = biases.data<ScaleT>();
   auto lhs_indices_ptr = lhs_indices.data<uint32_t>();
   auto rhs_indices_ptr = rhs_indices.data<uint32_t>();
 
@@ -742,7 +742,7 @@ void _bs_qmm_dispatch_typed(
         i, lhs_indices.shape(), lhs_indices.strides())];
     int w_idx = rhs_indices_ptr[elem_to_loc(
         i, rhs_indices.shape(), rhs_indices.strides())];
-    _qmm_dispatch_typed<T>(
+    _qmm_dispatch_typed<T, ScaleT>(
         out_ptr + i * M * N,
         x_ptr + elem_to_loc(x_idx * M * K, x.shape(), x.strides()),
         w_ptr + elem_to_loc(w_idx * w_els, w.shape(), w.strides()),
@@ -798,17 +798,31 @@ void _bs_qmm_dispatch(
           transposed_w);
       break;
     case bfloat16:
-      _bs_qmm_dispatch_typed<bfloat16_t>(
-          out,
-          x,
-          w,
-          scales,
-          biases,
-          lhs_indices,
-          rhs_indices,
-          bits,
-          group_size,
-          transposed_w);
+      if (scales.dtype() == float16) {
+        _bs_qmm_dispatch_typed<bfloat16_t, float16_t>(
+            out,
+            x,
+            w,
+            scales,
+            biases,
+            lhs_indices,
+            rhs_indices,
+            bits,
+            group_size,
+            transposed_w);
+      } else {
+        _bs_qmm_dispatch_typed<bfloat16_t>(
+            out,
+            x,
+            w,
+            scales,
+            biases,
+            lhs_indices,
+            rhs_indices,
+            bits,
+            group_size,
+            transposed_w);
+      }
       break;
     default:
       throw std::invalid_argument(

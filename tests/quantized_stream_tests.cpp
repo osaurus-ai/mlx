@@ -84,7 +84,7 @@ TEST_CASE("test mixed affine gather storage follows the selected consumer") {
                 stream);
             const bool matrix = sorted && rows >= 16 && rows / experts >= 4;
             const bool mixed_vector =
-                device == Device::gpu && metal::is_available() && !matrix;
+                (device == Device::cpu || metal::is_available()) && !matrix;
             CHECK(output.dtype() == (mixed_vector ? bfloat16 : float32));
             CHECK(output.primitive().stream() == stream);
             auto expected = broadcast_to(
@@ -298,4 +298,73 @@ TEST_CASE("test mixed bf16 and f16 quantized_matmul") {
       "affine",
       cpu);
   CHECK(array_equal(y, ref, false, cpu).item<bool>());
+}
+
+TEST_CASE("test mixed bf16 and f16 gather_qmm") {
+  // One expert: the same dtype and values as quantized_matmul gives.
+  auto cpu = new_stream(Device::cpu);
+  auto expert = array({0}, uint32);
+  auto one = [&](const array& a) { return expand_dims(a, 0, cpu); };
+  for (auto device : {Device::cpu, Device::gpu}) {
+    if (!is_available(device)) {
+      continue;
+    }
+    auto s = new_stream(device);
+    for (int bits : {4, 8}) {
+      CAPTURE(device);
+      CAPTURE(bits);
+      auto [x, w, scales, biases, deq] = mixed_inputs(bits, cpu);
+      auto g = gather_qmm(
+          x,
+          one(w),
+          one(scales),
+          one(biases),
+          std::nullopt,
+          expert,
+          true,
+          64,
+          bits,
+          "affine",
+          std::nullopt,
+          false,
+          s);
+      auto ref = matmul(astype(x, float32, cpu), transpose(*deq, cpu), cpu);
+      ref = astype(reshape(ref, {1, 1, ref.shape(-1)}, cpu), bfloat16, cpu);
+      CHECK(g.dtype() == bfloat16);
+      CHECK(array_equal(g, ref, false, cpu).item<bool>());
+    }
+  }
+  // 6 bits promotes, as in quantized_matmul.
+  auto [x, w, scales, biases, deq] = mixed_inputs(6, cpu);
+  auto g = gather_qmm(
+      x,
+      one(w),
+      one(scales),
+      one(biases),
+      std::nullopt,
+      expert,
+      true,
+      64,
+      6,
+      "affine",
+      std::nullopt,
+      false,
+      cpu);
+  CHECK(g.dtype() == float32);
+  CHECK(g.inputs()[0].dtype() == float32);
+  auto ref = gather_qmm(
+      astype(x, float32, cpu),
+      one(w),
+      one(astype(scales, float32, cpu)),
+      one(astype(biases, float32, cpu)),
+      std::nullopt,
+      expert,
+      true,
+      64,
+      6,
+      "affine",
+      std::nullopt,
+      false,
+      cpu);
+  CHECK(array_equal(g, ref, false, cpu).item<bool>());
 }

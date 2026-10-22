@@ -5637,8 +5637,9 @@ array gather_qmm(
   std::tie(lhs_indices, rhs_indices) =
       broadcast_arrays(lhs_indices, rhs_indices, s);
 
-  // Match GatherQMM::eval_gpu: only Metal's vector consumer supports mixed
-  // BF16/F16 storage. Sorted matrix rows need normal dtype promotion.
+  // The CPU kernels and Metal's vector kernels read bf16 x with f16 scales
+  // and biases. Metal's matrix kernel for sorted rows does not, so sorted rows
+  // promote on every device and the output dtype does not depend on it.
   const auto experts = std::accumulate(
       w.shape().begin(),
       w.shape().end() - 2,
@@ -5647,12 +5648,12 @@ array gather_qmm(
   const bool sorted_rhs_matrix = sorted_indices && !lhs_indices_ &&
       x.shape(-2) == 1 && rhs_indices.size() >= 16 && experts > 0 &&
       rhs_indices.size() / experts >= 4;
-  const bool mixed_bf16_f16_qmv = to_stream(s).device == Device::gpu &&
-      metal::is_available() && !sorted_rhs_matrix &&
-      qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
-      out_type == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) && x.shape(-2) == 1 &&
-      w_inner_dims % 512 == 0 && w_outer_dims % 8 == 0;
+  const bool mixed_bf16_f16_qmv = reads_mixed_bf16_f16(to_stream(s)) &&
+      !sorted_rhs_matrix && qmode == QuantizationMode::Affine && transpose &&
+      x.dtype() == bfloat16 && out_type == float16 && biases &&
+      biases->dtype() == float16 && group_size == 64 &&
+      (bits == 4 || bits == 8) && x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
+      w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
     out_type =
         mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), out_type);
