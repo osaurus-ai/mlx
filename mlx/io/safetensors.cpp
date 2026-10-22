@@ -144,11 +144,6 @@ bool env_truthy(const char* key) {
   return value == "1" || value == "true" || value == "on" || value == "yes";
 }
 
-bool mmap_safetensors_enabled() {
-  return env_truthy("MLX_SAFETENSORS_MMAP") ||
-      env_truthy("VMLINUX_MMAP_SAFETENSORS");
-}
-
 bool mmap_debug_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP_DEBUG") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS_DEBUG");
@@ -1307,20 +1302,6 @@ SafetensorsLoad load_safetensors(
 }
 
 SafetensorsLoad load_safetensors(const std::string& file, StreamOrDevice s) {
-#ifndef _WIN32
-  if (mmap_safetensors_enabled()) {
-    if (auto loaded = load_safetensors_mmap(file, s)) {
-      return *std::move(loaded);
-    }
-    if (mmap_debug_enabled()) {
-      std::fprintf(
-          stderr,
-          "[mlx.safetensors.mmap] fallback-to-reader file=%s\n",
-          file.c_str());
-      std::fflush(stderr);
-    }
-  }
-#endif
   return load_safetensors(std::make_shared<io::ParallelFileReader>(file), s);
 }
 
@@ -1328,20 +1309,6 @@ SafetensorsLoad load_safetensors_excluding(
     const std::string& file,
     const std::unordered_set<std::string>& excluded_keys,
     StreamOrDevice s) {
-#ifndef _WIN32
-  if (mmap_safetensors_enabled()) {
-    if (auto loaded = load_safetensors_mmap(file, s, &excluded_keys)) {
-      return *std::move(loaded);
-    }
-    if (mmap_debug_enabled()) {
-      std::fprintf(
-          stderr,
-          "[mlx.safetensors.mmap] filtered-fallback-to-reader file=%s\n",
-          file.c_str());
-      std::fflush(stderr);
-    }
-  }
-#endif
   return load_safetensors(
       std::make_shared<io::ParallelFileReader>(file), s, &excluded_keys);
 }
@@ -1349,23 +1316,8 @@ SafetensorsLoad load_safetensors_excluding(
 SafetensorsLoad load_safetensors_excluding(
     const std::string& file,
     const std::unordered_set<std::string>& excluded_keys,
-    bool exact_tensor_buffers,
+    bool /* exact_tensor_buffers */,
     StreamOrDevice s) {
-#ifndef _WIN32
-  if (mmap_safetensors_enabled()) {
-    if (auto loaded = load_safetensors_mmap(
-            file, s, &excluded_keys, exact_tensor_buffers)) {
-      return *std::move(loaded);
-    }
-    if (mmap_debug_enabled()) {
-      std::fprintf(
-          stderr,
-          "[mlx.safetensors.mmap] exact-filtered-fallback-to-reader file=%s\n",
-          file.c_str());
-      std::fflush(stderr);
-    }
-  }
-#endif
   return load_safetensors(
       std::make_shared<io::ParallelFileReader>(file), s, &excluded_keys);
 }
