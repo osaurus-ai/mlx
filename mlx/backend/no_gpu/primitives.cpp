@@ -36,11 +36,13 @@ bool fast::ScaledDotProductAttention::use_fallback(
     Stream s) {
 #if defined(MLX_USE_HIGHWAY_KERNELS)
   // Use native CPU kernel for inference (handles causal, array mask, sinks).
-  // It takes float32, float16 and bfloat16, one head dim up to 256.
+  // It takes float32, float16 and bfloat16, one head dim up to 256, and keys
+  // and values of the same length.
   const bool native_type =
       q.dtype() == float32 || q.dtype() == float16 || q.dtype() == bfloat16;
   if (s.device == Device::cpu && !output_logsumexp && native_type &&
-      q.shape(-1) == v.shape(-1) && q.shape(-1) <= 256) {
+      q.shape(-1) == v.shape(-1) && q.shape(-1) <= 256 &&
+      k.shape(-2) == v.shape(-2)) {
     return false;
   }
 #endif // MLX_USE_HIGHWAY_KERNELS

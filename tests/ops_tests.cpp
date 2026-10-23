@@ -5154,3 +5154,16 @@ TEST_CASE("test qqmm with an unquantized weight") {
       "[QQMatmul] NYI for the general case",
       std::runtime_error);
 }
+
+TEST_CASE("test sdpa with keys and values of different lengths") {
+  // Values shorter than the keys must raise the composed path's error, on a
+  // shape the native kernel otherwise takes.
+  StreamOrDevice cpu = Device::cpu;
+  auto q = zeros({1, 4, 8, 16}, float32, cpu);
+  auto k = zeros({1, 4, 16, 16}, float32, cpu);
+  auto v = zeros({1, 4, 12, 16}, float32, cpu);
+  CHECK_THROWS_AS(
+      fast::scaled_dot_product_attention(
+          q, k, v, 0.0625f, "", std::nullopt, std::nullopt, false, cpu),
+      std::invalid_argument);
+}
