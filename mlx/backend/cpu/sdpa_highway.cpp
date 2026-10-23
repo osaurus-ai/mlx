@@ -34,6 +34,12 @@ namespace hu = mlx::core::highway::HWY_NAMESPACE;
 using hu::load_typed_as_f32;
 using hu::store_f32_as_typed;
 
+// 16 float lanes at most: no SVE until kernels are vector-length agnostic.
+constexpr int kMaxLanes = 16;
+static_assert(
+    hn::MaxLanes(hn::ScalableTag<float>()) <= kMaxLanes,
+    "a float vector must fit the per-lane buffers");
+
 template <class DF>
 hn::Vec<DF> exp_lanes(DF df, hn::Vec<DF> x) {
   using V = hn::Vec<DF>;
@@ -170,7 +176,7 @@ void sdpa_accum_values(
     } else {
       const int remaining = head_dim - offset;
       for (int r = 0; r < rows; ++r) {
-        alignas(64) float v_tmp[16] = {};
+        alignas(64) float v_tmp[kMaxLanes] = {};
         for (int j = 0; j < remaining; ++j) {
           v_tmp[j] = static_cast<float>(values[r * head_dim + offset + j]);
         }
@@ -220,12 +226,11 @@ void sdpa_single_head(
 
   int s = 0;
   for (; s + lanes <= effective_len; s += lanes) {
-    alignas(64) float dots[16];
-    int b = 0;
-    for (; b + 4 <= lanes; b += 4) {
+    alignas(64) float dots[kMaxLanes];
+    for (int b = 0; b + 4 <= lanes; b += 4) {
       sdpa_dot_four(df, q_f, keys, head_dim, scale, mask, s + b, dots + b);
     }
-    for (; b < lanes; ++b) {
+    for (int b = lanes / 4 * 4; b < lanes; ++b) {
       dots[b] = sdpa_dot_one(
           df, q_f, keys + (s + b) * head_dim, head_dim, scale, mask, s + b);
     }
@@ -248,7 +253,7 @@ void sdpa_single_head(
     const V vexp = exp_lanes(df, hn::Sub(vdots, hn::Set(df, running_max)));
     running_sum += hn::ReduceSum(df, vexp);
 
-    alignas(64) float exp_arr[16];
+    alignas(64) float exp_arr[kMaxLanes];
     hn::StoreU(vexp, df, exp_arr);
     for (int b = 0; b < lanes; b += 4) {
       sdpa_accum_values(
@@ -307,7 +312,7 @@ void sdpa_single_head(
       if (i * lanes + lanes <= head_dim) {
         store_f32_as_typed(df, result, output, i * lanes);
       } else {
-        alignas(64) float tmp[16];
+        alignas(64) float tmp[kMaxLanes];
         hn::StoreU(result, df, tmp);
         const int remaining = head_dim - i * lanes;
         for (int j = 0; j < remaining; ++j) {
