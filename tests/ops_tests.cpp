@@ -5102,3 +5102,55 @@ TEST_CASE("test sdpa with strided sinks") {
               .item<bool>());
   }
 }
+
+TEST_CASE("test qqmm with an unquantized weight") {
+  // An unquantized w must raise quantized.cpp's error, also with scales,
+  // which qqmm accepts since it checks scales only for a quantized w.
+  StreamOrDevice cpu = Device::cpu;
+  int K = 64;
+  int N = 32;
+  auto x = ones({1, K}, float32, cpu);
+  auto w = ones({N, K}, float32, cpu);
+  auto with_scales = qqmm(
+      x,
+      w,
+      zeros({N, K / 16}, uint8, cpu),
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      std::nullopt,
+      std::nullopt,
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(with_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+  auto with_global_scales = qqmm(
+      x,
+      w,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      array(1.0f),
+      array(1.0f),
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(with_global_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+  auto without_scales = qqmm(
+      x,
+      w,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      std::nullopt,
+      std::nullopt,
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(without_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+}
