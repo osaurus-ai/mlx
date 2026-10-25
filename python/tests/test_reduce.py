@@ -340,6 +340,27 @@ class TestReduce(mlx_tests.MLXTestCase):
                 getattr(np, op)(x_np, axis=1).tolist(),
             )
 
+    def test_and_or_small_ints(self):
+        # Even values have the low bit clear but are still nonzero
+        for dtype in ["int8", "uint8"]:
+            for shape, axis in [
+                ((70,), None),
+                ((4, 33), 1),
+                ((4096, 64), 1),
+                ((3, 7, 9), (1, 2)),
+                ((33, 4), 0),
+                ((8, 5000), 0),
+            ]:
+                with self.subTest(dtype=dtype, shape=shape, axis=axis):
+                    some = np.zeros(shape, dtype=dtype)
+                    some.reshape(-1)[::5] = 2
+                    for a_np in [some, some + 2]:
+                        a_mx = mx.array(a_np)
+                        for op in ["any", "all"]:
+                            out = getattr(mx, op)(a_mx, axis=axis)
+                            ref = getattr(np, op)(a_np, axis=axis)
+                            self.assertTrue(np.array_equal(out, ref))
+
     @unittest.skipIf(not mx.metal.is_available(), "requires Metal")
     def test_init_reduce_large_output(self):
         out = mx.all(mx.zeros((0, 4, 2**30), dtype=mx.bool_), axis=0)
