@@ -170,8 +170,8 @@ template <typename InT, int Dk, int Dv, int Hk, int Hv, int C>
     const device InT* k [[buffer(1)]],
     const device InT* v [[buffer(2)]],
     const device float* state_in [[buffer(3)]],
-    const device InT* g [[buffer(4)]],
-    const device InT* beta [[buffer(5)]],
+    const device float* g [[buffer(4)]],
+    const device float* beta [[buffer(5)]],
     device InT* y [[buffer(6)]],
     device float* state_out [[buffer(7)]],
     constant int& T [[buffer(8)]],
@@ -272,8 +272,8 @@ template <typename InT, int Dk, int Dv, int Hk, int Hv>
     const device InT* k [[buffer(1)]],
     const device InT* v [[buffer(2)]],
     const device float* state_in [[buffer(3)]],
-    const device InT* g [[buffer(4)]], // [B, T, Hv] or [B, T, Hv, Dk]
-    const device InT* beta [[buffer(5)]], // [B, T, Hv]
+    const device float* g [[buffer(4)]], // [B, T, Hv] or [B, T, Hv, Dk]
+    const device float* beta [[buffer(5)]], // [B, T, Hv]
                                           // [B, Hv, Dv, Dk]
     device InT* y [[buffer(6)]], // [B, T, Hv, Dv]
     device float* state_out [[buffer(7)]], // [B, Hv, Dv, Dk]
