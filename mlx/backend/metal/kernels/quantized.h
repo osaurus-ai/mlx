@@ -3005,9 +3005,7 @@ template <typename T, int group_size, int bits, bool has_global_scale = false>
 
   float w_thread[values_per_reduce];
   float w_min = Limits<T>::max;
-  // One-bit endpoints are the observed min/max. Including an implicit zero
-  // turns a negative-only group {-2, -1} into {-2, 0} and loses an endpoint.
-  float w_max = bits == 1 ? -Limits<T>::max : 0;
+  float w_max = -Limits<T>::max;
 
 #pragma clang loop unroll(full)
   for (int i = 0; i < values_per_reduce; i++) {
