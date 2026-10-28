@@ -3690,6 +3690,38 @@ TEST_CASE("test divmod") {
   CHECK_EQ(out_holder[0].item<float>(), 1.0);
 }
 
+TEST_CASE("test integer division of the minimum by -1") {
+  // On x86 this division traps. The quotient is the minimum, remainder 0.
+  // Eleven pairs, so that the SIMD lanes and the scalar tail both run.
+  auto check = [](auto lo) {
+    using T = decltype(lo);
+    auto s = Device::cpu;
+    auto a =
+        array({lo, T(-7), T(7), T(7), T(-7), lo, T(5), T(-5), lo, T(-7), T(0)});
+    auto b = array(
+        {T(-1), T(2), T(0), T(-2), T(-2), T(1), T(3), T(3), T(-1), T(0), T(0)});
+    auto q =
+        array({lo, T(-4), T(0), T(-4), T(3), lo, T(1), T(-2), lo, T(-1), T(0)});
+    auto r = array(
+        {T(0), T(1), T(7), T(-1), T(-1), T(0), T(2), T(1), T(0), T(-7), T(0)});
+    auto dtype = a.dtype();
+    CAPTURE(dtype);
+    auto fq = floor_divide(a, b, s);
+    auto fr = remainder(a, b, s);
+    CHECK(array_equal(fq, q, s).item<bool>());
+    CHECK(array_equal(fr, r, s).item<bool>());
+
+    // divmod gives floor_divide and remainder, also for a zero divisor.
+    auto qr = divmod(a, b, s);
+    CHECK(array_equal(qr[0], fq, s).item<bool>());
+    CHECK(array_equal(qr[1], fr, s).item<bool>());
+    CHECK(array_equal(qr[0], q, s).item<bool>());
+    CHECK(array_equal(qr[1], r, s).item<bool>());
+  };
+  check(std::numeric_limits<int32_t>::min());
+  check(std::numeric_limits<int64_t>::min());
+}
+
 TEST_CASE("test diagonal") {
   auto x = array({0, 1, 2, 3, 4, 5, 6, 7}, {4, 2});
   auto out = diagonal(x);
