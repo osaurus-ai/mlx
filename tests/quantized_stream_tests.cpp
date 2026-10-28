@@ -203,3 +203,152 @@ TEST_CASE("test affine quantized matmul casts preserve explicit stream") {
     }
   }
 }
+
+TEST_CASE("test quantized matmul on the cpu with no rows or no K") {
+  auto s = Device::cpu;
+  int N = 64;
+  for (std::string mode : {"affine", "mxfp4"}) {
+    bool affine = mode == "affine";
+    int group_size = affine ? 64 : 32;
+    for (bool transpose : {true, false}) {
+      // M = 0 gives an empty output. K = 0 gives an empty sum, which is 0.
+      for (int M : {0, 2}) {
+        int K = M == 0 ? 64 : 0;
+        CAPTURE(mode);
+        CAPTURE(transpose);
+        CAPTURE(M);
+        CAPTURE(K);
+        int rows = transpose ? N : K;
+        int cols = transpose ? K : N;
+        auto w = zeros({rows, cols * 4 / 32}, uint32, s);
+        auto scales =
+            zeros({rows, cols / group_size}, affine ? float32 : uint8, s);
+        std::optional<array> biases;
+        if (affine) {
+          biases = zeros({rows, cols / group_size}, float32, s);
+        }
+        auto x = ones({M, K}, float32, s);
+        if (K == 0) {
+          // Leave a freed buffer of ones of the output's size as the only one
+          // in the cache, so an output that is not written is not 0.
+          clear_cache();
+          auto dirty = full({M, N}, 1.0f, float32, s);
+          CHECK_EQ(min(dirty, s).item<float>(), 1.0f);
+        }
+        auto y = quantized_matmul(
+            x, w, scales, biases, transpose, group_size, 4, mode, s);
+        CHECK(y.shape() == Shape{M, N});
+        // Compare with a scalar, so that no other array takes the buffer.
+        CHECK(all(equal(y, array(0.0f), s), s).item<bool>());
+      }
+    }
+  }
+}
+
+TEST_CASE("test mixed bf16 and f16 quantized matmul with K = 0") {
+  // The mixed path counts the rows of x, which must not divide by K.
+  auto s = Device::cpu;
+  auto x = ones({1, 0}, bfloat16, s);
+  auto w = zeros({64, 0}, uint32, s);
+  auto scales = zeros({64, 0}, float16, s);
+  auto biases = zeros({64, 0}, float16, s);
+  auto y = quantized_matmul(x, w, scales, biases, true, 64, 4, "affine", s);
+  CHECK(y.shape() == Shape{1, 64});
+  CHECK_EQ(y.dtype(), float32);
+  CHECK(array_equal(y, zeros({1, 64}, float32, s), s).item<bool>());
+}
+
+TEST_CASE("test qqmm on the cpu with K = 0 or N = 0") {
+  auto s = Device::cpu;
+  // K = 0 gives an empty sum, which is 0.
+  auto y = qqmm(
+      ones({1, 0}, float32, s),
+      zeros({64, 0}, uint32, s),
+      zeros({64, 0}, uint8, s),
+      32,
+      4,
+      "mxfp4",
+      std::nullopt,
+      std::nullopt,
+      s);
+  CHECK(y.shape() == Shape{1, 64});
+  CHECK(array_equal(y, zeros({1, 64}, float32, s), s).item<bool>());
+
+  // N = 0 gives an empty output.
+  y = qqmm(
+      ones({1, 32}, float32, s),
+      zeros({0, 4}, uint32, s),
+      zeros({0, 1}, uint8, s),
+      32,
+      4,
+      "mxfp4",
+      std::nullopt,
+      std::nullopt,
+      s);
+  CHECK(y.shape() == Shape{1, 0});
+  CHECK(array_equal(y, zeros({1, 0}, float32, s), s).item<bool>());
+}
+
+TEST_CASE("test gather_qmm on the cpu with no rows or no N or no K") {
+  auto s = Device::cpu;
+  for (std::string mode : {"affine", "mxfp4"}) {
+    bool affine = mode == "affine";
+    int group_size = affine ? 64 : 32;
+    // M = 0 or N = 0 gives an empty output. K = 0 gives zeros.
+    for (auto mnk :
+         {std::array{0, 64, 64}, std::array{1, 0, 64}, std::array{1, 64, 0}}) {
+      int M = mnk[0];
+      int N = mnk[1];
+      int K = mnk[2];
+      CAPTURE(mode);
+      CAPTURE(M);
+      CAPTURE(N);
+      CAPTURE(K);
+      auto w = zeros({2, N, K * 4 / 32}, uint32, s);
+      auto scales = zeros({2, N, K / group_size}, affine ? float32 : uint8, s);
+      std::optional<array> biases;
+      if (affine) {
+        biases = zeros({2, N, K / group_size}, float32, s);
+      }
+      auto y = gather_qmm(
+          ones({2, M, K}, float32, s),
+          w,
+          scales,
+          biases,
+          std::nullopt,
+          array({1u, 0u}),
+          true,
+          group_size,
+          4,
+          mode,
+          std::nullopt,
+          false,
+          s);
+      CHECK(y.shape() == Shape{2, M, N});
+      CHECK(array_equal(y, zeros({2, M, N}, float32, s), s).item<bool>());
+    }
+  }
+}
+
+TEST_CASE("test quantized matmul with a 2-D x and an empty batch of w") {
+  // The output has the shape of x, from one matrix of w. Here w has none.
+  auto s = Device::cpu;
+  for (std::string mode : {"affine", "mxfp4"}) {
+    bool affine = mode == "affine";
+    int group_size = affine ? 64 : 32;
+    CAPTURE(mode);
+    auto w = zeros({0, 64, 8}, uint32, s);
+    auto scales = zeros({0, 64, 64 / group_size}, affine ? float32 : uint8, s);
+    std::optional<array> biases;
+    if (affine) {
+      biases = zeros({0, 64, 1}, float32, s);
+    }
+    auto x = ones({2, 64}, float32, s);
+    CHECK_THROWS_AS(
+        sum(quantized_matmul(
+                x, w, scales, biases, true, group_size, 4, mode, s),
+            s)
+            .item<float>(),
+        std::invalid_argument);
+  }
+}
