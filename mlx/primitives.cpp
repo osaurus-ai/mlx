@@ -5143,6 +5143,9 @@ std::pair<std::vector<array>, std::vector<int>> SliceUpdate::vmap(
   // Broadcast upd
   if (upd_ax == -1) {
     upd = expand_dims(upd, src_ax, stream());
+    auto shape = upd.shape();
+    shape[src_ax] = src.shape(src_ax);
+    upd = broadcast_to(upd, shape, stream());
     upd_ax = src_ax;
   }
 
@@ -5389,6 +5392,9 @@ std::pair<std::vector<array>, std::vector<int>> DynamicSliceUpdate::vmap(
   // Broadcast upd
   if (upd_ax == -1) {
     upd = expand_dims(upd, src_ax, stream());
+    auto shape = upd.shape();
+    shape[src_ax] = src.shape(src_ax);
+    upd = broadcast_to(upd, shape, stream());
     upd_ax = src_ax;
   }
 
