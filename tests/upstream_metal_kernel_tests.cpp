@@ -82,3 +82,36 @@ TEST_CASE("test upstream Metal FP4 half and bfloat fallback numerical parity") {
     }
   }
 }
+
+TEST_CASE("test one-bit affine endpoints CPU GPU and small-K dispatch") {
+  REQUIRE(is_available(Device::gpu));
+  for (auto dtype : {float32, float16, bfloat16}) {
+    for (int width : {64, 128}) {
+      for (int group : {32, 64, 128}) {
+        if (width % group != 0) {
+          continue;
+        }
+        for (int endpoints = 0; endpoints < 4; ++endpoints) {
+          CAPTURE(dtype);
+          CAPTURE(width);
+          CAPTURE(group);
+          CAPTURE(endpoints);
+          const float low[] = {-0.5f, 1.0f, -2.0f, 0.0f};
+          const float high[] = {0.5f, 2.0f, -1.0f, 0.0f};
+          auto alternating = reshape(remainder(arange(16 * width, int32, Device::cpu), array(2), Device::cpu), {16, width});
+          auto weights = astype(where(alternating, array(high[endpoints]), array(low[endpoints]), Device::cpu), dtype, Device::cpu);
+          auto input = ones({1, width}, dtype, Device::cpu);
+          auto expected = matmul(astype(input, float32, Device::cpu), transpose(astype(weights, float32, Device::cpu), Device::cpu), Device::cpu);
+          for (auto device : {Device::cpu, Device::gpu}) {
+            CAPTURE(device);
+            auto quantized = quantize(astype(weights, dtype, device), group, 1, "affine", std::nullopt, device);
+            auto decoded = dequantize(quantized[0], quantized[1], quantized[2], group, 1, "affine", std::nullopt, dtype, Device::cpu);
+            REQUIRE(array_equal(decoded, weights, false, Device::cpu).item<bool>());
+            auto result = quantized_matmul(astype(input, dtype, device), quantized[0], quantized[1], quantized[2], true, group, 1, "affine", device);
+            check_relative_rms(result, expected, dtype == bfloat16 ? 0.015f : 0.003f);
+          }
+        }
+      }
+    }
+  }
+}
