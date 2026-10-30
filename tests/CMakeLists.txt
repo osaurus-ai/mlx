@@ -40,6 +40,7 @@ target_sources(
           metal_buffer_lifetime_tests.cpp
           ops_tests.cpp
           quantized_stream_tests.cpp
+          upstream_metal_kernel_tests.cpp
           random_tests.cpp
           scheduler_tests.cpp
           utils_tests.cpp
