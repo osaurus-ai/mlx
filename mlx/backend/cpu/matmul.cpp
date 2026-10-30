@@ -98,11 +98,30 @@ void matmul_general(
     return;
   }
 
-  dispatch_inexact_types(out.dtype(), "[Matmul::eval_cpu]", [&](auto type_tag) {
-    using T = MLX_GET_TYPE(type_tag);
-    matmul_dispatch<T>(
-        a, b, out, a_transposed, b_transposed, lda, ldb, alpha, beta, stream);
-  });
+  // Init-captures, because clang < 16 cannot capture structured bindings.
+  dispatch_inexact_types(
+      out.dtype(),
+      "[Matmul::eval_cpu]",
+      [&,
+       &a = a,
+       &b = b,
+       a_transposed = a_transposed,
+       b_transposed = b_transposed,
+       lda = lda,
+       ldb = ldb](auto type_tag) {
+        using T = MLX_GET_TYPE(type_tag);
+        matmul_dispatch<T>(
+            a,
+            b,
+            out,
+            a_transposed,
+            b_transposed,
+            lda,
+            ldb,
+            alpha,
+            beta,
+            stream);
+      });
   cpu::get_command_encoder(stream).add_temporaries(std::move(temps));
 }
 
