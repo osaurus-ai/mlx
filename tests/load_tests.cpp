@@ -592,6 +592,388 @@ TEST_CASE("test gguf metadata") {
   }
 }
 
+namespace {
+
+// The GGUF_VALUE_TYPE_* codes of gguflib.h.
+constexpr uint32_t kGGUFUint8 = 0;
+constexpr uint32_t kGGUFInt8 = 1;
+constexpr uint32_t kGGUFUint16 = 2;
+constexpr uint32_t kGGUFInt16 = 3;
+constexpr uint32_t kGGUFUint32 = 4;
+constexpr uint32_t kGGUFInt32 = 5;
+constexpr uint32_t kGGUFFloat32 = 6;
+constexpr uint32_t kGGUFBool = 7;
+constexpr uint32_t kGGUFString = 8;
+constexpr uint32_t kGGUFArray = 9;
+constexpr uint32_t kGGUFUint64 = 10;
+constexpr uint32_t kGGUFInt64 = 11;
+constexpr uint32_t kGGUFFloat64 = 12;
+
+// Writes a GGUF file with metadata and no tensors. begin_at() pads the key to
+// put the value at a chosen offset.
+class RawGGUFMetadata {
+ public:
+  static constexpr size_t kHeaderSize = 24; // magic, version, two counts
+
+  // Pads `key` with underscores so that the value starts `residue` bytes past
+  // a multiple of 8. Returns the padded key.
+  std::string begin_at(std::string key, uint32_t value_type, size_t residue) {
+    size_t value_offset = kHeaderSize + bytes_.size() + 8 + key.size() + 4;
+    key.append((residue + 8 - value_offset % 8) % 8, '_');
+    begin(key, value_type);
+    return key;
+  }
+
+  void begin(const std::string& key, uint32_t value_type) {
+    put<uint64_t>(key.size());
+    bytes_.insert(bytes_.end(), key.begin(), key.end());
+    put<uint32_t>(value_type);
+    value_offsets_.push_back(kHeaderSize + bytes_.size());
+  }
+
+  template <typename T>
+  void put(T v) {
+    const char* p = reinterpret_cast<const char*>(&v);
+    bytes_.insert(bytes_.end(), p, p + sizeof(T));
+  }
+
+  void put_string(const std::string& s) {
+    put<uint64_t>(s.size());
+    bytes_.insert(bytes_.end(), s.begin(), s.end());
+  }
+
+  template <typename T>
+  void put_array(uint32_t element_type, std::initializer_list<T> elements) {
+    put<uint32_t>(element_type);
+    put<uint64_t>(elements.size());
+    for (auto e : elements) {
+      put<T>(e);
+    }
+  }
+
+  void put_string_array(const std::vector<std::string>& elements) {
+    put<uint32_t>(kGGUFString);
+    put<uint64_t>(elements.size());
+    for (const auto& e : elements) {
+      put_string(e);
+    }
+  }
+
+  // True if no value starts at a multiple of 8, the alignment of gguf_value.
+  bool all_values_misaligned() const {
+    for (auto offset : value_offsets_) {
+      if (offset % 8 == 0) {
+        return false;
+      }
+    }
+    return !value_offsets_.empty();
+  }
+
+  void write(const std::string& path) const {
+    std::ofstream out(path, std::ios::binary);
+    auto u32 = [&out](uint32_t v) {
+      out.write(reinterpret_cast<const char*>(&v), 4);
+    };
+    auto u64 = [&out](uint64_t v) {
+      out.write(reinterpret_cast<const char*>(&v), 8);
+    };
+    out.write("GGUF", 4);
+    u32(3); // version
+    u64(0); // tensor_count
+    u64(value_offsets_.size()); // metadata_kv_count
+    out.write(bytes_.data(), bytes_.size());
+  }
+
+ private:
+  std::vector<char> bytes_;
+  std::vector<size_t> value_offsets_;
+};
+
+using MetadataMap = std::unordered_map<std::string, GGUFMetaData>;
+
+// The scalar `key` loaded as a 0-d array of `dtype` that holds `expected`.
+template <typename T>
+void check_gguf_scalar(
+    const MetadataMap& metadata,
+    const std::string& key,
+    Dtype dtype,
+    T expected) {
+  INFO(key);
+  auto it = metadata.find(key);
+  REQUIRE(it != metadata.end());
+  auto arr = std::get_if<array>(&it->second);
+  REQUIRE(arr != nullptr);
+  CHECK((arr->dtype() == dtype));
+  CHECK(arr->ndim() == 0);
+  CHECK(arr->size() == 1);
+  CHECK(arr->data<T>()[0] == expected);
+}
+
+// The array `key` loaded as a 1-d array of `dtype` that holds `expected`.
+template <typename T>
+void check_gguf_array(
+    const MetadataMap& metadata,
+    const std::string& key,
+    Dtype dtype,
+    std::initializer_list<T> expected) {
+  INFO(key);
+  auto it = metadata.find(key);
+  REQUIRE(it != metadata.end());
+  auto arr = std::get_if<array>(&it->second);
+  REQUIRE(arr != nullptr);
+  CHECK((arr->dtype() == dtype));
+  CHECK(arr->ndim() == 1);
+  REQUIRE(arr->size() == expected.size());
+  CHECK(arr->shape(0) == static_cast<int>(expected.size()));
+  size_t i = 0;
+  for (auto e : expected) {
+    INFO("element " << i);
+    CHECK(arr->data<T>()[i] == e);
+    i++;
+  }
+}
+
+} // namespace
+
+TEST_CASE("test gguf metadata at unaligned offsets") {
+  // GGUF does not align its values. The loader must not assume an alignment
+  // for any value type. On arm64 and x86-64 a misaligned read works, so only
+  // the undefined behavior sanitizer shows the error.
+
+  const std::string nul_str("a\0b\xc3\xa9", 5); // embedded NUL, UTF-8
+
+  SUBCASE("every value type, scalar and array, in one file") {
+    RawGGUFMetadata f;
+    auto s_u8 = f.begin_at("s_u8", kGGUFUint8, 1);
+    f.put<uint8_t>(200);
+    auto a_u8 = f.begin_at("a_u8", kGGUFArray, 3);
+    f.put_array<uint8_t>(kGGUFUint8, {0, 1, 127, 128, 255});
+    auto s_i8 = f.begin_at("s_i8", kGGUFInt8, 5);
+    f.put<int8_t>(-100);
+    auto a_i8 = f.begin_at("a_i8", kGGUFArray, 7);
+    f.put_array<int8_t>(kGGUFInt8, {-128, -1, 0, 1, 127});
+    auto s_u16 = f.begin_at("s_u16", kGGUFUint16, 1);
+    f.put<uint16_t>(65000);
+    auto a_u16 = f.begin_at("a_u16", kGGUFArray, 3);
+    f.put_array<uint16_t>(kGGUFUint16, {0, 1, 255, 256, 65535});
+    auto s_i16 = f.begin_at("s_i16", kGGUFInt16, 5);
+    f.put<int16_t>(-30000);
+    auto a_i16 = f.begin_at("a_i16", kGGUFArray, 7);
+    f.put_array<int16_t>(kGGUFInt16, {-32768, -1, 0, 1, 32767});
+    auto s_u32 = f.begin_at("s_u32", kGGUFUint32, 1);
+    f.put<uint32_t>(4000000000u);
+    auto a_u32 = f.begin_at("a_u32", kGGUFArray, 3);
+    f.put_array<uint32_t>(
+        kGGUFUint32, {0u, 1u, 65536u, 0xDEADBEEFu, 0xFFFFFFFFu});
+    auto s_i32 = f.begin_at("s_i32", kGGUFInt32, 5);
+    f.put<int32_t>(-2000000000);
+    auto a_i32 = f.begin_at("a_i32", kGGUFArray, 7);
+    f.put_array<int32_t>(kGGUFInt32, {INT32_MIN, -1, 0, 1, INT32_MAX});
+    auto s_u64 = f.begin_at("s_u64", kGGUFUint64, 1);
+    f.put<uint64_t>(0xFEDCBA9876543210ull);
+    auto a_u64 = f.begin_at("a_u64", kGGUFArray, 3);
+    f.put_array<uint64_t>(
+        kGGUFUint64,
+        {0ull, 1ull, 1ull << 32, 0xFEDCBA9876543210ull, UINT64_MAX});
+    auto s_i64 = f.begin_at("s_i64", kGGUFInt64, 5);
+    f.put<int64_t>(-0x0123456789ABCDEFll);
+    auto a_i64 = f.begin_at("a_i64", kGGUFArray, 7);
+    f.put_array<int64_t>(kGGUFInt64, {INT64_MIN, -1, 0, 1, INT64_MAX});
+    auto s_f32 = f.begin_at("s_f32", kGGUFFloat32, 1);
+    f.put<float>(-1.25f);
+    auto a_f32 = f.begin_at("a_f32", kGGUFArray, 3);
+    f.put_array<float>(
+        kGGUFFloat32,
+        {-1.5f, 0.0f, 2.5f, 1.0e-30f, std::numeric_limits<float>::max()});
+    auto s_bool = f.begin_at("s_bool", kGGUFBool, 5);
+    f.put<uint8_t>(1);
+    auto a_bool = f.begin_at("a_bool", kGGUFArray, 7);
+    f.put_array<uint8_t>(kGGUFBool, {1, 0, 1, 1, 0});
+    // Bytes other than 0 and 1 are not valid bools: they load as true.
+    auto s_bool2 = f.begin_at("s_bool2", kGGUFBool, 1);
+    f.put<uint8_t>(2);
+    auto a_bool2 = f.begin_at("a_bool2", kGGUFArray, 3);
+    f.put_array<uint8_t>(kGGUFBool, {2, 0, 255, 1});
+    auto s_str = f.begin_at("s_str", kGGUFString, 1);
+    f.put_string(nul_str);
+    auto a_str = f.begin_at("a_str", kGGUFArray, 3);
+    f.put_string_array(
+        {"", "a", "bc", nul_str, "defghijklmnopqrstuvwxyz", "z"});
+    // Empty arrays: the elements start at the very end of the value.
+    auto e_u8 = f.begin_at("e_u8", kGGUFArray, 5);
+    f.put_array<uint8_t>(kGGUFUint8, {});
+    auto e_i32 = f.begin_at("e_i32", kGGUFArray, 7);
+    f.put_array<int32_t>(kGGUFInt32, {});
+    auto e_str = f.begin_at("e_str", kGGUFArray, 1);
+    f.put_string_array({});
+    // The last pair is a string, whose end is the end of the file.
+    auto last = f.begin_at("last", kGGUFString, 3);
+    f.put_string("last");
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_unaligned_all.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(weights.empty());
+    CHECK(metadata.size() == 28);
+
+    check_gguf_scalar<uint8_t>(metadata, s_u8, uint8, 200);
+    check_gguf_array<uint8_t>(metadata, a_u8, uint8, {0, 1, 127, 128, 255});
+    check_gguf_scalar<int8_t>(metadata, s_i8, int8, -100);
+    check_gguf_array<int8_t>(metadata, a_i8, int8, {-128, -1, 0, 1, 127});
+    check_gguf_scalar<uint16_t>(metadata, s_u16, uint16, 65000);
+    check_gguf_array<uint16_t>(
+        metadata, a_u16, uint16, {0, 1, 255, 256, 65535});
+    check_gguf_scalar<int16_t>(metadata, s_i16, int16, -30000);
+    check_gguf_array<int16_t>(
+        metadata, a_i16, int16, {-32768, -1, 0, 1, 32767});
+    check_gguf_scalar<uint32_t>(metadata, s_u32, uint32, 4000000000u);
+    check_gguf_array<uint32_t>(
+        metadata, a_u32, uint32, {0u, 1u, 65536u, 0xDEADBEEFu, 0xFFFFFFFFu});
+    check_gguf_scalar<int32_t>(metadata, s_i32, int32, -2000000000);
+    check_gguf_array<int32_t>(
+        metadata, a_i32, int32, {INT32_MIN, -1, 0, 1, INT32_MAX});
+    check_gguf_scalar<uint64_t>(metadata, s_u64, uint64, 0xFEDCBA9876543210ull);
+    check_gguf_array<uint64_t>(
+        metadata,
+        a_u64,
+        uint64,
+        {0ull, 1ull, 1ull << 32, 0xFEDCBA9876543210ull, UINT64_MAX});
+    check_gguf_scalar<int64_t>(metadata, s_i64, int64, -0x0123456789ABCDEFll);
+    check_gguf_array<int64_t>(
+        metadata, a_i64, int64, {INT64_MIN, -1, 0, 1, INT64_MAX});
+    check_gguf_scalar<float>(metadata, s_f32, float32, -1.25f);
+    check_gguf_array<float>(
+        metadata,
+        a_f32,
+        float32,
+        {-1.5f, 0.0f, 2.5f, 1.0e-30f, std::numeric_limits<float>::max()});
+    check_gguf_scalar<bool>(metadata, s_bool, bool_, true);
+    check_gguf_array<bool>(
+        metadata, a_bool, bool_, {true, false, true, true, false});
+    check_gguf_scalar<uint8_t>(metadata, s_bool2, bool_, 1);
+    check_gguf_array<uint8_t>(metadata, a_bool2, bool_, {1, 0, 1, 1});
+
+    CHECK(std::get<std::string>(metadata.at(s_str)) == nul_str);
+    CHECK(
+        std::get<std::vector<std::string>>(metadata.at(a_str)) ==
+        std::vector<std::string>{
+            "", "a", "bc", nul_str, "defghijklmnopqrstuvwxyz", "z"});
+    check_gguf_array<uint8_t>(metadata, e_u8, uint8, {});
+    check_gguf_array<int32_t>(metadata, e_i32, int32, {});
+    CHECK(std::get<std::vector<std::string>>(metadata.at(e_str)).empty());
+    CHECK(std::get<std::string>(metadata.at(last)) == "last");
+  }
+
+  // FLOAT64 values are the last pair here: the loader advances its offset by
+  // the size of the float32 array it builds, not by the 8 bytes in the file.
+  SUBCASE("float64 scalar") {
+    RawGGUFMetadata f;
+    auto lead = f.begin_at("lead", kGGUFUint8, 1);
+    f.put<uint8_t>(7);
+    auto s_f64 = f.begin_at("s_f64", kGGUFFloat64, 3);
+    f.put<double>(0.1);
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_unaligned_f64.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 2);
+    check_gguf_scalar<uint8_t>(metadata, lead, uint8, 7);
+    // FLOAT64 metadata is loaded as float32.
+    check_gguf_scalar<float>(metadata, s_f64, float32, 0.1f);
+  }
+
+  SUBCASE("float64 array") {
+    RawGGUFMetadata f;
+    auto lead = f.begin_at("lead", kGGUFString, 5);
+    f.put_string("x");
+    auto a_f64 = f.begin_at("a_f64", kGGUFArray, 7);
+    f.put_array<double>(
+        kGGUFFloat64,
+        {0.5,
+         -2.25,
+         1024.0,
+         0.1,
+         static_cast<double>(std::numeric_limits<float>::max())});
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_unaligned_f64a.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 2);
+    CHECK(std::get<std::string>(metadata.at(lead)) == "x");
+    check_gguf_array<float>(
+        metadata,
+        a_f64,
+        float32,
+        {0.5f, -2.25f, 1024.0f, 0.1f, std::numeric_limits<float>::max()});
+  }
+
+  SUBCASE("nested arrays and unknown element types are rejected") {
+    {
+      RawGGUFMetadata f;
+      f.begin_at("nested", kGGUFArray, 1);
+      f.put<uint32_t>(kGGUFArray); // element type: array
+      f.put<uint64_t>(0);
+      REQUIRE(f.all_values_misaligned());
+      std::string path = get_temp_file("test_gguf_unaligned_nested.gguf");
+      f.write(path);
+      CHECK_THROWS_AS(load_gguf(path), std::invalid_argument);
+    }
+    {
+      RawGGUFMetadata f;
+      f.begin_at("unknown", kGGUFArray, 3);
+      f.put<uint32_t>(99); // element type: none
+      f.put<uint64_t>(0);
+      REQUIRE(f.all_values_misaligned());
+      std::string path = get_temp_file("test_gguf_unaligned_unknown.gguf");
+      f.write(path);
+      CHECK_THROWS_AS(load_gguf(path), std::runtime_error);
+    }
+  }
+
+  SUBCASE("save_gguf writes strings at unaligned offsets byte for byte") {
+    auto read_all = [](const std::string& path) {
+      std::ifstream in(path, std::ios::binary);
+      return std::string(
+          std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    std::vector<std::string> strs = {"a", "bcd", "", nul_str, "efghi"};
+
+    RawGGUFMetadata expected_array;
+    expected_array.begin("k", kGGUFArray);
+    expected_array.put_string_array(strs);
+    std::string expected_array_path =
+        get_temp_file("test_gguf_unaligned_expected_a.gguf");
+    expected_array.write(expected_array_path);
+
+    std::string array_path = get_temp_file("test_gguf_unaligned_saved_a.gguf");
+    MetadataMap array_metadata;
+    array_metadata.insert({"k", strs});
+    save_gguf(
+        array_path, std::unordered_map<std::string, array>(), array_metadata);
+    CHECK(read_all(array_path) == read_all(expected_array_path));
+
+    RawGGUFMetadata expected_string;
+    expected_string.begin("k", kGGUFString);
+    expected_string.put_string(nul_str);
+    std::string expected_string_path =
+        get_temp_file("test_gguf_unaligned_expected_s.gguf");
+    expected_string.write(expected_string_path);
+
+    std::string string_path = get_temp_file("test_gguf_unaligned_saved_s.gguf");
+    MetadataMap string_metadata;
+    string_metadata.insert({"k", nul_str});
+    save_gguf(
+        string_path, std::unordered_map<std::string, array>(), string_metadata);
+    CHECK(read_all(string_path) == read_all(expected_string_path));
+
+    auto [weights, metadata] = load_gguf(array_path);
+    CHECK(std::get<std::vector<std::string>>(metadata.at("k")) == strs);
+  }
+}
+
 TEST_CASE("test single array serialization") {
   // Basic test
   {
