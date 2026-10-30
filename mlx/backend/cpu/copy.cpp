@@ -18,7 +18,7 @@ void copy_single(const array& src, array& dst) {
   auto src_ptr = src.data<SrcT>();
   auto dst_ptr = dst.data<DstT>();
   auto size = dst.size();
-  auto val = static_cast<DstT>(src_ptr[0]);
+  auto val = simd::saturating_cast<DstT>(src_ptr[0]);
   std::fill_n(dst_ptr, size, val);
 }
 
@@ -27,7 +27,13 @@ void copy_vector(const array& src, array& dst) {
   auto src_ptr = src.data<SrcT>();
   auto dst_ptr = dst.data<DstT>();
   auto size = src.data_size();
-  std::copy(src_ptr, src_ptr + size, dst_ptr);
+  if constexpr (std::is_same_v<SrcT, DstT>) {
+    std::copy(src_ptr, src_ptr + size, dst_ptr);
+  } else {
+    for (size_t i = 0; i < size; ++i) {
+      dst_ptr[i] = simd::saturating_cast<DstT>(src_ptr[i]);
+    }
+  }
 }
 
 template <typename SrcT, typename DstT, int D>
@@ -47,7 +53,7 @@ inline void copy_dims(
       copy_dims<SrcT, DstT, D - 1>(
           src, dst, shape, i_strides, o_strides, axis + 1);
     } else {
-      *dst = static_cast<DstT>(*src);
+      *dst = simd::saturating_cast<DstT>(*src);
     }
     src += stride_src;
     dst += stride_dst;
@@ -72,7 +78,7 @@ void copy_general_general(
   auto o_offset_ptr =
       dynamic_o_offset ? dynamic_o_offset->data<int64_t>() : nullptr;
   if (data_shape.empty()) {
-    auto val = static_cast<DstT>(*src_ptr);
+    auto val = simd::saturating_cast<DstT>(*src_ptr);
     *dst_ptr = val;
     return;
   }
