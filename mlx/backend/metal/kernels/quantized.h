@@ -3018,14 +3018,23 @@ template <typename T, int group_size, int bits, bool has_global_scale = false>
   w_min = simd_min(w_min);
   w_max = simd_max(w_max);
 
-  float scale = max((w_max - w_min) / n_bins, eps);
-  bool side = abs(w_min) > abs(w_max);
-  scale = side ? scale : -scale;
-  float edge = side ? w_min : w_max;
-  float q0 = round(edge / scale);
-  bool at_zero = q0 == 0.0f;
-  scale = at_zero ? scale : edge / q0;
-  float bias = at_zero ? 0 : edge;
+  float scale;
+  float bias;
+
+  if (bits == 1) {
+    // Affine 1-bit: bit 0 -> w_min, bit 1 -> w_max
+    scale = max(w_max - w_min, eps);
+    bias = w_min;
+  } else {
+    scale = max((w_max - w_min) / n_bins, eps);
+    bool side = abs(w_min) > abs(w_max);
+    scale = side ? scale : -scale;
+    float edge = side ? w_min : w_max;
+    float q0 = round(edge / scale);
+    bool at_zero = q0 == 0.0f;
+    scale = at_zero ? scale : edge / q0;
+    bias = at_zero ? 0 : edge;
+  }
 
   // Write out the scales and biases
   size_t gindex = in_index / group_size;
