@@ -178,9 +178,41 @@ Simd<bool, 1> isnan(Simd<T, 1> in) {
     return a.value OP b;                                                   \
   }
 
-DEFAULT_BINARY(+)
-DEFAULT_BINARY(-)
-DEFAULT_BINARY(*)
+// Signed integer overflow is undefined behavior in C++, while mlx wraps integer
+// add, subtract and multiply around. When the result type is a signed integer,
+// apply op to the operands converted to the unsigned type of the same size and
+// convert the result back (modular since C++20). The result type is the one to
+// look at: operands of 8 and 16 bits are promoted to int first, and the product
+// of two uint16 values can overflow int.
+template <typename Op, typename T1, typename T2>
+auto wrapping(Op op, T1 a, T2 b) {
+  using R = decltype(op(a, b));
+  if constexpr (std::is_integral_v<R> && std::is_signed_v<R>) {
+    using U = std::make_unsigned_t<R>;
+    return static_cast<R>(op(static_cast<U>(a), static_cast<U>(b)));
+  } else {
+    return op(a, b);
+  }
+}
+
+#define WRAPPING_BINARY(OP)                                                   \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(Simd<T1, 1> a, Simd<T2, 1> b)                              \
+      ->Simd<decltype(a.value OP b.value), 1> {                               \
+    return wrapping([](auto x, auto y) { return x OP y; }, a.value, b.value); \
+  }                                                                           \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(T1 a, Simd<T2, 1> b)->Simd<decltype(a OP b.value), 1> {    \
+    return wrapping([](auto x, auto y) { return x OP y; }, a, b.value);       \
+  }                                                                           \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(Simd<T1, 1> a, T2 b)->Simd<decltype(a.value OP b), 1> {    \
+    return wrapping([](auto x, auto y) { return x OP y; }, a.value, b);       \
+  }
+
+WRAPPING_BINARY(+)
+WRAPPING_BINARY(-)
+WRAPPING_BINARY(*)
 DEFAULT_BINARY(/)
 DEFAULT_BINARY(<<)
 DEFAULT_BINARY(>>)
