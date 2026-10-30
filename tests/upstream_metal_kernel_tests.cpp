@@ -59,3 +59,26 @@ TEST_CASE("test upstream Metal two-pass attention preserves sparse masked keys")
   auto actual = fast::scaled_dot_product_attention(query, keys, values, 1.0f, "", mask);
   check_relative_rms(actual, expected, 0.003f);
 }
+
+TEST_CASE("test upstream Metal FP4 half and bfloat fallback numerical parity") {
+  if (!is_available(Device::gpu)) {
+    return;
+  }
+  for (auto dtype : {float16, bfloat16}) {
+    for (const auto& mode : {std::string("mxfp4"), std::string("nvfp4")}) {
+      const int group_size = mode == "nvfp4" ? 16 : 32;
+      auto w = astype(reshape(sin(arange(1024 * 2560, float32, Device::cpu), Device::cpu), {1024, 2560}, Device::cpu), dtype, Device::gpu);
+      auto quantized = quantize(w, group_size, 4, mode, std::nullopt, Device::gpu);
+      auto decoded = dequantize(quantized[0], quantized[1], std::nullopt, group_size, 4, mode, std::nullopt, float32, Device::cpu);
+      for (int rows : {6, 16, 33, 65}) {
+        CAPTURE(dtype);
+        CAPTURE(mode);
+        CAPTURE(rows);
+        auto input = astype(reshape(cos(arange(rows * 2560, float32, Device::cpu), Device::cpu), {rows, 2560}, Device::cpu), dtype, Device::gpu);
+        auto expected = matmul(astype(input, float32, Device::cpu), transpose(decoded, Device::cpu), Device::cpu);
+        auto actual = quantized_matmul(input, quantized[0], quantized[1], std::nullopt, true, group_size, 4, mode, Device::gpu);
+        check_relative_rms(actual, expected, dtype == bfloat16 ? 0.015f : 0.003f);
+      }
+    }
+  }
+}
