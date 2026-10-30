@@ -106,6 +106,8 @@ TEST_CASE("test one-bit affine endpoints CPU GPU and small-K dispatch") {
             CAPTURE(device);
             auto quantized = quantize(astype(weights, dtype, device), group, 1, "affine", std::nullopt, device);
             auto decoded = dequantize(quantized[0], quantized[1], quantized[2], group, 1, "affine", std::nullopt, dtype, Device::cpu);
+            INFO("scales=" << quantized[1] << " biases=" << quantized[2]);
+            INFO("decoded=" << decoded << " weights=" << weights);
             REQUIRE(array_equal(decoded, weights, false, Device::cpu).item<bool>());
             auto result = quantized_matmul(astype(input, dtype, device), quantized[0], quantized[1], quantized[2], true, group, 1, "affine", device);
             check_relative_rms(result, expected, dtype == bfloat16 ? 0.015f : 0.003f);
