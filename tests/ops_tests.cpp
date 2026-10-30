@@ -4705,3 +4705,247 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+namespace {
+
+// The i-th of a fixed sequence of floats in [0, 1), each with 24 random bits.
+float unit_value(uint32_t i) {
+  uint32_t h = i * 0x9E3779B9u;
+  h ^= h >> 16;
+  h *= 0x7feb352du;
+  h ^= h >> 15;
+  h *= 0x846ca68bu;
+  h ^= h >> 16;
+  return static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
+}
+
+// The largest relative error of y against a float64 truth, in float64.
+double max_relative_error(const array& y, const std::vector<double>& truth) {
+  auto s = Device::cpu;
+  auto t = array(truth.begin(), y.shape(), float64);
+  auto d = divide(subtract(astype(y, float64, s), t, s), t, s);
+  return max(abs(d, s), s).item<double>();
+}
+
+// The lanes of the CPU's float32 sums (simd::max_size<float>): 8 with
+// Accelerate on arm64, else 1.
+#if defined(MLX_USE_ACCELERATE) && !defined(__x86_64__)
+constexpr int sum_lanes = 8;
+#else
+constexpr int sum_lanes = 1;
+#endif
+
+// The CPU's float32 sum of up to 4096 elements: one sum per lane, the lanes
+// halved as Apple's simd_reduce_add does, then the tail.
+float lane_order_sum(const std::vector<float>& x) {
+  constexpr int N = sum_lanes;
+  std::vector<float> lanes(N, 0.0f);
+  size_t i = 0;
+  for (; i + N <= x.size(); i += N) {
+    for (int j = 0; j < N; j++) {
+      lanes[j] = lanes[j] + x[i + j];
+    }
+  }
+  for (int n = N / 2; n >= 1; n /= 2) {
+    for (int j = 0; j < n; j++) {
+      lanes[j] = lanes[j] + lanes[j + n];
+    }
+  }
+  float total = lanes[0];
+  for (; i < x.size(); i++) {
+    total = total + x[i];
+  }
+  return total;
+}
+
+} // namespace
+
+TEST_CASE("test float sums over long rows on the cpu") {
+  auto s = Device::cpu;
+  constexpr int n = 3 << 23;
+  constexpr double bound = 1e-5;
+  std::vector<float> v(n);
+  for (int i = 0; i < n; i++) {
+    float u = unit_value(i);
+    v[i] = u * u;
+  }
+  auto x = array(v.begin(), {n}, float32);
+
+  // A contiguous row.
+  double truth = 0;
+  for (auto vi : v) {
+    truth += vi;
+  }
+  double y = sum(x, s).item<float>();
+  CHECK_LE(std::abs(y - truth) / truth, bound);
+
+  // Strided rows: the columns of [n / 2, 2].
+  std::vector<double> col_truth(2, 0.0);
+  for (int i = 0; i < n; i++) {
+    col_truth[i % 2] += v[i];
+  }
+  auto cols = sum(reshape(x, {n / 2, 2}, s), 0, false, s);
+  CHECK_LE(max_relative_error(cols, col_truth), bound);
+
+  // The columns of [n / 8, 8]: one column per SIMD lane on macOS.
+  std::vector<double> col8_truth(8, 0.0);
+  for (int i = 0; i < n; i++) {
+    col8_truth[i % 8] += v[i];
+  }
+  auto cols8 = sum(reshape(x, {n / 8, 8}, s), 0, false, s);
+  CHECK_LE(max_relative_error(cols8, col8_truth), bound);
+
+  // A row of one broadcast element, summed one element at a time.
+  double z = sum(broadcast_to(array(0.375f), {n}, s), s).item<float>();
+  CHECK_LE(std::abs(z - 0.375 * n) / (0.375 * n), bound);
+}
+
+TEST_CASE("test softmax over a long row on the cpu") {
+  auto s = Device::cpu;
+  constexpr int n = 3 << 23;
+  std::vector<float> v(n);
+  double vmax = -INFINITY;
+  for (int i = 0; i < n; i++) {
+    v[i] = -8.0f * unit_value(i);
+    vmax = std::max(vmax, double(v[i]));
+  }
+  std::vector<double> truth(n);
+  double total = 0;
+  for (int i = 0; i < n; i++) {
+    truth[i] = std::exp(v[i] - vmax);
+    total += truth[i];
+  }
+  for (auto& t : truth) {
+    t /= total;
+  }
+  auto y = softmax(array(v.begin(), {1, n}, float32), -1, false, s);
+  CHECK_LE(max_relative_error(y, truth), 1e-5);
+}
+
+TEST_CASE("test logsumexp over a long row on the cpu") {
+  // The error of the log of the sum is the relative error of the sum.
+  auto s = Device::cpu;
+  constexpr int n = 3 << 23;
+  std::vector<float> v(n);
+  double vmax = -INFINITY;
+  for (int i = 0; i < n; i++) {
+    v[i] = -8.0f * unit_value(i);
+    vmax = std::max(vmax, double(v[i]));
+  }
+  double total = 0;
+  for (auto vi : v) {
+    total += std::exp(vi - vmax);
+  }
+  double truth = std::log(total) + vmax;
+  double y = logsumexp(array(v.begin(), {n}, float32), s).item<float>();
+  CHECK_LE(std::abs(y - truth), 1e-5);
+}
+
+TEST_CASE("test layer_norm fallback over a long row on the cpu") {
+  // The values stay about 0.25 or more from the mean, so no output is near 0.
+  auto s = Device::cpu;
+  constexpr int n = 3 << 23;
+  std::vector<float> v(n);
+  for (int i = 0; i < n; i++) {
+    float u = unit_value(i);
+    v[i] = u < 0.5f ? u - 0.25f : u + 0.25f;
+  }
+  double mean = 0;
+  for (auto vi : v) {
+    mean += vi;
+  }
+  mean /= n;
+  double var = 0;
+  for (auto vi : v) {
+    var += (vi - mean) * (vi - mean);
+  }
+  var /= n;
+  std::vector<double> truth(n);
+  for (int i = 0; i < n; i++) {
+    truth[i] = (v[i] - mean) / std::sqrt(var + 1e-5);
+  }
+  auto x = array(v.begin(), {1, n}, float32);
+  auto y = fast::layer_norm(x, std::nullopt, std::nullopt, 1e-5f, s);
+  CHECK_LE(max_relative_error(y, truth), 1e-5);
+}
+
+TEST_CASE("test float sums of 4096 elements keep their order on the cpu") {
+  // Each expected value takes the order of the sum before the blocks.
+  auto s = Device::cpu;
+  constexpr int n = 4096;
+  std::vector<float> v(2 * n);
+  for (int i = 0; i < 2 * n; i++) {
+    v[i] = unit_value(i);
+  }
+
+  // A contiguous row.
+  std::vector<float> row(v.begin(), v.begin() + n);
+  auto y = sum(array(row.begin(), {n}, float32), s).item<float>();
+  CHECK_EQ(y, lane_order_sum(row));
+
+  // Strided rows: each column of [n, 2] is summed in turn.
+  auto cols = sum(array(v.begin(), {n, 2}, float32), 0, false, s);
+  for (int j = 0; j < 2; j++) {
+    float expected = 0.0f;
+    for (int i = 0; i < n; i++) {
+      expected = expected + v[2 * i + j];
+    }
+    CHECK_EQ(slice(cols, {j}, {j + 1}, s).item<float>(), expected);
+  }
+
+  // A broadcast element, summed one element at a time.
+  float expected = 0.0f;
+  for (int i = 0; i < n; i++) {
+    expected = expected + 0.1f;
+  }
+  CHECK_EQ(sum(broadcast_to(array(0.1f), {n}, s), s).item<float>(), expected);
+
+  // softmax: the exponentials from exp, which uses the same simd::exp, summed
+  // in the same order, then each times the reciprocal of the sum.
+  std::vector<float> w(n);
+  for (int i = 0; i < n; i++) {
+    w[i] = -8.0f * v[i];
+  }
+  auto x = array(w.begin(), {n}, float32);
+  auto e = exp(subtract(x, max(x, s), s), s);
+  CHECK_EQ(max(e, s).item<float>(), 1.0f);
+  std::vector<float> ev(e.data<float>(), e.data<float>() + n);
+  float r = 1 / lane_order_sum(ev);
+  for (auto& ei : ev) {
+    ei *= r;
+  }
+  auto sm = softmax(x, -1, false, s);
+  CHECK(array_equal(sm, array(ev.begin(), {n}, float32), s).item<bool>());
+
+  // logsumexp: the log of the same sum. One element is 0 and the rest are
+  // near exp(-20), so the sum is near 1 and its log keeps each bit of it.
+  w[0] = 0.0f;
+  for (int i = 1; i < n; i++) {
+    w[i] = -16.0f - 8.0f * v[i];
+  }
+  auto x2 = array(w.begin(), {n}, float32);
+  auto e2 = exp(x2, s);
+  CHECK_EQ(max(e2, s).item<float>(), 1.0f);
+  std::vector<float> e2v(e2.data<float>(), e2.data<float>() + n);
+  CHECK_EQ(logsumexp(x2, s).item<float>(), std::log(lane_order_sum(e2v)));
+}
+
+TEST_CASE("test float sums with a short last block on the cpu") {
+  // 2 * 4096 + 5 elements. Each result is exact in any order.
+  auto s = Device::cpu;
+  constexpr int n = 8197;
+  std::vector<float> ones(8 * n, 1.0f);
+  auto x = array(ones.begin(), {n}, float32);
+  CHECK_EQ(sum(x, s).item<float>(), float(n));
+  CHECK_EQ(sum(broadcast_to(array(1.0f), {n}, s), s).item<float>(), float(n));
+  auto cols = sum(array(ones.begin(), {n, 2}, float32), 0, false, s);
+  CHECK(array_equal(cols, full({2}, float(n)), s).item<bool>());
+  auto cols8 = sum(array(ones.begin(), {n, 8}, float32), 0, false, s);
+  CHECK(array_equal(cols8, full({8}, float(n)), s).item<bool>());
+
+  std::vector<float> zeros_v(n, 0.0f);
+  auto z = array(zeros_v.begin(), {n}, float32);
+  auto sm = softmax(z, -1, false, s);
+  CHECK(array_equal(sm, full({n}, 1.0f / n), s).item<bool>());
+  CHECK_EQ(logsumexp(z, s).item<float>(), std::log(float(n)));
+}
