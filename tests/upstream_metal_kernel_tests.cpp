@@ -67,7 +67,7 @@ TEST_CASE("test upstream Metal FP4 half and bfloat fallback numerical parity") {
   for (auto dtype : {float16, bfloat16}) {
     for (const auto& mode : {std::string("mxfp4"), std::string("nvfp4")}) {
       const int group_size = mode == "nvfp4" ? 16 : 32;
-      auto w = astype(reshape(sin(arange(1024 * 2560, float32, Device::cpu), Device::cpu), {1024, 2560}, Device::cpu), dtype, Device::gpu);
+      auto w = astype(reshape(sin(arange(2048 * 2560, float32, Device::cpu), Device::cpu), {2048, 2560}, Device::cpu), dtype, Device::gpu);
       auto quantized = quantize(w, group_size, 4, mode, std::nullopt, Device::gpu);
       auto decoded = dequantize(quantized[0], quantized[1], std::nullopt, group_size, 4, mode, std::nullopt, float32, Device::cpu);
       for (int rows : {6, 16, 33, 65}) {
