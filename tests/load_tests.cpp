@@ -609,8 +609,8 @@ constexpr uint32_t kGGUFUint64 = 10;
 constexpr uint32_t kGGUFInt64 = 11;
 constexpr uint32_t kGGUFFloat64 = 12;
 
-// Writes a GGUF file with metadata and no tensors. begin_at() pads the key to
-// put the value at a chosen offset.
+// Writes a GGUF file with metadata and optional tensors. begin_at() pads the
+// key to put the value at a chosen offset.
 class RawGGUFMetadata {
  public:
   static constexpr size_t kHeaderSize = 24; // magic, version, two counts
@@ -659,6 +659,11 @@ class RawGGUFMetadata {
     }
   }
 
+  // Adds a one-dimensional float32 tensor after the metadata.
+  void add_tensor(const std::string& name, const std::vector<float>& values) {
+    tensors_.emplace_back(name, values);
+  }
+
   // True if no value starts at a multiple of 8, the alignment of gguf_value.
   bool all_values_misaligned() const {
     for (auto offset : value_offsets_) {
@@ -679,14 +684,41 @@ class RawGGUFMetadata {
     };
     out.write("GGUF", 4);
     u32(3); // version
-    u64(0); // tensor_count
+    u64(tensors_.size()); // tensor_count
     u64(value_offsets_.size()); // metadata_kv_count
     out.write(bytes_.data(), bytes_.size());
+    if (tensors_.empty()) {
+      return;
+    }
+    // The tensor infos, then the data at a multiple of 32, the default
+    // alignment. Each tensor starts at a multiple of 32 in the data.
+    std::string infos;
+    std::string data;
+    auto add = [](std::string& b, const auto& v) {
+      b.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    };
+    for (const auto& [name, values] : tensors_) {
+      add(infos, static_cast<uint64_t>(name.size()));
+      infos += name;
+      add(infos, static_cast<uint32_t>(1)); // dimensions
+      add(infos, static_cast<uint64_t>(values.size()));
+      add(infos, static_cast<uint32_t>(0)); // GGUF_TYPE_F32
+      add(infos, static_cast<uint64_t>(data.size()));
+      data.append(
+          reinterpret_cast<const char*>(values.data()),
+          values.size() * sizeof(float));
+      data.resize((data.size() + 31) / 32 * 32);
+    }
+    out.write(infos.data(), infos.size());
+    size_t end = kHeaderSize + bytes_.size() + infos.size();
+    out << std::string((32 - end % 32) % 32, '\0');
+    out.write(data.data(), data.size());
   }
 
  private:
   std::vector<char> bytes_;
   std::vector<size_t> value_offsets_;
+  std::vector<std::pair<std::string, std::vector<float>>> tensors_;
 };
 
 using MetadataMap = std::unordered_map<std::string, GGUFMetaData>;
@@ -865,8 +897,6 @@ TEST_CASE("test gguf metadata at unaligned offsets") {
     CHECK(std::get<std::string>(metadata.at(last)) == "last");
   }
 
-  // FLOAT64 values are the last pair here: the loader advances its offset by
-  // the size of the float32 array it builds, not by the 8 bytes in the file.
   SUBCASE("float64 scalar") {
     RawGGUFMetadata f;
     auto lead = f.begin_at("lead", kGGUFUint8, 1);
@@ -971,6 +1001,136 @@ TEST_CASE("test gguf metadata at unaligned offsets") {
 
     auto [weights, metadata] = load_gguf(array_path);
     CHECK(std::get<std::vector<std::string>>(metadata.at("k")) == strs);
+  }
+}
+
+TEST_CASE("test gguf metadata after float64 values") {
+  // The loader must move past the 8 bytes of each FLOAT64 element in the file,
+  // not past the 4 bytes of each float32 it builds, to find the next pair.
+  const std::vector<float> w0 = {1.0f, 2.0f, 3.0f, 4.0f};
+  const std::vector<float> w1 = {5.0f, 6.0f, 7.0f};
+
+  const std::vector<std::pair<std::string, std::vector<float>>>
+      expected_weights = {{"t0", w0}, {"t1", w1}};
+  auto check_weights = [&](const std::unordered_map<std::string, array>& ws) {
+    CHECK(ws.size() == 2);
+    for (const auto& [name, expected] : expected_weights) {
+      INFO(name);
+      auto it = ws.find(name);
+      REQUIRE(it != ws.end());
+      CHECK((it->second.dtype() == float32));
+      REQUIRE(it->second.ndim() == 1);
+      REQUIRE(it->second.size() == expected.size());
+      for (size_t i = 0; i < expected.size(); i++) {
+        CHECK(it->second.data<float>()[i] == expected[i]);
+      }
+    }
+  };
+
+  SUBCASE("a key after a FLOAT64 scalar") {
+    RawGGUFMetadata f;
+    auto lead = f.begin_at("lead", kGGUFUint8, 1);
+    f.put<uint8_t>(7);
+    auto s_f64 = f.begin_at("s_f64", kGGUFFloat64, 3);
+    f.put<double>(0.1);
+    auto after = f.begin_at("after", kGGUFUint32, 5);
+    f.put<uint32_t>(4000000000u);
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_after_f64_scalar.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 3);
+    check_gguf_scalar<uint8_t>(metadata, lead, uint8, 7);
+    check_gguf_scalar<float>(metadata, s_f64, float32, 0.1f);
+    check_gguf_scalar<uint32_t>(metadata, after, uint32, 4000000000u);
+  }
+
+  SUBCASE("keys after a FLOAT64 array") {
+    RawGGUFMetadata f;
+    auto a_f64 = f.begin_at("a_f64", kGGUFArray, 1);
+    f.put_array<double>(kGGUFFloat64, {0.5, -2.25, 1024.0, 0.1, 4294967296.0});
+    auto after = f.begin_at("after", kGGUFString, 3);
+    f.put_string("after");
+    auto last = f.begin_at("last", kGGUFArray, 5);
+    f.put_array<int16_t>(kGGUFInt16, {-1, 2, -3});
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_after_f64_array.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 3);
+    check_gguf_array<float>(
+        metadata, a_f64, float32, {0.5f, -2.25f, 1024.0f, 0.1f, 4294967296.0f});
+    CHECK(std::get<std::string>(metadata.at(after)) == "after");
+    check_gguf_array<int16_t>(metadata, last, int16, {-1, 2, -3});
+  }
+
+  SUBCASE("tensors after a FLOAT64 scalar") {
+    RawGGUFMetadata f;
+    auto s_f64 = f.begin_at("s_f64", kGGUFFloat64, 3);
+    f.put<double>(0.1);
+    f.add_tensor("t0", w0);
+    f.add_tensor("t1", w1);
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_tensors_after_f64_scalar.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 1);
+    check_gguf_scalar<float>(metadata, s_f64, float32, 0.1f);
+    check_weights(weights);
+  }
+
+  SUBCASE("tensors after a FLOAT64 array") {
+    RawGGUFMetadata f;
+    auto a_f64 = f.begin_at("a_f64", kGGUFArray, 7);
+    f.put_array<double>(kGGUFFloat64, {0.5, -2.25, 1024.0, 0.1, 4294967296.0});
+    f.add_tensor("t0", w0);
+    f.add_tensor("t1", w1);
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_tensors_after_f64_array.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 1);
+    check_gguf_array<float>(
+        metadata, a_f64, float32, {0.5f, -2.25f, 1024.0f, 0.1f, 4294967296.0f});
+    check_weights(weights);
+  }
+
+  SUBCASE("FLOAT64 values among other pairs and then tensors") {
+    RawGGUFMetadata f;
+    auto s1 = f.begin_at("s1", kGGUFFloat64, 1);
+    f.put<double>(0.5);
+    auto k1 = f.begin_at("k1", kGGUFString, 3);
+    f.put_string("one");
+    auto e = f.begin_at("e", kGGUFArray, 5);
+    f.put_array<double>(kGGUFFloat64, {});
+    auto k2 = f.begin_at("k2", kGGUFInt32, 7);
+    f.put<int32_t>(-5);
+    auto a = f.begin_at("a", kGGUFArray, 1);
+    f.put_array<double>(kGGUFFloat64, {-1.0, 2.0});
+    auto s2 = f.begin_at("s2", kGGUFFloat64, 3);
+    f.put<double>(3.0);
+    auto k3 = f.begin_at("k3", kGGUFArray, 5);
+    f.put_array<uint8_t>(kGGUFBool, {1, 0, 1});
+    f.add_tensor("t0", w0);
+    f.add_tensor("t1", w1);
+    REQUIRE(f.all_values_misaligned());
+
+    std::string path = get_temp_file("test_gguf_mixed_f64.gguf");
+    f.write(path);
+    auto [weights, metadata] = load_gguf(path);
+    CHECK(metadata.size() == 7);
+    check_gguf_scalar<float>(metadata, s1, float32, 0.5f);
+    CHECK(std::get<std::string>(metadata.at(k1)) == "one");
+    check_gguf_array<float>(metadata, e, float32, {});
+    check_gguf_scalar<int32_t>(metadata, k2, int32, -5);
+    check_gguf_array<float>(metadata, a, float32, {-1.0f, 2.0f});
+    check_gguf_scalar<float>(metadata, s2, float32, 3.0f);
+    check_gguf_array<uint8_t>(metadata, k3, bool_, {1, 0, 1});
+    check_weights(weights);
   }
 }
 
