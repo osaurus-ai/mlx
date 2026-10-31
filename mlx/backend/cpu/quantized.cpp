@@ -1,5 +1,7 @@
 // Copyright © 2023-2026 Apple Inc.
 
+#include <cstring>
+
 #include "mlx/backend/common/quantized.h"
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/cpu/copy.h"
@@ -400,7 +402,8 @@ void _qmm_dispatch_typed(
   int N = out.shape(-1);
   int w_els = w.ndim() > 2 ? w.shape(-1) * w.shape(-2) : 0;
   int g_els = w.ndim() > 2 ? scales.shape(-1) * scales.shape(-2) : 0;
-  int batch_size = x.size() / (K * M);
+  // out is not empty here (see empty_qmm_cpu). Count its matrices.
+  int batch_size = out.size() / (M * N);
 
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
@@ -638,7 +641,8 @@ void fp_qmm_dispatch_mode(
   int N = out.shape(-1);
   int w_els = w.ndim() > 2 ? w.shape(-1) * w.shape(-2) : 0;
   int g_els = w.ndim() > 2 ? scales.shape(-1) * scales.shape(-2) : 0;
-  int batch_size = x.size() / (K * M);
+  // out is not empty here (see empty_qmm_cpu). Count its matrices.
+  int batch_size = out.size() / (M * N);
 
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
@@ -924,9 +928,31 @@ void fp_bs_qmm_dispatch(
   }
 }
 
+// An empty output has no work, and K = 0 gives an empty sum, which is 0.
+// Return true when this has set out.
+bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return true;
+  }
+  if (x.shape(-1) != 0) {
+    return false;
+  }
+  out.set_data(allocator::malloc(out.nbytes()));
+  auto& encoder = cpu::get_command_encoder(stream);
+  encoder.set_output_array(out);
+  encoder.dispatch([out_ptr = out.data<void>(), nbytes = out.nbytes()]() {
+    std::memset(out_ptr, 0, nbytes);
+  });
+  return true;
+}
+
 } // namespace
 
 void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -969,6 +995,9 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -1343,6 +1372,9 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& encoder = cpu::get_command_encoder(stream());
 
   bool w_quantized = (inputs[1].dtype() == uint32);
