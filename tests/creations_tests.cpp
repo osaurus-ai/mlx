@@ -123,6 +123,75 @@ TEST_CASE("test arange") {
   }
 }
 
+TEST_CASE("test arange computes each element from start") {
+  auto s = Device::cpu;
+  // A running sum in float32 stops at 2^24.
+  int start = (1 << 24) - 1024;
+  std::vector<float> counts(2048);
+  for (int i = 0; i < 2048; ++i) {
+    counts[i] = static_cast<float>(start + i);
+  }
+  auto x = arange(static_cast<double>(start), start + 2048.0, float32, s);
+  auto expected = array(counts.data(), {2048}, float32);
+  auto error = max(abs(subtract(x, expected, s), s), s);
+  CHECK_EQ(error.item<float>(), 0.0f);
+
+  // 16-bit types compute start + i * step in double. A running sum drifts.
+  x = arange(0.0, 1.0, 0.1, float16, s);
+  expected = array(
+      {0.0f,
+       0.0999755859375f,
+       0.199951171875f,
+       0.2998046875f,
+       0.39990234375f,
+       0.5f,
+       0.599609375f,
+       0.69970703125f,
+       0.7998046875f,
+       0.89990234375f},
+      float16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+  x = arange(0.0, 1.0, 0.1, bfloat16, s);
+  expected = array(
+      {0.0f,
+       0.10009765625f,
+       0.2001953125f,
+       0.30078125f,
+       0.400390625f,
+       0.5f,
+       0.6015625f,
+       0.69921875f,
+       0.80078125f,
+       0.90234375f},
+      bfloat16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+
+  // Element 0 is start, also when the step overflows to inf.
+  x = arange(0.0, 1e5, 7e4, float16, s);
+  expected = array({0.0f, std::numeric_limits<float>::infinity()}, float16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+
+  // float64 rounds i * step, then the sum, as Python does. An FMA rounds
+  // once, which gives other values at these indices.
+  x = arange(0.3, 14000.0, 0.7, float64, s);
+  CHECK(x.shape() == Shape{20000});
+  auto indices =
+      array({3, 6, 13, 15, 10000, 10005, 19991, 19993, 19996, 19998});
+  expected = array(
+      {2.3999999999999995,
+       4.499999999999999,
+       9.4,
+       10.8,
+       7000.3,
+       7003.8,
+       13993.999999999998,
+       13995.399999999998,
+       13997.499999999998,
+       13998.899999999998},
+      float64);
+  CHECK(array_equal(take(x, indices, 0, s), expected, s).item<bool>());
+}
+
 TEST_CASE("test astype") {
   // Check type conversions
   {
