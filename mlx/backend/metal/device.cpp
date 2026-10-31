@@ -354,7 +354,7 @@ void CommandEncoder::set_input_array(
     int idx,
     int64_t offset /* = 0 */) {
   if (all_inputs_.insert(a.buffer().ptr()).second) {
-    buffer_sizes_ += a.data_size();
+    buffer_sizes_ += a.data_size() * a.itemsize();
     // See note in set_buffer above re: untracked-hazard / unretained-CB
     // contract. Retain on first sighting only.
     if (env::metal_retain_bound_buffers() && a.buffer().ptr()) {
