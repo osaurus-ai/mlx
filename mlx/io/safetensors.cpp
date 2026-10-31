@@ -1357,25 +1357,41 @@ void save_safetensors(
   }
   parent["__metadata__"] = _metadata;
 
-  size_t offset = 0;
+  // Widest element first, as the reference writer does: each size is a multiple
+  // of a power-of-two width, so every tensor lands aligned and without a hole.
+  std::vector<std::pair<const std::string*, const array*>> order;
+  order.reserve(a.size());
   for (auto& [key, arr] : a) {
+    order.emplace_back(&key, &arr);
+  }
+  std::sort(order.begin(), order.end(), [](const auto& l, const auto& r) {
+    auto lw = size_of(l.second->dtype());
+    auto rw = size_of(r.second->dtype());
+    return lw != rw ? lw > rw : *l.first < *r.first;
+  });
+
+  size_t offset = 0;
+  for (auto& [key, arr] : order) {
     json child;
-    child["dtype"] = dtype_to_safetensor_str(arr.dtype());
-    child["shape"] = arr.shape();
-    child["data_offsets"] = std::vector<size_t>{offset, offset + arr.nbytes()};
-    parent[key] = child;
-    offset += arr.nbytes();
+    child["dtype"] = dtype_to_safetensor_str(arr->dtype());
+    child["shape"] = arr->shape();
+    child["data_offsets"] = std::vector<size_t>{offset, offset + arr->nbytes()};
+    parent[*key] = child;
+    offset += arr->nbytes();
   }
 
+  // Pad the header with spaces, which the format allows, so that the data
+  // section starts at a multiple of 8, the widest element size.
   auto header = parent.dump();
+  header.append((8 - (8 + header.length()) % 8) % 8, ' ');
   uint64_t header_len = header.length();
   out_stream->write(reinterpret_cast<char*>(&header_len), 8);
   out_stream->write(header.c_str(), header_len);
-  for (auto& [key, arr] : a) {
+  for (auto& [key, arr] : order) {
     // An empty tensor contributes a zero length span and has no data pointer
     // worth asking for.
-    if (arr.nbytes() > 0) {
-      out_stream->write(arr.data<char>(), arr.nbytes());
+    if (arr->nbytes() > 0) {
+      out_stream->write(arr->data<char>(), arr->nbytes());
     }
   }
 }
