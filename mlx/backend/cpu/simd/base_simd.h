@@ -83,7 +83,6 @@ Simd<T, 1> recip(Simd<T, 1> in) {
     return op(in.value);           \
   }
 
-DEFAULT_UNARY(operator-, std::negate{})
 DEFAULT_UNARY(operator!, std::logical_not{})
 DEFAULT_UNARY(acos, std::acos)
 DEFAULT_UNARY(acosh, std::acosh)
@@ -102,15 +101,6 @@ DEFAULT_UNARY(sinh, std::sinh)
 DEFAULT_UNARY(sqrt, std::sqrt)
 DEFAULT_UNARY(tan, std::tan)
 DEFAULT_UNARY(tanh, std::tanh)
-
-template <typename T>
-Simd<T, 1> abs(Simd<T, 1> in) {
-  if constexpr (std::is_unsigned_v<T>) {
-    return in;
-  } else {
-    return std::abs(in.value);
-  }
-}
 
 template <typename T>
 Simd<T, 1> log1p(Simd<T, 1> in) {
@@ -222,6 +212,29 @@ DEFAULT_BINARY(&)
 DEFAULT_BINARY(&&)
 DEFAULT_BINARY(||)
 
+// Negation and abs wrap around too: -MIN and abs(MIN) are MIN, as in two's
+// complement. A signed result is computed as 0 - x in the unsigned type, like
+// the arithmetic above.
+template <typename T>
+Simd<T, 1> operator-(Simd<T, 1> in) {
+  if constexpr (std::is_integral_v<T>) {
+    return wrapping([](auto x, auto y) { return x - y; }, T(0), in.value);
+  } else {
+    return std::negate{}(in.value);
+  }
+}
+
+template <typename T>
+Simd<T, 1> abs(Simd<T, 1> in) {
+  if constexpr (std::is_unsigned_v<T>) {
+    return in;
+  } else if constexpr (std::is_integral_v<T>) {
+    return in.value < 0 ? -in : in;
+  } else {
+    return std::abs(in.value);
+  }
+}
+
 template <typename T>
 Simd<T, 1> clz(Simd<T, 1> x_) {
 #ifdef _MSC_VER
@@ -308,12 +321,15 @@ Simd<T, 1> pow(Simd<T, 1> a, Simd<T, 1> b) {
         return 0;
       }
     }
+    // The power is the exact one modulo 2^N: the products wrap around, and the
+    // last squaring of the base, which the result does not need, may too.
+    auto mul = [](auto x, auto y) { return x * y; };
     while (exp) {
       if (exp & 1) {
-        res *= base;
+        res = wrapping(mul, res, base);
       }
       exp >>= 1;
-      base *= base;
+      base = wrapping(mul, base, base);
     }
     return res;
   }
