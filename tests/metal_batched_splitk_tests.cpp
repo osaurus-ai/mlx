@@ -53,3 +53,28 @@ TEST_CASE("Metal AddMM preserves existing long reduction routing") {
     CHECK(relative < .004f);
   }
 }
+
+TEST_CASE("Metal long batched matmul broadcasts either operand") {
+  if (!is_available(Device::gpu)) return;
+  random::seed(2027);
+  for (int layout = 0; layout < 3; ++layout) {
+    // Left-only broadcast, crossed broadcasts, and shared left leading axis.
+    Shape ashape = layout == 0 ? Shape{1, 3, 19, 65537}
+                              : (layout == 1 ? Shape{2, 1, 19, 65537}
+                                             : Shape{1, 1, 19, 65537});
+    Shape bshape = layout == 1 ? Shape{1, 3, 65537, 17}
+                              : Shape{2, 3, 65537, 17};
+    auto a = random::normal(ashape, bfloat16, 0, .1);
+    auto b = random::normal(bshape, bfloat16, 0, .1);
+    eval(a, b);
+    auto actual = astype(matmul(a, b, Device::gpu), float32);
+    auto expected = matmul(astype(a, float32, Device::cpu),
+                           astype(b, float32, Device::cpu), Device::cpu);
+    eval(actual, expected);
+    float relative = divide(sqrt(mean(square(subtract(actual, expected)))),
+                            sqrt(mean(square(expected)))).item<float>();
+    CHECK(actual.shape() == Shape{2, 3, 19, 17});
+    CHECK(all(isfinite(actual)).item<bool>());
+    CHECK(relative < .004f);
+  }
+}
