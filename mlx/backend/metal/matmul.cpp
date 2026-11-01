@@ -535,7 +535,7 @@ void steel_gemm_splitk_axpby(
     std::vector<array>& copies,
     float alpha = 1.0f,
     float beta = 0.0f,
-    const std::vector<std::pair<size_t, size_t>>& batch_offsets = {}) {
+    const std::vector<std::pair<int64_t, int64_t>>& batch_offsets = {}) {
   using namespace mlx::steel;
 
   int _tm = (M + 32 - 1) / 32;
@@ -625,10 +625,10 @@ void steel_gemm_splitk_axpby(
     MTL::Size group_dims = MTL::Size(32, wn, wm);
     MTL::Size grid_dims = MTL::Size(tn, tm, split_k_partitions);
 
-    const size_t offset_a =
-        batch_offsets.empty() ? 0 : batch_offsets[batch].first * a.itemsize();
-    const size_t offset_b =
-        batch_offsets.empty() ? 0 : batch_offsets[batch].second * b.itemsize();
+    const int64_t offset_a =
+        batch_offsets.empty() ? 0 : batch_offsets[batch].first * int64_t(a.itemsize());
+    const int64_t offset_b =
+        batch_offsets.empty() ? 0 : batch_offsets[batch].second * int64_t(b.itemsize());
     compute_encoder.set_input_array(a, 0, offset_a);
     compute_encoder.set_input_array(b, 1, offset_b);
     compute_encoder.set_output_array(C_split, 2);
@@ -987,16 +987,18 @@ void steel_matmul_axpby(
   // buffer across matrices. Broadcast GQA strides are resolved on the host.
   // Limit the candidate to the affected M2 Max architecture. Other Macs,
   // ordinary short matmuls and NAX routing keep their existing dispatch.
+  // Larger batches keep the parallel fused route: serial scratch reuse can
+  // regress throughput once there are enough independent matrices.
   if constexpr (!CHECK_AB) {
     if (d.get_architecture_gen() == 14 && devc == 's' && !use_nax &&
-        batch_size_out > 1 && batch_size_out <= 64 &&
+        batch_size_out > 1 && batch_size_out <= 32 &&
         K >= 65536 && (_tm * _tn) <= min_tmn_threshold &&
         K >= std::max(M, N) &&
         (a.dtype() == bfloat16 || a.dtype() == float16)) {
-      std::vector<std::pair<size_t, size_t>> offsets;
+      std::vector<std::pair<int64_t, int64_t>> offsets;
       offsets.reserve(batch_size_out);
       for (int batch = 0; batch < batch_size_out; ++batch) {
-        size_t offset_a = 0, offset_b = 0;
+        int64_t offset_a = 0, offset_b = 0;
         int remaining = batch;
         for (int axis = int(batch_shape.size()) - 1; axis >= 0; --axis) {
           int index = remaining % batch_shape[axis];

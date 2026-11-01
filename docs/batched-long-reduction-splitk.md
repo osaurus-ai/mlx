@@ -1,38 +1,73 @@
-# Batched long-reduction split-K candidate
+# M2 Max long-batched-reduction candidate
 
-## Problem and scope
+## Status and claim boundary
 
-The SIMD split-K path was restricted to one output matrix. Long batched reductions therefore used a single full-K loop per output tile. An observed attention probability/value multiplication has M512,N256,K115768 with24 query heads and grouped value-head broadcasting. A standalone synthetic fallback attention graph reproduced Metal Impacting Interactivity0x0e on an affected M2Max; another M2Max passed the same short test. This identifies a reproducing workload, not the private driver cause.
+This is an open, unmerged candidate for a reproduced Metal `Impacting Interactivity` failure. It is not a certified crash fix or a general inference-speed improvement. Keep the PR open for later affected-hardware review. No further reporter capture is required for the current local work.
 
-This candidate extends existing SIMD FP32 split-K kernels to eligible batches. It does not change model parameters, sequence length, attention normalization, masks or model caches. It is not yet a proven prevention for the reported Metal error, nor a fix for separately observed fused attention failures.
+The candidate is limited to M2 Max. It preserves full context length, masks, softmax, model settings and cache contents. The separate Flint fused-attention failure is not resolved by a matrix-multiplication change.
 
-## Implementation
+## What the supplied evidence establishes
 
-For M2 Max (architecture generation14, variant s), non-NAX FP16/BF16 matmul, batches2–64, K>=65536 and the existing small-output tile threshold, compute each batch's input offsets from collapsed broadcast strides. Reuse the existing split-K and FP32 accumulation kernels. Select enough partitions to target approximately4096 K elements, capped at32; retain the existing unbatched choice. Each batch reuses one scratch buffer. Command encoder read/write barriers serialize reuse. Output offsets use byte addressing. AddMM stays outside this new dispatch route; existing unbatched and NAX dispatch remain unchanged. All other Mac architecture variants retain their original dispatch route.
+| Evidence | Observation | Limit |
+|---|---|---|
+| Actual Allosaurus app capture | Failed buffer contains only BF16 attention probability × value multiplication; earlier QK, masking and softmax complete | Identifies the operation, not Apple's private driver condition |
+| Actual Flint app capture | Failed buffer contains RMS normalization and fused BF16 attention | Does not isolate which of those two operations failed |
+| Standalone 96 GB M2 Max return | Long-context Allosaurus-shaped baseline succeeds once, then produces the same `0x0e`; four alternatives complete three evaluations each | Three successes do not establish reliable prevention |
+| Standalone 32 GB M2 Max return | All 36 evaluations pass, including unchanged baseline | Shows the workload is not deterministically invalid on every M2 Max |
+| Driver logs | Wiring-accounting warnings occur on both machines, including the fully passing run | Warnings alone are not proof of the cause |
 
-These thresholds are conservative dispatch choices, not measured watchdog deadlines or model limits. At K above131072 the32-partition cap no longer bounds partitions to4096. Review performance before broadening coverage. No driver environment workaround is enabled.
+The standalone reproduction does not load model weights, restore an SSD cache or run Osaurus's scheduler. Those components are not necessary to trigger this error class. This does not rule out their influencing failure frequency in the full app. Failed app buffers reported approximately 42 ms and 72 ms of GPU time; a five-second buffer execution was not established. Neither an NPU issue nor simple insufficient RAM has been demonstrated.
 
-## Validation to date
+## Implementation and isolation
 
-Focused GPU regression exercises BF16/FP16, aligned/unaligned K65536/65537, all four input transpose combinations, and GQA-like broadcasting across six output matrices. It compares GPU results with CPU FP32 reference, checks finiteness and relative RMS. Larger captured-shape A/B uses24 heads, K115768 and independent original/candidate libraries, comparing saved FP32 outputs element by element.
+The existing SIMD split-K route only accepts a single output matrix. A captured attention workload has `M=512`, `N=256`, `K=115768`, and 24 query heads, so it takes the unsplit batched route.
 
-Development machine: physical M5Max with g14s dispatch override; this is not M2 hardware emulation. The development libraries share the retained experimental core build, with only the Metal matmul object replaced for the candidate; normal repository CI remains required. Captured-shape relative RMS0.000128656, max absolute difference0.0000038147. Scratch increases by16MiB. Warm timings in the short initial sample: original148/159ms, candidate146/135ms. This is not a statistically established speedup or model-generation benchmark.
+The new route requires all of:
 
-## Remaining acceptance
+- Architecture generation 14, variant `s`: M2 Max.
+- Non-NAX FP16 or BF16 ordinary Matmul, not AddMM.
+- Between 2 and 32 output matrices.
+- `K >= 65536`, `K >= max(M, N)`, and the existing small-output tile threshold.
 
-- Run standard repository build/CI and review candidate routing/offset coverage.
-- Validate the concrete candidate against repeated failing baseline on affected M2 hardware; no root-cause or prevention claim from M5 tests.
-- Qualify app/runtime consumer only after core acceptance. No automatic runtime pin change.
-- Investigate the separate fused-attention failure independently; do not mark it fixed by a GEMM change.
+It resolves collapsed broadcast strides on the host, using signed offsets for sliced/reversed batch views. Existing SIMD split-K kernels calculate FP32 partial sums. Existing accumulation kernels combine them into the requested output dtype. One scratch buffer is reused across matrices, protected by the encoder's existing read/write barriers. No Metal kernel signatures, serialized formats or public APIs change.
+
+Partitions target approximately 4096 reduction elements and are capped at 32. This is a dispatch heuristic, not a watchdog deadline; above `K=131072`, partitions can exceed 4096 elements. Existing unbatched selection is preserved. Other architectures, NAX, shorter reductions, batches above 32, GEMV and AddMM retain their original routes. Quantized matmul kernels and cache code are not edited.
+
+The route originally allowed 64 matrices. A performance sweep found a 28–29% slowdown for 64 matrices with 64×64 outputs, in both FP16 and BF16. The route was therefore narrowed to at most 32 matrices. The failed row is retained; it is not counted as a passing optimization.
+
+## Numerical and regression coverage
+
+Focused GPU versus CPU FP32 comparisons cover:
+
+- FP16 and BF16; `K=65536` and `K=65537`.
+- Both input transpose flags and all four combinations.
+- Right-only, left-only and crossed batch broadcasting.
+- Nonzero sliced offsets and reversed batch slices.
+- Existing unbatched and batched AddMM with nontrivial alpha/beta.
+- Existing basic Matmul contracts.
+
+Captured-shape comparisons use separate original and candidate libraries and compare saved outputs element by element. Relative RMS difference was approximately `0.000128656` (0.013%); maximum absolute difference was `0.0000038147`. This is floating-point reduction-order variation, not bitwise equivalence. It does not replace model-quality qualification.
+
+The final focused suite passes 74 assertions across five cases. The entire current core and shader build succeeded using Xcode's Metal toolchain. Earlier development-library tests are retained separately and are not substituted for the clean build.
+
+## Performance evidence and limits
+
+All local measurements use a physical M5 Max. Setting `MLX_METAL_GPU_ARCH=applegpu_g14s` exercises dispatch selection; it does not emulate M2 hardware.
+
+- Native M5: eight workload shapes produce bit-identical outputs. The largest primitive median was 51.78 ms original versus 51.91 ms candidate.
+- Clean captured-shape fallback attention: warm original 141/138 ms versus candidate 144/135 ms, with 16 MiB additional scratch. This is comparable, not a demonstrated general speedup.
+- Wider sweep: 12 shapes × two dtypes × original/candidate × eight evaluations. It includes reduction lengths up to 262145, small/large batches and output tiles, and excluded boundaries. The 64-matrix regression above motivated the narrower route.
+- Boundary sweep: batches 16, 24, 32 and 33 with 64×64 outputs improved locally under the original broader candidate. The conservative final cap is 32. Final FP16/BF16 checks at batches 33 and 64 are bit-identical to original with timing ratios 0.999–1.003. The retained 32-matrix row is about 19–20% faster locally; the captured 24-head multiplication is about 7% faster. These are M5 dispatch-override measurements, not M2 speed claims.
+- One short excluded workload showed a noisy initial timing outlier. Five alternating-order pairs overlapped, without a consistent slowdown. Both the outlier and follow-up are retained.
+
+These are primitive measurements, not tokens/second, full-model, multi-turn or all-Mac performance certification. No universal zero-regression guarantee is supported. The hardware gate prevents this candidate route from being selected on other Macs.
+
+## Reproduction for a later source review
+
+Use the PR branch and a full Xcode installation with Metal tools available. On the actual M2 Max, do not set an architecture override. Build with CMake in Release mode, Metal enabled, and tests enabled; run the focused cases in `tests/metal_batched_splitk_tests.cpp` plus the existing Matmul case. For local path testing on another supported Mac, an architecture override may exercise the routing, but label that result correctly.
+
+Compare the original base and candidate on the same device, inputs and settings. Alternate order and retain failures as well as successes. A baseline that does not reproduce the error cannot establish prevention. Review long-context app behavior and the separate fused-attention report before declaring the whole issue closed. Do not reset accepted unrelated compaction, template, UI or cache evidence.
 
 ## Upstream maintenance
 
-Changes are confined to Metal matmul host dispatch and a focused regression. Existing Metal kernel signatures and serialized formats are untouched. Rebase this small host change when upstream gains batched split-K support, preserving transpose/broadcast/unaligned-K tests. A source revert restores original routing; no persistent user settings are written.
-
-## Routing/performance follow-up
-
-Candidate routing is restricted to architecture generation14/variant s (M2 Max). On physical M5 native routing, eight representative matmul cases produce bit-identical outputs against the original library; largest case median51.78/51.91ms. With g14s routing override on the same M5, three eligible cases improve in this sample; five excluded cases produce bit-identical results. This does not establish M2 performance. One short excluded case had a noisy30% first comparison; five alternating-order pairs overlapped (baseline0.925–1.191ms, candidate0.906–1.200ms), without a consistent slowdown. Preserve the outlier rather than silently dropping it. Hardware counters/full model token throughput were not measured.
-
-## Clean current-source build
-
-The complete core at this branch built successfully with the Xcode Metal toolchain. Focused tests linked against that clean library and shader passed59assertions, including AddMM's existing unbatched split-K and batched routes. The full captured-shape comparison retained relative RMS0.000128656 and max absolute difference0.0000038147. Warm times in this clean-build sample were baseline141/138ms and candidate144/135ms: comparable, not evidence of a general speedup. Earlier development-library measurements remain separate and preserved. Physical M2 candidate qualification is still pending.
+Changes are confined to Metal Matmul host dispatch, focused tests and this document. When upstream adds batched split-K, rebase this small change and retain the transpose, broadcast, sliced-offset and unaligned-K regressions. Reverting the source restores old routing; no persistent settings need migration.

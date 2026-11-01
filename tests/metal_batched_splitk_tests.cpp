@@ -78,3 +78,28 @@ TEST_CASE("Metal long batched matmul broadcasts either operand") {
     CHECK(relative < .004f);
   }
 }
+
+TEST_CASE("Metal long batched matmul preserves sliced batch offsets") {
+  if (!is_available(Device::gpu)) return;
+  random::seed(2028);
+  auto original_a = random::normal({4, 3, 17, 65537}, bfloat16, 0, .1);
+  auto original_b = random::normal({4, 1, 65537, 19}, bfloat16, 0, .1);
+  for (bool reverse : {false, true}) {
+    auto a = reverse
+        ? slice(original_a, {-1, 0, 0, 0}, {-5, 3, 17, 65537}, {-2, 1, 1, 1})
+        : slice(original_a, {1, 0, 0, 0}, {4, 3, 17, 65537}, {2, 1, 1, 1});
+    auto b = reverse
+        ? slice(original_b, {-1, 0, 0, 0}, {-5, 1, 65537, 19}, {-2, 1, 1, 1})
+        : slice(original_b, {1, 0, 0, 0}, {4, 1, 65537, 19}, {2, 1, 1, 1});
+    eval(a, b);
+    auto actual = astype(matmul(a, b, Device::gpu), float32);
+    auto expected = matmul(astype(a, float32, Device::cpu),
+                           astype(b, float32, Device::cpu), Device::cpu);
+    eval(actual, expected);
+    float relative = divide(sqrt(mean(square(subtract(actual, expected)))),
+                            sqrt(mean(square(expected)))).item<float>();
+    CHECK(actual.shape() == Shape{2, 3, 17, 19});
+    CHECK(all(isfinite(actual)).item<bool>());
+    CHECK(relative < .004f);
+  }
+}
