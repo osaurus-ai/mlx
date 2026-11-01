@@ -48,9 +48,13 @@ class RMSNorm : public Custom {
   static bool use_fallback(Stream stream);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
@@ -81,9 +85,13 @@ class RMSNormVJP : public Custom {
       : Custom(stream, std::move(fallback)), eps_(eps) {}
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
@@ -169,9 +177,13 @@ class LayerNorm : public Custom {
   static bool use_fallback(Stream s);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
@@ -201,9 +213,13 @@ class LayerNormVJP : public Custom {
       : Custom(stream, std::move(fallback)), eps_(eps) {}
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
@@ -237,9 +253,13 @@ class RoPE : public Custom {
   static bool use_fallback(Stream s);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
@@ -296,10 +316,14 @@ class ScaledDotProductAttention : public Custom {
   static bool supports_bool_mask();
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
       override {
     throw std::runtime_error("NYI");
   }
 
+#else
+      override;
+#endif // MLX_USE_HIGHWAY_KERNELS
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override;
 
