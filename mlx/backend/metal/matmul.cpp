@@ -534,7 +534,8 @@ void steel_gemm_splitk_axpby(
     bool transpose_b,
     std::vector<array>& copies,
     float alpha = 1.0f,
-    float beta = 0.0f) {
+    float beta = 0.0f,
+    const std::vector<std::pair<int64_t, int64_t>>& batch_offsets = {}) {
   using namespace mlx::steel;
 
   int _tm = (M + 32 - 1) / 32;
@@ -549,6 +550,12 @@ void steel_gemm_splitk_axpby(
   // As _tk grows use more partitions, as _tm * _tn grow use fewer partitions
   int split_k_partitions =
       std::min(std::max(2, next_power_of_2(_tk / (_tm * _tn))), 32);
+  if (!batch_offsets.empty()) {
+    // Keep each long reduction near 4096 elements using the existing FP32
+    // partial/accumulation kernels. The final partition handles K's remainder.
+    split_k_partitions = std::max(
+        split_k_partitions, std::min(32, next_power_of_2(ceildiv(K, 4096))));
+  }
   int split_k_partition_stride = M * N;
   int gemm_k_iterations = (K / bk) / split_k_partitions;
   int split_k_partition_size = gemm_k_iterations * bk;
@@ -593,78 +600,87 @@ void steel_gemm_splitk_axpby(
       /* bool mn_aligned = */ mn_aligned,
       /* bool k_aligned = */ k_aligned);
 
-  compute_encoder.set_compute_pipeline_state(kernel);
-
-  int tn = (N + bn - 1) / bn;
-  int tm = (M + bm - 1) / bm;
-
-  GEMMSpiltKParams params{
-      /* const int M = */ M,
-      /* const int N = */ N,
-      /* const int K = */ K,
-      /* const int lda = */ lda,
-      /* const int ldb = */ ldb,
-      /* const int ldc = */ N,
-      /* const int tiles_n = */ tn,
-      /* const int tiles_m = */ tm,
-      /* const int split_k_partitions = */ split_k_partitions,
-      /* const int split_k_partition_stride = */ split_k_partition_stride,
-      /* const int split_k_partition_size = */ split_k_partition_size,
-      /* const int swizzle_log = */ 0, // no swizzle
-      /* const int gemm_k_iterations_aligned = */ gemm_k_iterations};
-
-  MTL::Size group_dims = MTL::Size(32, wn, wm);
-  MTL::Size grid_dims = MTL::Size(tn, tm, split_k_partitions);
-
-  compute_encoder.set_input_array(a, 0);
-  compute_encoder.set_input_array(b, 1);
-  compute_encoder.set_output_array(C_split, 2);
-
-  compute_encoder.set_bytes(params, 3);
-  compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
-
-  // Do accum kernel
-  {
-    const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
-
-    auto kernel_name = "steel_gemm_splitk_accum_" + type_to_name(out) + "_" +
-        type_to_name(C_split);
-
-    if (do_axpby) {
-      kernel_name = kernel_name + "_axbpy";
-    }
-
-    auto kernel = get_steel_gemm_splitk_accum_kernel(
-        /* metal::Device& d = */ d,
-        /* const std::string& kernel_name = */ kernel_name,
-        /* const array& in = */ C_split,
-        /* const array& out = */ out,
-        /* bool axbpy = */ do_axpby);
+  const size_t batches = batch_offsets.empty() ? 1 : batch_offsets.size();
+  for (size_t batch = 0; batch < batches; ++batch) {
     compute_encoder.set_compute_pipeline_state(kernel);
 
-    // Set the arguments for the kernel
-    compute_encoder.set_input_array(C_split, 0);
-    compute_encoder.set_output_array(out, 1);
-    compute_encoder.set_bytes(split_k_partitions, 2);
-    compute_encoder.set_bytes(split_k_partition_stride, 3);
-    compute_encoder.set_bytes(N, 4);
+    int tn = (N + bn - 1) / bn;
+    int tm = (M + bm - 1) / bm;
 
-    if (do_axpby) {
-      int ldc = c.strides()[c.ndim() - 2];
-      int fdc = c.strides()[c.ndim() - 1];
+    GEMMSpiltKParams params{
+        /* const int M = */ M,
+        /* const int N = */ N,
+        /* const int K = */ K,
+        /* const int lda = */ lda,
+        /* const int ldb = */ ldb,
+        /* const int ldc = */ N,
+        /* const int tiles_n = */ tn,
+        /* const int tiles_m = */ tm,
+        /* const int split_k_partitions = */ split_k_partitions,
+        /* const int split_k_partition_stride = */ split_k_partition_stride,
+        /* const int split_k_partition_size = */ split_k_partition_size,
+        /* const int swizzle_log = */ 0, // no swizzle
+        /* const int gemm_k_iterations_aligned = */ gemm_k_iterations};
 
-      compute_encoder.set_input_array(c, 5);
-      compute_encoder.set_bytes(ldc, 6);
-      compute_encoder.set_bytes(fdc, 7);
-      compute_encoder.set_bytes(alpha, 8);
-      compute_encoder.set_bytes(beta, 9);
+    MTL::Size group_dims = MTL::Size(32, wn, wm);
+    MTL::Size grid_dims = MTL::Size(tn, tm, split_k_partitions);
+
+    const int64_t offset_a =
+        batch_offsets.empty() ? 0 : batch_offsets[batch].first * int64_t(a.itemsize());
+    const int64_t offset_b =
+        batch_offsets.empty() ? 0 : batch_offsets[batch].second * int64_t(b.itemsize());
+    compute_encoder.set_input_array(a, 0, offset_a);
+    compute_encoder.set_input_array(b, 1, offset_b);
+    compute_encoder.set_output_array(C_split, 2);
+
+    compute_encoder.set_bytes(params, 3);
+    compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
+
+    // Do accum kernel
+    {
+      const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
+
+      auto kernel_name = "steel_gemm_splitk_accum_" + type_to_name(out) + "_" +
+          type_to_name(C_split);
+
+      if (do_axpby) {
+        kernel_name = kernel_name + "_axbpy";
+      }
+
+      auto kernel = get_steel_gemm_splitk_accum_kernel(
+          /* metal::Device& d = */ d,
+          /* const std::string& kernel_name = */ kernel_name,
+          /* const array& in = */ C_split,
+          /* const array& out = */ out,
+          /* bool axbpy = */ do_axpby);
+      compute_encoder.set_compute_pipeline_state(kernel);
+
+      // Set the arguments for the kernel
+      compute_encoder.set_input_array(C_split, 0);
+      compute_encoder.set_output_array(
+          out, 1, batch * size_t(M) * N * out.itemsize());
+      compute_encoder.set_bytes(split_k_partitions, 2);
+      compute_encoder.set_bytes(split_k_partition_stride, 3);
+      compute_encoder.set_bytes(N, 4);
+
+      if (do_axpby) {
+        int ldc = c.strides()[c.ndim() - 2];
+        int fdc = c.strides()[c.ndim() - 1];
+
+        compute_encoder.set_input_array(c, 5);
+        compute_encoder.set_bytes(ldc, 6);
+        compute_encoder.set_bytes(fdc, 7);
+        compute_encoder.set_bytes(alpha, 8);
+        compute_encoder.set_bytes(beta, 9);
+      }
+
+      // Launch enough thread groups for each output
+      MTL::Size grid_dims = MTL::Size(N, M, 1);
+      auto group_dims = get_block_dims(N, M, 1);
+      compute_encoder.dispatch_threads(grid_dims, group_dims);
     }
 
-    // Launch enough thread groups for each output
-    MTL::Size grid_dims = MTL::Size(N, M, 1);
-    auto group_dims = get_block_dims(N, M, 1);
-    compute_encoder.dispatch_threads(grid_dims, group_dims);
-  }
+  } // batch; the encoder barriers protect reuse of the FP32 partial buffer.
 
   compute_encoder.add_temporaries(std::move(copies));
 }
@@ -966,6 +982,37 @@ void steel_matmul_axpby(
       (env::enable_tf32() || a.dtype() != float32);
   char devc = d.get_architecture().back();
   int min_tmn_threshold = (devc == 's' || devc == 'd') ? 2048 : 1024;
+
+  // Batched long reductions (not addmm): reuse one FP32 split-K scratch
+  // buffer across matrices. Broadcast GQA strides are resolved on the host.
+  // Limit the candidate to the affected M2 Max architecture. Other Macs,
+  // ordinary short matmuls and NAX routing keep their existing dispatch.
+  // Larger batches keep the parallel fused route: serial scratch reuse can
+  // regress throughput once there are enough independent matrices.
+  if constexpr (!CHECK_AB) {
+    if (d.get_architecture_gen() == 14 && devc == 's' && !use_nax &&
+        batch_size_out > 1 && batch_size_out <= 32 &&
+        K >= 65536 && (_tm * _tn) <= min_tmn_threshold &&
+        K >= std::max(M, N) &&
+        (a.dtype() == bfloat16 || a.dtype() == float16)) {
+      std::vector<std::pair<int64_t, int64_t>> offsets;
+      offsets.reserve(batch_size_out);
+      for (int batch = 0; batch < batch_size_out; ++batch) {
+        int64_t offset_a = 0, offset_b = 0;
+        int remaining = batch;
+        for (int axis = int(batch_shape.size()) - 1; axis >= 0; --axis) {
+          int index = remaining % batch_shape[axis];
+          remaining /= batch_shape[axis];
+          offset_a += index * A_batch_stride[axis];
+          offset_b += index * B_batch_stride[axis];
+        }
+        offsets.emplace_back(offset_a, offset_b);
+      }
+      return steel_gemm_splitk_axpby<false>(
+          s, d, a, b, c, out, M, N, K, batch_size_out, lda, ldb,
+          transpose_a, transpose_b, copies, alpha, beta, offsets);
+    }
+  }
 
   // Case 1: Small M×N with large K, use SIMD split-K
   // Max and Ultra dispatch larger sizes to splitk
