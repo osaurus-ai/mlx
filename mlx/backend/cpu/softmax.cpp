@@ -16,6 +16,9 @@ namespace {
 
 using namespace mlx::core::simd;
 
+// Rows up to this length are summed as one block, so they keep their results.
+constexpr int sum_block = 4096;
+
 template <typename T, typename AccT>
 void softmax(const array& in, array& out, Stream stream) {
   auto& encoder = cpu::get_command_encoder(stream);
@@ -53,31 +56,69 @@ void softmax(const array& in, array& out, Stream stream) {
         current_in_ptr++;
       }
 
-      // Compute the normalizer and the exponentials
-      Simd<AccT, N> vnormalizer(0.0);
-      current_out_ptr = out_ptr;
-      current_in_ptr = in_ptr;
-      s = M;
-      while (s >= N) {
-        Simd<AccT, N> vexp = load<T, N>(current_in_ptr);
-        vexp = exp(vexp - maximum);
-        if constexpr (same_t) {
-          store(current_out_ptr, vexp);
+      // Compute the normalizer and the exponentials. A row longer than
+      // sum_block sums each block on its own, then adds the block sums.
+      AccT normalizer;
+      if (M <= sum_block) {
+        Simd<AccT, N> vnormalizer(0.0);
+        current_out_ptr = out_ptr;
+        current_in_ptr = in_ptr;
+        s = M;
+        while (s >= N) {
+          Simd<AccT, N> vexp = load<T, N>(current_in_ptr);
+          vexp = exp(vexp - maximum);
+          if constexpr (same_t) {
+            store(current_out_ptr, vexp);
+          }
+          vnormalizer = vnormalizer + vexp;
+          current_in_ptr += N;
+          current_out_ptr += N;
+          s -= N;
         }
-        vnormalizer = vnormalizer + vexp;
-        current_in_ptr += N;
-        current_out_ptr += N;
-        s -= N;
-      }
-      AccT normalizer = sum(vnormalizer);
-      while (s-- > 0) {
-        AccT _exp = std::exp(*current_in_ptr - maximum);
-        if constexpr (same_t) {
-          *current_out_ptr = _exp;
+        normalizer = sum(vnormalizer);
+        while (s-- > 0) {
+          AccT _exp = std::exp(*current_in_ptr - maximum);
+          if constexpr (same_t) {
+            *current_out_ptr = _exp;
+          }
+          normalizer += _exp;
+          current_in_ptr++;
+          current_out_ptr++;
         }
-        normalizer += _exp;
-        current_in_ptr++;
-        current_out_ptr++;
+      } else {
+        current_out_ptr = out_ptr;
+        current_in_ptr = in_ptr;
+        auto block_normalizer = [&](size_t n) {
+          Simd<AccT, N> vnormalizer(0.0);
+          while (n >= N) {
+            Simd<AccT, N> vexp = load<T, N>(current_in_ptr);
+            vexp = exp(vexp - maximum);
+            if constexpr (same_t) {
+              store(current_out_ptr, vexp);
+            }
+            vnormalizer = vnormalizer + vexp;
+            current_in_ptr += N;
+            current_out_ptr += N;
+            n -= N;
+          }
+          AccT block_sum = sum(vnormalizer);
+          while (n-- > 0) {
+            AccT _exp = std::exp(*current_in_ptr - maximum);
+            if constexpr (same_t) {
+              *current_out_ptr = _exp;
+            }
+            block_sum += _exp;
+            current_in_ptr++;
+            current_out_ptr++;
+          }
+          return block_sum;
+        };
+        size_t block = std::min<size_t>(M, sum_block);
+        normalizer = block_normalizer(block);
+        for (s = M - block; s > 0; s -= block) {
+          block = std::min<size_t>(s, sum_block);
+          normalizer += block_normalizer(block);
+        }
       }
       normalizer = 1 / normalizer;
 

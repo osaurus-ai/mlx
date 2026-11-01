@@ -80,8 +80,18 @@ struct ReductionAccumulator {
   using type = std::conditional_t<widen_to_float, float, U>;
 };
 
+// Float sums are made in blocks of sum_block elements, and the block sums are
+// added. Rows up to sum_block elements keep their results.
+constexpr int sum_block = 4096;
+
+struct SumReduce;
+
+template <typename U, typename Op>
+constexpr bool cascade_sum =
+    std::is_same_v<Op, SumReduce> && !std::is_integral_v<U>;
+
 template <typename T, typename U, typename Op>
-void strided_reduce(
+void strided_reduce_block(
     const T* x,
     U* accumulator,
     int size,
@@ -108,7 +118,39 @@ void strided_reduce(
 };
 
 template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+void strided_reduce(
+    const T* x,
+    U* accumulator,
+    int size,
+    size_t stride,
+    Op op) {
+  if constexpr (cascade_sum<U, Op>) {
+    if (size > sum_block) {
+      // The first block goes into the accumulator, each later block into
+      // partial from zero.
+      strided_reduce_block(x, accumulator, sum_block, stride, op);
+      std::vector<U> partial(stride);
+      for (int i = sum_block; i < size; i += sum_block) {
+        int n = std::min(size - i, sum_block);
+        std::fill(partial.begin(), partial.end(), U(0));
+        strided_reduce_block(x + i * stride, partial.data(), n, stride, op);
+        for (size_t j = 0; j < stride; j++) {
+          accumulator[j] = op(accumulator[j], partial[j]);
+        }
+      }
+      return;
+    }
+  }
+  strided_reduce_block(x, accumulator, size, stride, op);
+}
+
+template <typename T, typename U, typename Op>
+void contiguous_reduce_block(
+    const T* x,
+    U* accumulator,
+    int size,
+    Op op,
+    U init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
   simd::Simd<U, N> accumulator_v(init);
   while (size >= N) {
@@ -121,6 +163,17 @@ void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
     *accumulator = op(*accumulator, *x);
     x++;
   }
+}
+
+template <typename T, typename U, typename Op>
+void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+  if constexpr (cascade_sum<U, Op>) {
+    // Each block sums from init in the lanes, then adds into the accumulator.
+    for (; size > sum_block; size -= sum_block, x += sum_block) {
+      contiguous_reduce_block(x, accumulator, sum_block, op, init);
+    }
+  }
+  contiguous_reduce_block(x, accumulator, size, op, init);
 }
 
 // Helper for the ndimensional strided loop
@@ -258,6 +311,38 @@ void reduction_op(
 
   if (plan.type == GeneralReduce) {
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
+
+    if constexpr (cascade_sum<U, Op>) {
+      int64_t size = 1;
+      for (auto d : plan.shape) {
+        size *= d;
+      }
+      if (size > sum_block) {
+        for (int i = 0; i < out.size(); i++, out_ptr++) {
+          int offset = elem_to_loc(i, shape, strides);
+          // The first block goes into val, each later block into block from 0.
+          U val = init;
+          U block = U(0);
+          int count = 0;
+          nd_loop(
+              [&](int extra_offset) {
+                U& acc = count < sum_block ? val : block;
+                acc = Op{}(acc, *(in_ptr + offset + extra_offset));
+                if (++count > sum_block && count % sum_block == 0) {
+                  val = Op{}(val, block);
+                  block = U(0);
+                }
+              },
+              plan.shape,
+              plan.strides);
+          if (count % sum_block != 0) {
+            val = Op{}(val, block);
+          }
+          *out_ptr = val;
+        }
+        return;
+      }
+    }
 
     for (int i = 0; i < out.size(); i++, out_ptr++) {
       int offset = elem_to_loc(i, shape, strides);
