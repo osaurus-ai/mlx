@@ -4705,3 +4705,465 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+TEST_CASE("test integer floor_divide and remainder by zero in whole vectors") {
+  // 67 elements give whole vectors at the build's static target, then a
+  // scalar tail; 67 covers widths up to 16. Zero divisors sit in both.
+  StreamOrDevice cpu = Device::cpu;
+  std::vector<int> an(67), as(67), bs(67);
+  for (int i = 0; i < 67; ++i) {
+    an[i] = (7 * i + 3) % 100;
+    as[i] = (i % 2 == 0 ? 1 : -1) * an[i];
+    bs[i] = (i % 8 == 5 || i == 65) ? 0 : (i % 3 == 0 ? -3 : 5);
+  }
+  auto apply = [cpu](int op, const array& a, const array& b) {
+    return op == 0 ? floor_divide(a, b, cpu) : remainder(a, b, cpu);
+  };
+  // The integer types that have Highway vectors.
+  std::vector<std::pair<std::string, Dtype>> types = {
+      {"int32", int32}, {"uint32", uint32}, {"uint8", uint8}};
+  for (const auto& type : types) {
+    const std::string& name = type.first;
+    Dtype t = type.second;
+    CAPTURE(name);
+    auto a = astype(array(as.begin(), {67}), t, cpu);
+    auto n = astype(array(an.begin(), {67}), t, cpu);
+    auto b = astype(array(bs.begin(), {67}), t, cpu);
+    auto zero = equal(b, array(0, t), cpu);
+    // As base_simd.h: a remainder by zero is the dividend, and a quotient by
+    // zero is 0 (floor_divide adjusts it for a negative dividend).
+    CHECK(array_equal(where(zero, remainder(a, b, cpu), a, cpu), a, cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              where(zero, floor_divide(n, b, cpu), array(0, t), cpu),
+              zeros({67}, t, cpu),
+              cpu)
+              .item<bool>());
+    for (int op = 0; op < 2; ++op) {
+      auto whole = apply(op, a, b);
+      for (int i = 0; i < 67; ++i) {
+        CAPTURE(op);
+        CAPTURE(i);
+        auto one =
+            apply(op, slice(a, {i}, {i + 1}, cpu), slice(b, {i}, {i + 1}, cpu));
+        CHECK(array_equal(slice(whole, {i}, {i + 1}, cpu), one, cpu)
+                  .item<bool>());
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "test fp8 weights and nvfp4 scales give NaN for 0x7F and 0xFF in matmuls") {
+  StreamOrDevice cpu = Device::cpu;
+  // mxfp8: eight rows of 64 E4M3 codes (two groups of 32), scales of 1 (E8M0
+  // 127). Row 0 holds 0x7F at column 5, row 1 holds 0xFF at column 40.
+  std::vector<uint8_t> codes(8 * 64);
+  for (int i = 0; i < 8 * 64; ++i) {
+    codes[i] = static_cast<uint8_t>((i * 37) % 0x7E);
+  }
+  codes[5] = 0x7F;
+  codes[64 + 40] = 0xFF;
+  auto w = view(array(codes.begin(), {8, 64}, uint8), uint32, cpu);
+  auto scales = full({8, 2}, 127, uint8, cpu);
+  for (int m : {1, 32}) {
+    CAPTURE(m);
+    auto y = quantized_matmul(
+        ones({m, 64}, float32, cpu),
+        w,
+        scales,
+        std::nullopt,
+        true,
+        32,
+        8,
+        "mxfp8",
+        cpu);
+    CHECK(all(isnan(slice(y, {0, 0}, {m, 2}, cpu), cpu), cpu).item<bool>());
+    CHECK_FALSE(
+        any(isnan(slice(y, {0, 2}, {m, 8}, cpu), cpu), cpu).item<bool>());
+    // dequantize does not read FP8_LUT. Every sum is a multiple of 2^-9 below
+    // 2^15, so float32 gives it exactly in any order.
+    auto ref = matmul(
+        ones({m, 64}, float32, cpu),
+        transpose(
+            dequantize(
+                w,
+                scales,
+                std::nullopt,
+                32,
+                8,
+                "mxfp8",
+                std::nullopt,
+                std::nullopt,
+                cpu),
+            cpu),
+        cpu);
+    CHECK(
+        array_equal(
+            slice(y, {0, 2}, {m, 8}, cpu), slice(ref, {0, 2}, {m, 8}, cpu), cpu)
+            .item<bool>());
+  }
+  // nvfp4: E2M1 1.0 everywhere, E4M3 scales of 1 (0x38) in groups of 16, but
+  // 0x7F for row 0's second group and 0xFF for row 1's first.
+  std::vector<uint8_t> s4(8 * 4, 0x38);
+  s4[1] = 0x7F;
+  s4[4] = 0xFF;
+  auto w4 = full({8, 8}, 0x22222222u, uint32, cpu);
+  auto sc4 = array(s4.begin(), {8, 4}, uint8);
+  auto y4 = quantized_matmul(
+      ones({1, 64}, float32, cpu),
+      w4,
+      sc4,
+      std::nullopt,
+      true,
+      16,
+      4,
+      "nvfp4",
+      cpu);
+  CHECK(all(isnan(slice(y4, {0, 0}, {1, 2}, cpu), cpu), cpu).item<bool>());
+  CHECK_FALSE(
+      any(isnan(slice(y4, {0, 2}, {1, 8}, cpu), cpu), cpu).item<bool>());
+  CHECK(
+      array_equal(slice(y4, {0, 2}, {1, 8}, cpu), full({1, 6}, 64.0f, cpu), cpu)
+          .item<bool>());
+  // mxfp8: every E4M3 code but 0x7F and 0xFF (0 in their places), code c at
+  // row c / 64, column c % 64. Identity activations output each weight once.
+  std::vector<uint8_t> finite(4 * 64);
+  for (int c = 0; c < 4 * 64; ++c) {
+    finite[c] = (c & 0x7F) == 0x7F ? 0 : static_cast<uint8_t>(c);
+  }
+  auto wf = view(array(finite.begin(), {4, 64}, uint8), uint32, cpu);
+  auto sf = full({4, 2}, 127, uint8, cpu);
+  auto rf = astype(
+      dequantize(
+          wf,
+          sf,
+          std::nullopt,
+          32,
+          8,
+          "mxfp8",
+          std::nullopt,
+          std::nullopt,
+          cpu),
+      float32,
+      cpu);
+  auto yf = quantized_matmul(
+      eye(64, float32, cpu), wf, sf, std::nullopt, true, 32, 8, "mxfp8", cpu);
+  CHECK(array_equal(yf, transpose(rf, cpu), cpu).item<bool>());
+  // Not transposed: fp_qmm decodes the weights through FP8_LUT.
+  auto yn = quantized_matmul(
+      eye(4, float32, cpu), wf, sf, std::nullopt, false, 32, 8, "mxfp8", cpu);
+  CHECK(array_equal(yn, rf, cpu).item<bool>());
+}
+
+TEST_CASE(
+    "test from_fp8 decodes 0x7F and 0xFF as NaN in vectors and the tail") {
+  // 256 codes fill whole vectors at every width up to 16; 0x7F, 0xFF and 0x80
+  // follow in the scalar tail.
+  StreamOrDevice cpu = Device::cpu;
+  std::vector<uint8_t> codes(256);
+  for (int i = 0; i < 256; ++i) {
+    codes[i] = static_cast<uint8_t>(i);
+  }
+  codes.insert(codes.end(), {0x7F, 0xFF, 0x80});
+  // E4M3: a sign, four exponent bits (bias 7), three mantissa bits.
+  std::vector<float> want;
+  for (auto c : codes) {
+    int e = (c >> 3) & 15;
+    int m = c & 7;
+    float v =
+        e == 0 ? std::ldexp(m / 8.0f, -6) : std::ldexp(1.0f + m / 8.0f, e - 7);
+    if (e == 15 && m == 7) {
+      v = NAN;
+    }
+    want.push_back((c & 0x80) ? -v : v);
+  }
+  auto x = array(codes.begin(), {259}, uint8);
+  auto expected = array(want.begin(), {259});
+  auto bits = [cpu](const array& a) {
+    return where(isnan(a, cpu), array(0u, uint32), view(a, uint32, cpu), cpu);
+  };
+  for (auto t : {float32, float16, bfloat16}) {
+    auto got = astype(from_fp8(x, t, cpu), float32, cpu);
+    for (int i : {0x7F, 0xFF, 256, 257}) {
+      CAPTURE(t);
+      CAPTURE(i);
+      CHECK(std::isnan(slice(got, {i}, {i + 1}, cpu).item<float>()));
+    }
+    // Every other code exactly, the sign of zero included.
+    CHECK(array_equal(isnan(got, cpu), isnan(expected, cpu), cpu).item<bool>());
+    CHECK(array_equal(bits(got), bits(expected), cpu).item<bool>());
+  }
+  // dequantize composes from_fp8: mxfp8 weights, and nvfp4 scales.
+  std::vector<uint8_t> w8(8 * 64);
+  for (int i = 0; i < 8 * 64; ++i) {
+    w8[i] = static_cast<uint8_t>((i * 37) % 0x7E);
+  }
+  w8[5] = 0x7F;
+  w8[64 + 40] = 0xFF;
+  auto deq = dequantize(
+      view(array(w8.begin(), {8, 64}, uint8), uint32, cpu),
+      full({8, 2}, 127, uint8, cpu),
+      std::nullopt,
+      32,
+      8,
+      "mxfp8",
+      std::nullopt,
+      float32,
+      cpu);
+  CHECK(std::isnan(slice(deq, {0, 5}, {1, 6}, cpu).item<float>()));
+  CHECK(std::isnan(slice(deq, {1, 40}, {2, 41}, cpu).item<float>()));
+  CHECK(astype(sum(isnan(deq, cpu), cpu), int32, cpu).item<int>() == 2);
+  std::vector<uint8_t> s4(8 * 4, 0x38);
+  s4[1] = 0x7F;
+  s4[4] = 0xFF;
+  auto deq4 = dequantize(
+      full({8, 8}, 0x22222222u, uint32, cpu),
+      array(s4.begin(), {8, 4}, uint8),
+      std::nullopt,
+      16,
+      4,
+      "nvfp4",
+      std::nullopt,
+      float32,
+      cpu);
+  CHECK(all(isnan(slice(deq4, {0, 16}, {1, 32}, cpu), cpu), cpu).item<bool>());
+  CHECK(all(isnan(slice(deq4, {1, 0}, {2, 16}, cpu), cpu), cpu).item<bool>());
+  CHECK(astype(sum(isnan(deq4, cpu), cpu), int32, cpu).item<int>() == 32);
+}
+
+TEST_CASE("test empty arrays in the Highway CPU kernels") {
+  // Each input keeps a zero-sized dimension through the collapse, or ends
+  // in one, so the kernels' inner extent is 0. Each pair of checks forces
+  // one kernel, in this order: binary, copy, rms_norm, layer_norm.
+  StreamOrDevice cpu = Device::cpu;
+  auto a =
+      add(transpose(zeros({0, 3, 3, 3}, float32, cpu), {2, 1, 0, 3}, cpu),
+          zeros({3, 3, 0, 3}, float32, cpu),
+          cpu);
+  CHECK(a.shape() == Shape{3, 3, 0, 3});
+  CHECK(array_equal(a, zeros({3, 3, 0, 3}, float32, cpu), cpu).item<bool>());
+  auto c = contiguous(
+      transpose(zeros({0, 3, 3}, float32, cpu), {1, 0, 2}, cpu), false, cpu);
+  CHECK(c.shape() == Shape{3, 0, 3});
+  CHECK(array_equal(c, zeros({3, 0, 3}, float32, cpu), cpu).item<bool>());
+  auto x = zeros({3, 0}, float32, cpu);
+  auto r = fast::rms_norm(x, std::nullopt, 1e-5f, cpu);
+  CHECK(r.shape() == Shape{3, 0});
+  CHECK(array_equal(r, x, cpu).item<bool>());
+  auto l = fast::layer_norm(x, std::nullopt, std::nullopt, 1e-5f, cpu);
+  CHECK(l.shape() == Shape{3, 0});
+  CHECK(array_equal(l, x, cpu).item<bool>());
+}
+
+namespace {
+// Sets the buffer cache limit back. With the cache off, a copy freed before
+// its tasks run is freed for real, which ASan reports.
+struct RestoreCacheLimit {
+  size_t limit;
+  ~RestoreCacheLimit() {
+    set_cache_limit(limit);
+  }
+};
+} // namespace
+
+TEST_CASE("test norms of a non-contiguous input") {
+  // A transposed input makes the native norms copy it.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  // Values -3 to 3 keep every sum exact, so both layouts give the same bits.
+  auto input = [cpu]() {
+    auto v =
+        subtract(remainder(arange(6144, cpu), array(7), cpu), array(3), cpu);
+    return transpose(reshape(astype(v, float32, cpu), {64, 96}, cpu), cpu);
+  };
+  for (int i = 0; i < 50; i++) {
+    auto x = input();
+    CHECK(
+        array_equal(
+            fast::rms_norm(x, std::nullopt, 1e-5f, cpu),
+            fast::rms_norm(contiguous(x, false, cpu), std::nullopt, 1e-5f, cpu),
+            cpu)
+            .item<bool>());
+    auto y = input();
+    CHECK(array_equal(
+              fast::layer_norm(y, std::nullopt, std::nullopt, 1e-5f, cpu),
+              fast::layer_norm(
+                  contiguous(y, false, cpu),
+                  std::nullopt,
+                  std::nullopt,
+                  1e-5f,
+                  cpu),
+              cpu)
+              .item<bool>());
+  }
+}
+
+TEST_CASE("test norms of a strided weight and bias") {
+  // A strided weight or bias must match its contiguous copy. The broadcast
+  // repeats one element of w2, so a stride-1 read stays in w2.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  int width = 64;
+  auto v =
+      subtract(remainder(arange(8 * width, cpu), array(7), cpu), array(3), cpu);
+  auto x = reshape(astype(v, float32, cpu), {8, width}, cpu);
+  auto w2 = astype(
+      add(remainder(arange(2 * width, cpu), array(5), cpu), array(1), cpu),
+      float32,
+      cpu);
+  std::vector<array> params = {
+      broadcast_to(slice(w2, {1}, {2}, cpu), {width}, cpu),
+      slice(w2, {0}, {2 * width}, {2}, cpu)};
+  for (auto& p : params) {
+    CAPTURE(p.strides());
+    auto pc = contiguous(p, false, cpu);
+    CHECK(array_equal(
+              fast::rms_norm(x, p, 1e-5f, cpu),
+              fast::rms_norm(x, pc, 1e-5f, cpu),
+              cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              fast::layer_norm(x, p, std::nullopt, 1e-5f, cpu),
+              fast::layer_norm(x, pc, std::nullopt, 1e-5f, cpu),
+              cpu)
+              .item<bool>());
+    CHECK(array_equal(
+              fast::layer_norm(x, std::nullopt, p, 1e-5f, cpu),
+              fast::layer_norm(x, std::nullopt, pc, 1e-5f, cpu),
+              cpu)
+              .item<bool>());
+  }
+}
+
+TEST_CASE("test rope with strided offsets and freqs") {
+  // Strided offsets or freqs must match their contiguous copy. Each broadcast
+  // repeats one element of a wider array, so a stride-1 read stays in it.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  auto v = subtract(remainder(arange(1024, cpu), array(7), cpu), array(3), cpu);
+  auto x = reshape(astype(v, float32, cpu), {4, 2, 8, 16}, cpu);
+  std::vector<array> offsets = {
+      broadcast_to(slice(arange(8, cpu), {3}, {4}, cpu), {4}, cpu),
+      slice(arange(8, cpu), {0}, {8}, {2}, cpu)};
+  for (auto& off : offsets) {
+    CAPTURE(off.strides());
+    auto oc = contiguous(off, false, cpu);
+    CHECK(array_equal(
+              fast::rope(x, 16, false, 10000.0f, 1.0f, off, std::nullopt, cpu),
+              fast::rope(x, 16, false, 10000.0f, 1.0f, oc, std::nullopt, cpu),
+              cpu)
+              .item<bool>());
+  }
+  auto f2 = astype(
+      add(remainder(arange(16, cpu), array(5), cpu), array(1), cpu),
+      float32,
+      cpu);
+  std::vector<array> freqs = {
+      broadcast_to(slice(f2, {1}, {2}, cpu), {8}, cpu),
+      slice(f2, {0}, {16}, {2}, cpu)};
+  for (auto& f : freqs) {
+    CAPTURE(f.strides());
+    auto fc = contiguous(f, false, cpu);
+    CHECK(array_equal(
+              fast::rope(x, 16, false, std::nullopt, 1.0f, 0, f, cpu),
+              fast::rope(x, 16, false, std::nullopt, 1.0f, 0, fc, cpu),
+              cpu)
+              .item<bool>());
+  }
+}
+
+TEST_CASE("test sdpa with strided sinks") {
+  // Strided sinks must match their contiguous copy. The broadcast repeats one
+  // element of s8, so a stride-1 read stays in s8.
+  RestoreCacheLimit restore{set_cache_limit(0)};
+  StreamOrDevice cpu = Device::cpu;
+  auto input = [cpu](int start, int len) {
+    auto a = remainder(arange(start, start + 64 * len, cpu), array(7), cpu);
+    auto b = astype(subtract(a, array(3), cpu), float32, cpu);
+    return reshape(b, {1, 4, len, 16}, cpu);
+  };
+  auto q = input(0, 8);
+  auto k = input(1, 16);
+  auto v = input(2, 16);
+  auto s8 = astype(arange(-4, 4, cpu), float32, cpu);
+  std::vector<array> sinks = {
+      broadcast_to(slice(s8, {1}, {2}, cpu), {4}, cpu),
+      slice(s8, {0}, {8}, {2}, cpu)};
+  for (auto& sink : sinks) {
+    CAPTURE(sink.strides());
+    auto sc = contiguous(sink, false, cpu);
+    CHECK(array_equal(
+              fast::scaled_dot_product_attention(
+                  q, k, v, 0.0625f, "", std::nullopt, sink, false, cpu),
+              fast::scaled_dot_product_attention(
+                  q, k, v, 0.0625f, "", std::nullopt, sc, false, cpu),
+              cpu)
+              .item<bool>());
+  }
+}
+
+TEST_CASE("test qqmm with an unquantized weight") {
+  // An unquantized w must raise quantized.cpp's error, also with scales,
+  // which qqmm accepts since it checks scales only for a quantized w.
+  StreamOrDevice cpu = Device::cpu;
+  int K = 64;
+  int N = 32;
+  auto x = ones({1, K}, float32, cpu);
+  auto w = ones({N, K}, float32, cpu);
+  auto with_scales = qqmm(
+      x,
+      w,
+      zeros({N, K / 16}, uint8, cpu),
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      std::nullopt,
+      std::nullopt,
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(with_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+  auto with_global_scales = qqmm(
+      x,
+      w,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      array(1.0f),
+      array(1.0f),
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(with_global_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+  auto without_scales = qqmm(
+      x,
+      w,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      "nvfp4",
+      std::nullopt,
+      std::nullopt,
+      cpu);
+  CHECK_THROWS_WITH_AS(
+      sum(without_scales, cpu).item<float>(),
+      "[QQMatmul] NYI for the general case",
+      std::runtime_error);
+}
+
+TEST_CASE("test sdpa with keys and values of different lengths") {
+  // Values shorter than the keys must raise the composed path's error, on a
+  // shape the native kernel otherwise takes.
+  StreamOrDevice cpu = Device::cpu;
+  auto q = zeros({1, 4, 8, 16}, float32, cpu);
+  auto k = zeros({1, 4, 16, 16}, float32, cpu);
+  auto v = zeros({1, 4, 12, 16}, float32, cpu);
+  CHECK_THROWS_AS(
+      fast::scaled_dot_product_attention(
+          q, k, v, 0.0625f, "", std::nullopt, std::nullopt, false, cpu),
+      std::invalid_argument);
+}
