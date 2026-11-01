@@ -45,10 +45,11 @@ Focused GPU versus CPU FP32 comparisons cover:
 - Nonzero sliced offsets and reversed batch slices.
 - Existing unbatched and batched AddMM with nontrivial alpha/beta.
 - Existing basic Matmul contracts.
+- Eight outstanding asynchronous submissions, validating scratch lifetime and numerical results.
 
 Captured-shape comparisons use separate original and candidate libraries and compare saved outputs element by element. Relative RMS difference was approximately `0.000128656` (0.013%); maximum absolute difference was `0.0000038147`. This is floating-point reduction-order variation, not bitwise equivalence. It does not replace model-quality qualification.
 
-The final focused suite passes 74 assertions across five cases. The entire current core and shader build succeeded using Xcode's Metal toolchain. Earlier development-library tests are retained separately and are not substituted for the clean build.
+The focused suite passes 74 assertions across five cases, followed by a separate asynchronous-submission test passing 16 assertions. These are 90 passing assertions across retained runs, not a claim of one combined run. The entire current core and shader build succeeded using Xcode's Metal toolchain. Earlier development-library tests are retained separately and are not substituted for the clean build.
 
 ## Performance evidence and limits
 

@@ -103,3 +103,29 @@ TEST_CASE("Metal long batched matmul preserves sliced batch offsets") {
     CHECK(relative < .004f);
   }
 }
+
+TEST_CASE("Metal long batched matmul retains scratch across async submissions") {
+  if (!is_available(Device::gpu)) return;
+  random::seed(2029);
+  auto a = random::normal({2, 3, 17, 65537}, bfloat16, 0, .1);
+  auto b = random::normal({2, 1, 65537, 19}, bfloat16, 0, .1);
+  eval(a, b);
+  std::vector<array> inputs;
+  std::vector<array> outputs;
+  for (int i = 0; i < 8; ++i) {
+    inputs.push_back(multiply(a, array(1.0f + i * .125f, bfloat16)));
+    outputs.push_back(matmul(inputs.back(), b, Device::gpu));
+    async_eval(outputs.back());
+  }
+  eval(outputs);
+  for (int i = 0; i < 8; ++i) {
+    auto expected = matmul(astype(inputs[i], float32, Device::cpu),
+                           astype(b, float32, Device::cpu), Device::cpu);
+    auto actual = astype(outputs[i], float32);
+    eval(actual, expected);
+    float relative = divide(sqrt(mean(square(subtract(actual, expected)))),
+                            sqrt(mean(square(expected)))).item<float>();
+    CHECK(all(isfinite(actual)).item<bool>());
+    CHECK(relative < .004f);
+  }
+}
