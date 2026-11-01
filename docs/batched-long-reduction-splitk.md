@@ -32,3 +32,7 @@ Changes are confined to Metal matmul host dispatch and a focused regression. Exi
 ## Routing/performance follow-up
 
 Candidate routing is restricted to architecture generation14/variant s (M2 Max). On physical M5 native routing, eight representative matmul cases produce bit-identical outputs against the original library; largest case median51.78/51.91ms. With g14s routing override on the same M5, three eligible cases improve in this sample; five excluded cases produce bit-identical results. This does not establish M2 performance. One short excluded case had a noisy30% first comparison; five alternating-order pairs overlapped (baseline0.925–1.191ms, candidate0.906–1.200ms), without a consistent slowdown. Preserve the outlier rather than silently dropping it. Hardware counters/full model token throughput were not measured.
+
+## Clean current-source build
+
+The complete core at this branch built successfully with the Xcode Metal toolchain. Focused tests linked against that clean library and shader passed59assertions, including AddMM's existing unbatched split-K and batched routes. The full captured-shape comparison retained relative RMS0.000128656 and max absolute difference0.0000038147. Warm times in this clean-build sample were baseline141/138ms and candidate144/135ms: comparable, not evidence of a general speedup. Earlier development-library measurements remain separate and preserved. Physical M2 candidate qualification is still pending.

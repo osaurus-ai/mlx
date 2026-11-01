@@ -33,3 +33,23 @@ TEST_CASE("Metal long batched matmul preserves broadcast and transpose") {
     }
   }
 }
+
+TEST_CASE("Metal AddMM preserves existing long reduction routing") {
+  if (!is_available(Device::gpu)) return;
+  random::seed(919);
+  for (int batch : {1, 6}) {
+    auto a = random::normal({batch, 17, 65537}, bfloat16, 0, .1);
+    auto b = random::normal({batch, 65537, 19}, bfloat16, 0, .1);
+    auto c = random::normal({batch, 17, 19}, bfloat16, 0, .1);
+    eval(a, b, c);
+    auto actual = astype(addmm(c, a, b, .7f, .3f, Device::gpu), float32);
+    auto expected = addmm(astype(c, float32, Device::cpu),
+                         astype(a, float32, Device::cpu),
+                         astype(b, float32, Device::cpu), .7f, .3f, Device::cpu);
+    eval(actual, expected);
+    float relative = divide(sqrt(mean(square(subtract(actual, expected)))),
+                            sqrt(mean(square(expected)))).item<float>();
+    CHECK(all(isfinite(actual)).item<bool>());
+    CHECK(relative < .004f);
+  }
+}
