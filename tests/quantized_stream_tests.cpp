@@ -203,3 +203,69 @@ TEST_CASE("test affine quantized matmul casts preserve explicit stream") {
     }
   }
 }
+
+TEST_CASE("test qqmm on the cpu applies the nvfp4 global scales") {
+  auto s = Device::cpu;
+  // Values on the e2m1 grid. Any 16 consecutive i give all 15 indices, so
+  // each group holds 6 and -6, and all the steps below are exact.
+  auto grid = array(
+      {0.0f,
+       0.5f,
+       1.0f,
+       1.5f,
+       2.0f,
+       3.0f,
+       4.0f,
+       6.0f,
+       -0.5f,
+       -1.0f,
+       -1.5f,
+       -2.0f,
+       -3.0f,
+       -4.0f,
+       -6.0f});
+  auto values = [&](int size, int offset) {
+    auto i =
+        add(multiply(arange(size, int32, s), array(7), s), array(offset), s);
+    return take(grid, remainder(i, array(15), s), s);
+  };
+  auto v_x = reshape(values(32, 1), {1, 32}, s);
+  auto w = reshape(values(4 * 32, 4), {4, 32}, s);
+
+  struct Case {
+    std::string name;
+    array x;
+    std::optional<float> g_x;
+    std::optional<float> g_w;
+  };
+  // A: g_w = 336 makes the w block scales 8. B: x = v * 2^-12 has block
+  // scales that round to 0 without g_x. C: no global scales. D: float16 x;
+  // g_w = 10.5 makes the w block scales 256, too large for a float16 sum.
+  auto x_d = astype(slice(w, {0, 0}, {1, 32}, s), float16, s);
+  for (const auto& c :
+       {Case{"A", v_x, 2688.0f, 336.0f},
+        Case{"B", multiply(v_x, array(0x1p-12f), s), 0.65625f, 2688.0f},
+        Case{"C", v_x, std::nullopt, std::nullopt},
+        Case{"D", x_d, 2688.0f, 10.5f}}) {
+    CAPTURE(c.name);
+    const auto& x = c.x;
+    std::optional<array> g_x;
+    std::optional<array> g_w;
+    if (c.g_x) {
+      g_x = array(*c.g_x);
+      g_w = array(*c.g_w);
+    }
+    auto w_q = quantize(w, 16, 4, "nvfp4", g_w, s);
+    auto x_q = quantize(x, 16, 4, "nvfp4", g_x, s);
+    // The reference uses the op-level dequantize, not the qqmm kernels.
+    auto w_hat = dequantize(
+        w_q[0], w_q[1], std::nullopt, 16, 4, "nvfp4", g_w, float32, s);
+    auto x_hat = dequantize(
+        x_q[0], x_q[1], std::nullopt, 16, 4, "nvfp4", g_x, float32, s);
+    CHECK(array_equal(w_hat, w, false, s).item<bool>());
+    CHECK(array_equal(x_hat, x, false, s).item<bool>());
+    auto expected = matmul(x_hat, transpose(w_hat, s), s);
+    auto y = qqmm(x, w_q[0], w_q[1], 16, 4, "nvfp4", g_x, g_w, s);
+    CHECK(array_equal(y, expected, false, s).item<bool>());
+  }
+}
