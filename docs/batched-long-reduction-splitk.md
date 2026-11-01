@@ -2,7 +2,7 @@
 
 ## Status and claim boundary
 
-This is an open, unmerged candidate for a reproduced Metal `Impacting Interactivity` failure. It is not a certified crash fix or a general inference-speed improvement. Keep the PR open for later affected-hardware review. No further reporter capture is required for the current local work.
+This change addresses the long batched reduction implicated in a reproduced Metal `Impacting Interactivity` failure. The integration decision is to land the locally validated, narrowly gated route and consume it through Swift and Osaurus. Physical M2 Max crash prevention remains unconfirmed; it is not a general inference-speed claim. The retained correctness and regression checks govern landing, and affected-hardware follow-up is recorded separately. No further reporter capture or release is part of this integration.
 
 The candidate is limited to M2 Max. It preserves full context length, masks, softmax, model settings and cache contents. The separate Flint fused-attention failure is not resolved by a matrix-multiplication change.
 
