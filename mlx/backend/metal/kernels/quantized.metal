@@ -193,6 +193,37 @@
   instantiate_quantized_groups(6) \
   instantiate_quantized_groups(8)
 
+// affine_qmv_mma: the host names it
+// affine_qmv_mma_<type>_gs_<group_size>_b_<bits>_wk<wk>_bn<bn>_tm<tm>.
+#define instantiate_affine_qmv_mma(type, group_size, bits, wk, bn, tm) \
+  instantiate_kernel(                                                  \
+      "affine_qmv_mma_" #type "_gs_" #group_size "_b_" #bits "_wk" #wk "_bn" #bn "_tm" #tm, \
+      affine_qmv_mma,                                                  \
+      type,                                                            \
+      group_size,                                                      \
+      bits,                                                            \
+      wk,                                                              \
+      bn,                                                              \
+      tm)
+
+#define instantiate_affine_qmv_mma_tiles(type, group_size, bits) \
+  instantiate_affine_qmv_mma(type, group_size, bits, 4, 16, 1)   \
+  instantiate_affine_qmv_mma(type, group_size, bits, 4, 16, 2)   \
+  instantiate_affine_qmv_mma(type, group_size, bits, 4, 32, 1)
+
+#define instantiate_affine_qmv_mma_types(group_size, bits)          \
+  instantiate_affine_qmv_mma_tiles(float, group_size, bits)         \
+  instantiate_affine_qmv_mma_tiles(float16_t, group_size, bits)     \
+  instantiate_affine_qmv_mma_tiles(bfloat16_t, group_size, bits)
+
+#define instantiate_affine_qmv_mma_groups(bits) \
+  instantiate_affine_qmv_mma_types(128, bits)   \
+  instantiate_affine_qmv_mma_types(64, bits)    \
+  instantiate_affine_qmv_mma_types(32, bits)
+
+instantiate_affine_qmv_mma_groups(4)
+instantiate_affine_qmv_mma_groups(8)
+
 instantiate_quantized_all() // clang-format on
 
 // Qwen4-exp BF16 compute / F16 affine-metadata decode kernels. Limit the
