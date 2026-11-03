@@ -4435,6 +4435,743 @@ TEST_CASE("test bitwise shift operations") {
   CHECK(array_equal(right_shift_bool_result, full({4}, 0, uint8)).item<bool>());
 }
 
+namespace {
+
+bool shifts_equal(const array& p, const array& q) {
+  return array_equal(p, q).item<bool>();
+}
+
+// x << c and x >> c for every x of `x` and every c of `c`. want_left and
+// want_right hold the results, one row per x and one column per c. They follow
+// numpy: a count in [0, width of the dtype) is the usual shift, any other
+// count gives 0, or -1 for a right shift of a negative value. They were
+// computed from Python integers and compared with numpy. The same grid goes
+// through every kernel that has its own loop: contiguous, strided,
+// transposed, broadcast, and a 0-d operand.
+template <typename T>
+void check_shifts(
+    const std::vector<T>& x,
+    const std::vector<T>& c,
+    const std::vector<T>& want_left,
+    const std::vector<T>& want_right) {
+  const int nx = static_cast<int>(x.size());
+  const int nc = static_cast<int>(c.size());
+  const int n = nx * nc;
+  if (want_left.size() != x.size() * c.size() ||
+      want_right.size() != x.size() * c.size()) {
+    FAIL("the table does not match its values and counts");
+    return;
+  }
+  Dtype dtype = TypeToDtype<T>();
+  auto vec = [&](const std::vector<T>& v) {
+    return array(v.begin(), {static_cast<int>(v.size())}, dtype);
+  };
+
+  // every value against every count
+  std::vector<T> xs, cs, xp, cp;
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < nc; ++j) {
+      xs.push_back(x[i]);
+      cs.push_back(c[j]);
+      // the same pairs at the even places of arrays that hold other values at
+      // the odd places
+      xp.push_back(x[i]);
+      xp.push_back(x[0]);
+      cp.push_back(c[j]);
+      cp.push_back(c[0]);
+    }
+  }
+  array X = vec(xs);
+  array C = vec(cs);
+  array L = vec(want_left);
+  array R = vec(want_right);
+  CHECK(shifts_equal(left_shift(X, C), L));
+  CHECK(shifts_equal(right_shift(X, C), R));
+
+  // strided inputs
+  array Xs = slice(vec(xp), {0}, {2 * n}, {2});
+  array Cs = slice(vec(cp), {0}, {2 * n}, {2});
+  CHECK(shifts_equal(left_shift(Xs, Cs), L));
+  CHECK(shifts_equal(right_shift(Xs, Cs), R));
+
+  // transposed inputs
+  array X2 = reshape(X, {nx, nc});
+  array C2 = reshape(C, {nx, nc});
+  array L2 = reshape(L, {nx, nc});
+  array R2 = reshape(R, {nx, nc});
+  CHECK(shifts_equal(left_shift(transpose(X2), transpose(C2)), transpose(L2)));
+  CHECK(shifts_equal(right_shift(transpose(X2), transpose(C2)), transpose(R2)));
+
+  // a column of values against a row of counts
+  array xv = vec(x);
+  array cv = vec(c);
+  array xcol = reshape(xv, {nx, 1});
+  array crow = reshape(cv, {1, nc});
+  CHECK(shifts_equal(left_shift(xcol, crow), L2));
+  CHECK(shifts_equal(right_shift(xcol, crow), R2));
+
+  // all the values against one 0-d count at a time
+  for (int j = 0; j < nc; ++j) {
+    std::vector<T> col_left, col_right;
+    for (int i = 0; i < nx; ++i) {
+      col_left.push_back(want_left[i * nc + j]);
+      col_right.push_back(want_right[i * nc + j]);
+    }
+    array count(c[j], dtype);
+    CAPTURE(j);
+    CHECK(shifts_equal(left_shift(xv, count), vec(col_left)));
+    CHECK(shifts_equal(right_shift(xv, count), vec(col_right)));
+  }
+
+  // one 0-d value against all the counts at a time
+  for (int i = 0; i < nx; ++i) {
+    std::vector<T> row_left(
+        want_left.begin() + i * nc, want_left.begin() + (i + 1) * nc);
+    std::vector<T> row_right(
+        want_right.begin() + i * nc, want_right.begin() + (i + 1) * nc);
+    array value(x[i], dtype);
+    CAPTURE(i);
+    CHECK(shifts_equal(left_shift(value, cv), vec(row_left)));
+    CHECK(shifts_equal(right_shift(value, cv), vec(row_right)));
+  }
+
+  // 0-d against 0-d
+  int bad_left = 0;
+  int bad_right = 0;
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < nc; ++j) {
+      array value(x[i], dtype);
+      array count(c[j], dtype);
+      bad_left += left_shift(value, count).item<T>() != want_left[i * nc + j];
+      bad_right +=
+          right_shift(value, count).item<T>() != want_right[i * nc + j];
+    }
+  }
+  CHECK_EQ(bad_left, 0);
+  CHECK_EQ(bad_right, 0);
+}
+
+} // namespace
+
+TEST_CASE("test shift with counts outside the type width") {
+  // A shift count that is negative, or not smaller than the width of the
+  // type, is undefined behavior in C++. The result is defined as in numpy: 0
+  // for a left shift, and for a right shift 0, or -1 if the value is negative.
+  // A count in [0, width) is the usual shift. Under UBSan (USE_UBSAN=ON with
+  // UBSAN_OPTIONS=halt_on_error=1) this case also fails if a kernel does the
+  // shift with a count outside the width. The grids are longer than the widest
+  // SIMD loop (max_size in simd/accelerate_simd.h), so that the vector loop
+  // and the scalar tail both run where there is a vector loop.
+  const int8_t cmin = std::numeric_limits<int8_t>::min();
+  const int8_t cmax = std::numeric_limits<int8_t>::max();
+  const int16_t smin = std::numeric_limits<int16_t>::min();
+  const int16_t smax = std::numeric_limits<int16_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const uint8_t u8max = std::numeric_limits<uint8_t>::max();
+  const uint16_t u16max = std::numeric_limits<uint16_t>::max();
+  const uint32_t u32max = std::numeric_limits<uint32_t>::max();
+  const uint64_t u64max = std::numeric_limits<uint64_t>::max();
+
+  // int8: 6 values by 18 counts, one row of results per value
+  check_shifts<int8_t>(
+      {cmin, -1, 0, 1, 85, cmax},
+      {cmin, -33, -8, -1, 0, 1, 7, 8, 9, 17, 30, 31, 32, 33, 63, 64, 65, cmax},
+      {0, 0, 0, 0, cmin, 0,   0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, -1,   -2,  cmin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0,    0,   0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 1,    2,   cmin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 85,   -86, cmin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, cmax, -2,  cmin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {-1, -1, -1, -1, cmin, -64, -1, -1, -1, -1, -1, -1, -1, -1, -1,   -1,
+       -1, -1, -1, -1, -1,   -1,  -1, -1, -1, -1, -1, -1, -1, -1, -1,   -1,
+       -1, -1, -1, -1, 0,    0,   0,  0,  0,  0,  0,  0,  0,  0,  0,    0,
+       0,  0,  0,  0,  0,    0,   0,  0,  0,  0,  1,  0,  0,  0,  0,    0,
+       0,  0,  0,  0,  0,    0,   0,  0,  0,  0,  0,  0,  85, 42, 0,    0,
+       0,  0,  0,  0,  0,    0,   0,  0,  0,  0,  0,  0,  0,  0,  cmax, 63,
+       0,  0,  0,  0,  0,    0,   0,  0,  0,  0,  0,  0});
+
+  // int16: 6 values by 18 counts, one row of results per value
+  check_shifts<int16_t>(
+      {smin, -1, 0, 1, 21845, smax},
+      {smin,
+       -33,
+       -16,
+       -1,
+       0,
+       1,
+       9,
+       15,
+       16,
+       17,
+       30,
+       31,
+       32,
+       33,
+       63,
+       64,
+       65,
+       smax},
+      {0, 0, 0, 0, smin,  0,      0,      0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, -1,    -2,     -512,   smin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0,     0,      0,      0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 1,     2,      512,    smin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 21845, -21846, -22016, smin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, smax,  -2,     -512,   smin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {-1, -1, -1, -1, smin, -16384, -64,   -1,    -1, -1, -1,   -1,    -1, -1,
+       -1, -1, -1, -1, -1,   -1,     -1,    -1,    -1, -1, -1,   -1,    -1, -1,
+       -1, -1, -1, -1, -1,   -1,     -1,    -1,    0,  0,  0,    0,     0,  0,
+       0,  0,  0,  0,  0,    0,      0,     0,     0,  0,  0,    0,     0,  0,
+       0,  0,  1,  0,  0,    0,      0,     0,     0,  0,  0,    0,     0,  0,
+       0,  0,  0,  0,  0,    0,      21845, 10922, 42, 0,  0,    0,     0,  0,
+       0,  0,  0,  0,  0,    0,      0,     0,     0,  0,  smax, 16383, 63, 0,
+       0,  0,  0,  0,  0,    0,      0,     0,     0,  0});
+
+  // int32: 6 values by 13 counts, one row of results per value
+  check_shifts<int32_t>(
+      {imin, -1, 0, 1, 1431655765, imax},
+      {imin, -33, -32, -1, 0, 1, 31, 32, 33, 63, 64, 65, imax},
+      {0, 0, 0, 0, imin,       0,           0,    0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, -1,         -2,          imin, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0,          0,           0,    0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 1,          2,           imin, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 1431655765, -1431655766, imin, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, imax,       -2,          imin, 0, 0, 0, 0, 0, 0},
+      {-1, -1, -1, -1, imin,       -1073741824, -1, -1, -1, -1, -1, -1, -1,
+       -1, -1, -1, -1, -1,         -1,          -1, -1, -1, -1, -1, -1, -1,
+       0,  0,  0,  0,  0,          0,           0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  1,          0,           0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  1431655765, 715827882,   0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  imax,       1073741823,  0,  0,  0,  0,  0,  0,  0});
+
+  // int64: 6 values by 15 counts, one row of results per value
+  check_shifts<int64_t>(
+      {lmin, -1, 0, 1, 6148914691236517205, lmax},
+      {lmin,
+       -64,
+       -33,
+       -1,
+       0,
+       1,
+       31,
+       32,
+       33,
+       63,
+       64,
+       65,
+       4294967296,
+       4294967297,
+       lmax},
+      {0,
+       0,
+       0,
+       0,
+       lmin,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       -1,
+       -2,
+       -2147483648,
+       -4294967296,
+       -8589934592,
+       lmin,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       2,
+       2147483648,
+       4294967296,
+       8589934592,
+       lmin,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       6148914691236517205,
+       -6148914691236517206,
+       -6148914691952345088,
+       6148914689804861440,
+       -6148914694099828736,
+       lmin,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       lmax,
+       -2,
+       -2147483648,
+       -4294967296,
+       -8589934592,
+       lmin,
+       0,
+       0,
+       0,
+       0,
+       0},
+      {-1,
+       -1,
+       -1,
+       -1,
+       lmin,
+       -4611686018427387904,
+       -4294967296,
+       -2147483648,
+       -1073741824,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       -1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       6148914691236517205,
+       3074457345618258602,
+       2863311530,
+       1431655765,
+       715827882,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       lmax,
+       4611686018427387903,
+       4294967295,
+       2147483647,
+       1073741823,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0});
+
+  // uint8: 5 values by 15 counts, one row of results per value
+  check_shifts<uint8_t>(
+      {0, 1, 85, 128, u8max},
+      {0, 1, 7, 8, 9, 17, 30, 31, 32, 33, 63, 64, 65, 128, u8max},
+      {0, 0, 0, 0,     0,   0,   0, 0,   0, 0, 0, 0,  0,   0,   0, 1, 2, 128, 0,
+       0, 0, 0, 0,     0,   0,   0, 0,   0, 0, 0, 85, 170, 128, 0, 0, 0, 0,   0,
+       0, 0, 0, 0,     0,   0,   0, 128, 0, 0, 0, 0,  0,   0,   0, 0, 0, 0,   0,
+       0, 0, 0, u8max, 254, 128, 0, 0,   0, 0, 0, 0,  0,   0,   0, 0, 0, 0},
+      {0, 0, 0, 0,     0,   0, 0, 0,   0,  0, 0, 0,  0,  0, 0, 1, 0, 0, 0,
+       0, 0, 0, 0,     0,   0, 0, 0,   0,  0, 0, 85, 42, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0,     0,   0, 0, 128, 64, 1, 0, 0,  0,  0, 0, 0, 0, 0, 0,
+       0, 0, 0, u8max, 127, 1, 0, 0,   0,  0, 0, 0,  0,  0, 0, 0, 0, 0});
+
+  // uint16: 5 values by 15 counts, one row of results per value
+  check_shifts<uint16_t>(
+      {0, 1, 21845, 32768, u16max},
+      {0, 1, 9, 15, 16, 17, 30, 31, 32, 33, 63, 64, 65, 32768, u16max},
+      {0,      0,     0,     0,     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       1,      2,     512,   32768, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       21845,  43690, 43520, 32768, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       32768,  0,     0,     0,     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       u16max, 65534, 65024, 32768, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0,      0,     0,   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       1,      0,     0,   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       21845,  10922, 42,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       32768,  16384, 64,  1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       u16max, 32767, 127, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+
+  // uint32: 5 values by 10 counts, one row of results per value
+  check_shifts<uint32_t>(
+      {0, 1, 1431655765, 2147483648, u32max},
+      {0, 1, 31, 32, 33, 63, 64, 65, 2147483648, u32max},
+      {0,          0,          0,          0, 0, 0, 0, 0, 0, 0,
+       1,          2,          2147483648, 0, 0, 0, 0, 0, 0, 0,
+       1431655765, 2863311530, 2147483648, 0, 0, 0, 0, 0, 0, 0,
+       2147483648, 0,          0,          0, 0, 0, 0, 0, 0, 0,
+       u32max,     4294967294, 2147483648, 0, 0, 0, 0, 0, 0, 0},
+      {0,          0,          0, 0, 0, 0, 0, 0, 0, 0,
+       1,          0,          0, 0, 0, 0, 0, 0, 0, 0,
+       1431655765, 715827882,  0, 0, 0, 0, 0, 0, 0, 0,
+       2147483648, 1073741824, 1, 0, 0, 0, 0, 0, 0, 0,
+       u32max,     2147483647, 1, 0, 0, 0, 0, 0, 0, 0});
+
+  // uint64: 5 values by 12 counts, one row of results per value
+  check_shifts<uint64_t>(
+      {0, 1, 6148914691236517205, 9223372036854775808ull, u64max},
+      {0,
+       1,
+       31,
+       32,
+       33,
+       63,
+       64,
+       65,
+       4294967296,
+       4294967297,
+       9223372036854775808ull,
+       u64max},
+      {0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       2,
+       2147483648,
+       4294967296,
+       8589934592,
+       9223372036854775808ull,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       6148914691236517205,
+       12297829382473034410ull,
+       12297829381757206528ull,
+       6148914689804861440,
+       12297829379609722880ull,
+       9223372036854775808ull,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       9223372036854775808ull,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       u64max,
+       18446744073709551614ull,
+       18446744071562067968ull,
+       18446744069414584320ull,
+       18446744065119617024ull,
+       9223372036854775808ull,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0},
+      {0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       6148914691236517205,
+       3074457345618258602,
+       2863311530,
+       1431655765,
+       715827882,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       9223372036854775808ull,
+       4611686018427387904,
+       4294967296,
+       2147483648,
+       1073741824,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       u64max,
+       9223372036854775807,
+       8589934591,
+       4294967295,
+       2147483647,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0});
+}
+
+namespace {
+
+// The counts of the compiled function below. They are read when the function
+// is traced, once for each dtype.
+std::vector<int64_t> shift_constants;
+
+// Each output shifts its own input by a constant count (the constant is
+// written into the generated kernel) and ors the result with 0, so that the
+// shift is fused with another operation. Separate inputs and one chain per
+// output, because a node with several consumers is not fused.
+template <bool Left>
+std::vector<array> shift_by_constants(const std::vector<array>& in) {
+  std::vector<array> out;
+  for (size_t k = 0; k < in.size(); ++k) {
+    array count(shift_constants[k], in[k].dtype());
+    array zero(0, in[k].dtype());
+    array shifted = Left ? left_shift(in[k], count) : right_shift(in[k], count);
+    out.push_back(bitwise_or(shifted, zero));
+  }
+  return out;
+}
+
+template <typename T>
+void check_compiled_shifts(
+    const std::vector<T>& v,
+    const std::vector<int64_t>& counts,
+    const std::vector<std::vector<T>>& want_left,
+    const std::vector<std::vector<T>>& want_right) {
+  Dtype dtype = TypeToDtype<T>();
+  shift_constants = counts;
+  for (bool is_left : {true, false}) {
+    auto compiled = is_left ? compile(shift_by_constants<true>)
+                            : compile(shift_by_constants<false>);
+    std::vector<array> inputs;
+    for (size_t k = 0; k < counts.size(); ++k) {
+      inputs.push_back(array(v.begin(), {static_cast<int>(v.size())}, dtype));
+    }
+    auto out = compiled(inputs);
+    REQUIRE_EQ(out.size(), counts.size());
+    const auto& want = is_left ? want_left : want_right;
+    for (size_t k = 0; k < counts.size(); ++k) {
+      CAPTURE(k);
+      array expected(
+          want[k].begin(), {static_cast<int>(want[k].size())}, dtype);
+      CHECK(shifts_equal(out[k], expected));
+    }
+  }
+}
+
+} // namespace
+
+TEST_CASE("test compiled shift with counts outside the type width") {
+  // The same rule for a count that is a constant of a compiled function: the
+  // constant is part of the generated kernel, which the C++ compiler sees, so
+  // it may fold a shift by a count outside the width.
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const uint32_t u32max = std::numeric_limits<uint32_t>::max();
+  const uint64_t u64max = std::numeric_limits<uint64_t>::max();
+
+  // int32: 9 constant counts, expected results per count (rows) and value
+  // (columns)
+  check_compiled_shifts<int32_t>(
+      {imin, -1, 1, 3, 1431655765, imax},
+      {32, 33, 63, 64, 65, 100, -1, -32, -33},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}},
+      {{-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0}});
+
+  // int64: 9 constant counts, expected results per count (rows) and value
+  // (columns)
+  check_compiled_shifts<int64_t>(
+      {lmin, -1, 1, 3, 6148914691236517205, lmax},
+      {64, 65, 127, 128, 129, 100, -1, -64, -65},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}},
+      {{-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0},
+       {-1, -1, 0, 0, 0, 0}});
+
+  // uint32: 6 constant counts, expected results per count (rows) and value
+  // (columns)
+  check_compiled_shifts<uint32_t>(
+      {0, 1, 3, 1431655765, 2147483648, u32max},
+      {32, 33, 63, 64, 65, 100},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}});
+
+  // uint64: 6 constant counts, expected results per count (rows) and value
+  // (columns)
+  check_compiled_shifts<uint64_t>(
+      {0, 1, 3, 6148914691236517205, 9223372036854775808ull, u64max},
+      {64, 65, 127, 128, 129, 100},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}},
+      {{0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0}});
+}
+
 TEST_CASE("test conv_transpose1d with output_padding") {
   auto in = array({1.0, 2.0, 3.0}, {1, 1, 3});
   auto wt = array({1.0, 1.0, 1.0}, {1, 1, 3});
