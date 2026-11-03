@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <sstream>
 #include <type_traits>
@@ -257,9 +258,15 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
                     num_keys,
                     kshape = keys.shape(),
                     kstrides = keys.strides()]() mutable {
+    // The bits of key i start at i * bytes_per_key, which need not be 4-byte
+    // aligned for 1 and 2 byte outputs, so words are written with memcpy: it is
+    // defined at any alignment and compiles to a single store on arm64 and x86.
+    auto store = [](char* cptr, size_t loc, uint32_t v) {
+      std::memcpy(cptr + 4 * loc, &v, sizeof(v));
+    };
     auto copy_remaining = [&](char* cptr, size_t loc, uint32_t v) {
       if (4 * loc + 4 <= bytes_per_key) {
-        reinterpret_cast<uint32_t*>(cptr)[loc] = v;
+        store(cptr, loc, v);
       } else {
         std::copy(
             reinterpret_cast<char*>(&v),
@@ -272,7 +279,6 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto half_size = out_skip / 2;
     bool even = out_skip % 2 == 0;
     for (int i = 0; i < num_keys; ++i, cptr += bytes_per_key) {
-      auto ptr = reinterpret_cast<uint32_t*>(cptr);
       // Get ith key
       auto kidx = 2 * i;
       auto k1_elem = elem_to_loc(kidx, kshape, kstrides);
@@ -281,12 +287,13 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
 
       std::pair<uintptr_t, uintptr_t> count{0, half_size + !even};
       for (; count.first + 1 < half_size; count.first++, count.second++) {
-        std::tie(ptr[count.first], ptr[count.second]) =
-            random::threefry2x32_hash(key, count);
+        auto rb = random::threefry2x32_hash(key, count);
+        store(cptr, count.first, rb.first);
+        store(cptr, count.second, rb.second);
       }
       if (count.first < half_size) {
         auto rb = random::threefry2x32_hash(key, count);
-        ptr[count.first++] = rb.first;
+        store(cptr, count.first++, rb.first);
         copy_remaining(cptr, count.second, rb.second);
       }
       if (!even) {
