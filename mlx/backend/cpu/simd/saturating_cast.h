@@ -54,6 +54,19 @@ constexpr To saturating_cast(From v) {
       constexpr F min_f = static_cast<F>(std::numeric_limits<To>::lowest());
       To r = static_cast<To>(std::fmax(std::fmin(x, max_f), min_f));
       return x == x ? r : To(0);
+    } else if constexpr (
+        inline_fmin_fmax &&
+        !(std::is_same_v<From, float16_t> && std::is_signed_v<To>)) {
+      // Clamp to the largest F below 2**digits, which converts exactly. This
+      // is not faster for float16 to a signed type, so that keeps the compares.
+      constexpr int d = std::numeric_limits<To>::digits;
+      constexpr F hi = exact_pow2<F>(d);
+      constexpr F below_hi =
+          hi - exact_pow2<F>(d - std::numeric_limits<F>::digits);
+      constexpr F lo = std::is_signed_v<To> ? -hi : F(0);
+      F y = x == x ? x : F(0);
+      To r = static_cast<To>(std::fmax(std::fmin(y, below_hi), lo));
+      return (x >= hi) ? std::numeric_limits<To>::max() : r;
     } else {
       // Powers of two are exact in F. The maximum of To is not (INT32_MAX
       // rounds to 2**31 in float).
