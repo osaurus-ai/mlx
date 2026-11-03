@@ -279,7 +279,7 @@ void float_reduction(
     array& out,
     const std::vector<int>& axes,
     U init) {
-  using AccT = ReductionAccumulator<T, U, Op>::type;
+  using AccT = typename ReductionAccumulator<T, U, Op>::type;
   if constexpr (std::is_same_v<AccT, U>) {
     reduction_op<T, U, Op>(x, out, axes, init);
   } else {
