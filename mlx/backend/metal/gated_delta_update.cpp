@@ -76,14 +76,18 @@ void GatedDeltaUpdate::eval_gpu(
   int Hv = v.shape(2);
   int Dv = v.shape(3);
 
+  // The NAX kernel computes float32 inputs in TF32, so it needs TF32 enabled
+  // or a 16-bit input.
+  const bool nax = metal::is_nax_available() &&
+      (env::enable_tf32() || q.dtype() != float32);
   int C = 1;
   int threshold = env::get_var("GATED_DELTA_THRESH", 16);
   if (T >= threshold)
-    C = metal::is_nax_available() ? 16 : 8;
+    C = nax ? 16 : 8;
 
   C = env::get_var("GATED_DELTA_CHUNK", C);
 
-  if (!metal::is_nax_available())
+  if (!nax)
     C = std::min(C, 8); // override in case nax is not available.
 
   // A gate per channel ([B, T, Hv, Dk]) is read only by the sequential
