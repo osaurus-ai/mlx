@@ -4,9 +4,12 @@
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <numeric>
+#include <sstream>
 
 #include "doctest/doctest.h"
 
+#include "mlx/backend/cpu/copy.h"
+#include "mlx/backend/cpu/simd/base_simd.h"
 #include "mlx/backend/cuda/cuda.h"
 #include "mlx/mlx.h"
 
@@ -2851,6 +2854,358 @@ TEST_CASE("test complex ops") {
     CHECK_EQ(sum(x).item<complex64_t>(), complex64_t{1, 1});
     CHECK_EQ(prod(x).item<complex64_t>(), complex64_t{0, 0});
   }
+}
+
+namespace {
+
+template <typename T>
+struct ComplexCastRow {
+  float re;
+  T out;
+};
+
+std::string dtype_name(Dtype dtype) {
+  std::ostringstream os;
+  os << dtype;
+  return os.str();
+}
+
+// Each row with several imaginary parts, which must not change the result.
+// 256 values or more, so that a 4 x 4 x 4 x 4 slice is possible.
+template <typename T>
+std::pair<std::vector<complex64_t>, std::vector<T>> complex_cast_values(
+    const std::vector<ComplexCastRow<T>>& rows) {
+  std::vector<complex64_t> in;
+  std::vector<T> out;
+  for (float im : {0.0f, 2.5f, -1e30f, NAN, INFINITY}) {
+    for (const auto& r : rows) {
+      in.push_back(complex64_t{r.re, im});
+      out.push_back(r.out);
+    }
+  }
+  size_t m = in.size();
+  size_t n = (m + 255) / 256 * 256;
+  for (size_t i = m; i < n; ++i) {
+    in.push_back(in[i % m]);
+    out.push_back(out[i % m]);
+  }
+  return {in, out};
+}
+
+template <typename T>
+void check_complex_to_int(const std::vector<ComplexCastRow<T>>& rows) {
+  auto dtype = TypeToDtype<T>();
+  INFO("from complex64 to " << dtype_name(dtype));
+  auto equal = [](const array& a, const array& b) {
+    return array_equal(a, b).item<bool>();
+  };
+  auto [in, out] = complex_cast_values(rows);
+  int n = in.size();
+  auto x = array(in.begin(), {n}, complex64);
+  auto expected = array(out.begin(), {n}, dtype);
+
+  // Contiguous, then strided with gaps in 1, 2 and 4 axes
+  CHECK(equal(astype(x, dtype, Device::cpu), expected));
+  CHECK(equal(
+      astype(slice(x, {0}, {n}, {2}), dtype, Device::cpu),
+      slice(expected, {0}, {n}, {2})));
+  auto x2 = reshape(x, {n / 4, 4});
+  auto e2 = reshape(expected, {n / 4, 4});
+  CHECK(equal(
+      astype(slice(x2, {0, 0}, {n / 4, 4}, {2, 2}), dtype, Device::cpu),
+      slice(e2, {0, 0}, {n / 4, 4}, {2, 2})));
+  auto x4 = reshape(x, {n / 64, 4, 4, 4});
+  auto e4 = reshape(expected, {n / 64, 4, 4, 4});
+  CHECK(equal(
+      astype(
+          slice(x4, {0, 0, 0, 0}, {n / 64, 4, 4, 4}, {2, 2, 2, 2}),
+          dtype,
+          Device::cpu),
+      slice(e4, {0, 0, 0, 0}, {n / 64, 4, 4, 4}, {2, 2, 2, 2})));
+
+  // 0-d, the Simd constructors, and the copy kernels that no public op
+  // reaches with two types (CopyType::Scalar and a 0-d CopyType::General)
+  auto stream = default_stream(Device::cpu);
+  bool scalars_ok = true;
+  bool simd_ok = true;
+  bool fill_ok = true;
+  bool zero_d_ok = true;
+  for (int i = 0; i < n; ++i) {
+    auto s = array(in[i]);
+    scalars_ok &= astype(s, dtype, Device::cpu).template item<T>() == out[i];
+    simd_ok &=
+        simd::Simd<T, 1>(simd::Simd<complex64_t, 1>(in[i])).value == out[i];
+    simd_ok &= simd::Simd<T, 1>(in[i]).value == out[i];
+    eval(s);
+    array filled(Shape{3}, dtype, nullptr, {});
+    filled.set_data(allocator::malloc(filled.nbytes()));
+    copy_cpu_inplace(s, filled, CopyType::Scalar, stream);
+    array single(Shape{}, dtype, nullptr, {});
+    single.set_data(allocator::malloc(single.nbytes()));
+    copy_cpu_inplace(
+        s,
+        single,
+        Shape{},
+        Strides{},
+        Strides{},
+        0,
+        0,
+        CopyType::General,
+        stream);
+    synchronize(stream);
+    fill_ok &= filled.data<T>()[0] == out[i] && filled.data<T>()[2] == out[i];
+    zero_d_ok &= single.data<T>()[0] == out[i];
+  }
+  CHECK(scalars_ok);
+  CHECK(simd_ok);
+  CHECK(fill_ok);
+  CHECK(zero_d_ok);
+}
+
+template <typename T>
+std::vector<array> complex_cast_to(const std::vector<array>& inputs) {
+  auto x = add(inputs[0], array(complex64_t{0.0f, 0.0f}), Device::cpu);
+  return {astype(x, TypeToDtype<T>(), Device::cpu)};
+}
+
+template <typename T>
+void check_compiled_complex_to_int(const std::vector<ComplexCastRow<T>>& rows) {
+  auto dtype = TypeToDtype<T>();
+  INFO("from complex64 to " << dtype_name(dtype));
+  auto [in, out] = complex_cast_values(rows);
+  int n = in.size();
+  auto x = array(in.begin(), {n}, complex64);
+  auto expected = array(out.begin(), {n}, dtype);
+  auto equal = [](const array& a, const array& b) {
+    return array_equal(a, b).item<bool>();
+  };
+  auto f = compile(complex_cast_to<T>);
+  CHECK(equal(f({x})[0], expected));
+  CHECK(equal(f({slice(x, {0}, {n}, {2})})[0], slice(expected, {0}, {n}, {2})));
+}
+
+// The input and the expected output for each integer type: the real part,
+// truncated toward zero, the maximum or the minimum if it does not fit, and
+// 0 for NaN, as on the GPU.
+template <typename F>
+void for_complex_cast_rows(F check) {
+  std::vector<ComplexCastRow<int8_t>> int8_rows = {
+      {NAN, 0},
+      {INFINITY, 127},
+      {-INFINITY, -128},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, -1},
+      {300.5f, 127},
+      {-300.5f, -128},
+      {10000000000.0f, 127},
+      {-10000000000.0f, -128},
+      {3.4e+38f, 127},
+      {-3.4e+38f, -128},
+      {127.99999f, 127},
+      {128.0f, 127},
+      {128.00002f, 127},
+      {127.0f, 127},
+      {127.5f, 127},
+      {-128.00002f, -128},
+      {-128.0f, -128},
+      {-127.99999f, -127},
+      {-128.5f, -128},
+      {-129.0f, -128},
+  };
+  std::vector<ComplexCastRow<uint8_t>> uint8_rows = {
+      {NAN, 0},
+      {INFINITY, 255},
+      {-INFINITY, 0},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, 0},
+      {300.5f, 255},
+      {-300.5f, 0},
+      {10000000000.0f, 255},
+      {-10000000000.0f, 0},
+      {3.4e+38f, 255},
+      {-3.4e+38f, 0},
+      {255.99998f, 255},
+      {256.0f, 255},
+      {256.00003f, 255},
+      {255.0f, 255},
+      {255.5f, 255},
+      {-1.0f, 0},
+      {-0.99999994f, 0},
+      {-1e+30f, 0},
+  };
+  std::vector<ComplexCastRow<int16_t>> int16_rows = {
+      {NAN, 0},
+      {INFINITY, 32767},
+      {-INFINITY, -32768},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, -1},
+      {300.5f, 300},
+      {-300.5f, -300},
+      {10000000000.0f, 32767},
+      {-10000000000.0f, -32768},
+      {3.4e+38f, 32767},
+      {-3.4e+38f, -32768},
+      {32767.998f, 32767},
+      {32768.0f, 32767},
+      {32768.004f, 32767},
+      {32767.0f, 32767},
+      {32767.5f, 32767},
+      {-32768.004f, -32768},
+      {-32768.0f, -32768},
+      {-32767.998f, -32767},
+      {-32768.5f, -32768},
+      {-32769.0f, -32768},
+  };
+  std::vector<ComplexCastRow<uint16_t>> uint16_rows = {
+      {NAN, 0},
+      {INFINITY, 65535},
+      {-INFINITY, 0},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, 0},
+      {300.5f, 300},
+      {-300.5f, 0},
+      {10000000000.0f, 65535},
+      {-10000000000.0f, 0},
+      {3.4e+38f, 65535},
+      {-3.4e+38f, 0},
+      {65535.996f, 65535},
+      {65536.0f, 65535},
+      {65536.01f, 65535},
+      {65535.0f, 65535},
+      {65535.5f, 65535},
+      {-1.0f, 0},
+      {-0.99999994f, 0},
+      {-1e+30f, 0},
+  };
+  std::vector<ComplexCastRow<int32_t>> int32_rows = {
+      {NAN, 0},
+      {INFINITY, 2147483647},
+      {-INFINITY, INT32_MIN},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, -1},
+      {300.5f, 300},
+      {-300.5f, -300},
+      {10000000000.0f, 2147483647},
+      {-10000000000.0f, INT32_MIN},
+      {3.4e+38f, 2147483647},
+      {-3.4e+38f, INT32_MIN},
+      {2147483520.0f, 2147483520},
+      {2147483648.0f, 2147483647},
+      {2147483904.0f, 2147483647},
+      {-2147483904.0f, INT32_MIN},
+      {-2147483648.0f, INT32_MIN},
+      {-2147483520.0f, -2147483520},
+  };
+  std::vector<ComplexCastRow<uint32_t>> uint32_rows = {
+      {NAN, 0},
+      {INFINITY, 4294967295},
+      {-INFINITY, 0},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, 0},
+      {300.5f, 300},
+      {-300.5f, 0},
+      {10000000000.0f, 4294967295},
+      {-10000000000.0f, 0},
+      {3.4e+38f, 4294967295},
+      {-3.4e+38f, 0},
+      {4294967040.0f, 4294967040},
+      {4294967296.0f, 4294967295},
+      {4294967808.0f, 4294967295},
+      {-1.0f, 0},
+      {-0.99999994f, 0},
+      {-1e+30f, 0},
+  };
+  std::vector<ComplexCastRow<int64_t>> int64_rows = {
+      {NAN, 0},
+      {INFINITY, INT64_MAX},
+      {-INFINITY, INT64_MIN},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, -1},
+      {300.5f, 300},
+      {-300.5f, -300},
+      {10000000000.0f, 10000000000LL},
+      {-10000000000.0f, -10000000000LL},
+      {3.4e+38f, INT64_MAX},
+      {-3.4e+38f, INT64_MIN},
+      {9223371487098961920.0f, 9223371487098961920LL},
+      {9223372036854775808.0f, INT64_MAX},
+      {9223373136366403584.0f, INT64_MAX},
+      {-9223373136366403584.0f, INT64_MIN},
+      {-9223372036854775808.0f, INT64_MIN},
+      {-9223371487098961920.0f, -9223371487098961920LL},
+  };
+  std::vector<ComplexCastRow<uint64_t>> uint64_rows = {
+      {NAN, 0},
+      {INFINITY, UINT64_MAX},
+      {-INFINITY, 0},
+      {0.0f, 0},
+      {-0.0f, 0},
+      {0.5f, 0},
+      {-0.5f, 0},
+      {1.5f, 1},
+      {-1.5f, 0},
+      {300.5f, 300},
+      {-300.5f, 0},
+      {10000000000.0f, 10000000000},
+      {-10000000000.0f, 0},
+      {3.4e+38f, UINT64_MAX},
+      {-3.4e+38f, 0},
+      {18446742974197923840.0f, 18446742974197923840ULL},
+      {18446744073709551616.0f, UINT64_MAX},
+      {18446746272732807168.0f, UINT64_MAX},
+      {-1.0f, 0},
+      {-0.99999994f, 0},
+      {-1e+30f, 0},
+  };
+  check(int8_rows);
+  check(uint8_rows);
+  check(int16_rows);
+  check(uint16_rows);
+  check(int32_rows);
+  check(uint32_rows);
+  check(int64_rows);
+  check(uint64_rows);
+}
+
+} // namespace
+
+TEST_CASE("test astype from complex64 to integer uses the real part") {
+  // A complex64 converted to an integer used to be a plain conversion of the
+  // real part, which is undefined in C++ when the value does not fit.
+  for_complex_cast_rows([](const auto& rows) { check_complex_to_int(rows); });
+}
+
+TEST_CASE("test compiled astype from complex64 to integer uses the real part") {
+  for_complex_cast_rows(
+      [](const auto& rows) { check_compiled_complex_to_int(rows); });
 }
 
 TEST_CASE("test as_strided op") {

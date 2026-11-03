@@ -4,6 +4,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "mlx/types/complex.h"
 #include "mlx/types/half_types.h"
 
 namespace mlx::core::simd {
@@ -37,6 +38,7 @@ constexpr F exact_pow2(int n) {
 // float64) converted to an integer type other than bool is defined for every
 // value: NaN gives 0, a value that is too large or too small gives the
 // maximum or the minimum of To, and other values are truncated toward zero.
+// A complex value converted to such a type uses its real part.
 template <typename To, typename From>
 constexpr To saturating_cast(From v) {
   if constexpr (is_float_to_int_cast_v<To, From>) {
@@ -79,6 +81,9 @@ constexpr To saturating_cast(From v) {
       r = (x <= lo) ? std::numeric_limits<To>::lowest() : r;
       return r;
     }
+  } else if constexpr (
+      is_complex<From> && std::is_integral_v<To> && !std::is_same_v<To, bool>) {
+    return saturating_cast<To>(v.real());
   } else {
     return static_cast<To>(v);
   }
