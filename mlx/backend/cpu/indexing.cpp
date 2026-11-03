@@ -31,17 +31,19 @@ struct None {
     (*y) = x;
   }
 };
+
+// Integer sums and products wrap around (see simd::wrapping).
 struct Sum {
   template <typename T>
   void operator()(T x, T* y) {
-    (*y) += x;
+    (*y) = simd::wrapping(std::plus<>(), *y, x);
   }
 };
 
 struct Prod {
   template <typename T>
   void operator()(T x, T* y) {
-    (*y) *= x;
+    (*y) = simd::wrapping(std::multiplies<>(), *y, x);
   }
 };
 

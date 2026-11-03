@@ -392,10 +392,14 @@ struct MinReduce {
   };
 };
 
+// The scalar operators of SumReduce and ProdReduce take the elements after the
+// last full vector, add up the totals of separate contiguous segments, and do
+// the general (for example broadcast) reductions. Integer sums and products
+// wrap around there too (see simd::wrapping).
 struct SumReduce {
   template <typename T, typename U>
   U operator()(U y, T x) {
-    return x + y;
+    return simd::wrapping(std::plus<>(), x, y);
   };
 
   template <int N, typename T, typename U>
@@ -412,7 +416,7 @@ struct SumReduce {
 struct ProdReduce {
   template <typename T, typename U>
   U operator()(U y, T x) {
-    return x * y;
+    return simd::wrapping(std::multiplies<>(), x, y);
   };
 
   template <int N, typename T, typename U>

@@ -2057,6 +2057,292 @@ TEST_CASE("test arithmetic binary ops") {
   CHECK_EQ(logaddexp(x, y).item<complex64_t>(), complex64_t{1, 1});
 }
 
+namespace {
+
+template <typename T>
+struct WrapRow {
+  T a, b, sum, diff, prod;
+};
+
+// add, subtract and multiply of the rows, which are repeated `reps` times
+template <typename T>
+void check_wrapping(const std::vector<WrapRow<T>>& rows, int reps = 1) {
+  std::vector<T> a, b, sum, diff, prod;
+  for (int i = 0; i < reps; ++i) {
+    for (const auto& r : rows) {
+      a.push_back(r.a);
+      b.push_back(r.b);
+      sum.push_back(r.sum);
+      diff.push_back(r.diff);
+      prod.push_back(r.prod);
+    }
+  }
+  Dtype dtype = TypeToDtype<T>();
+  Shape shape{static_cast<int>(a.size())};
+  auto make = [&](const std::vector<T>& v) {
+    return array(v.begin(), shape, dtype);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(a);
+  auto y = make(b);
+  CHECK(equal(add(x, y), make(sum)));
+  CHECK(equal(subtract(x, y), make(diff)));
+  CHECK(equal(multiply(x, y), make(prod)));
+}
+
+} // namespace
+
+TEST_CASE("test integer arithmetic wraps around") {
+  // Integer add, subtract and multiply wrap around on overflow, as in numpy.
+  // Signed overflow is undefined in C++, so the scalar kernels do the
+  // arithmetic in unsigned types: this case fails under UBSan (USE_UBSAN=ON
+  // with UBSAN_OPTIONS=halt_on_error=1) if they stop doing so. The arrays are
+  // longer than the widest SIMD loop (max_size in simd/accelerate_simd.h), so
+  // that the vector loop and the scalar tail both run where there is a vector
+  // loop.
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+
+  // Rows are a, b, a + b, a - b, a * b. 46341 * 46341 = 2^31 + 4633.
+  check_wrapping<int32_t>({
+      {imax, 1, imin, imax - 1, imax},
+      {imin, -1, imax, imin + 1, imin},
+      {imin, 1, imin + 1, imax, imin},
+      {imax, imax, -2, 0, 1},
+      {imin, imin, 0, 0, 0},
+      {imax, imin, -1, -1, imin},
+      {imax, 2, imin + 1, imax - 2, -2},
+      {65536, 65536, 131072, 0, 0},
+      {46341, 46341, 92682, 0, imin + 4633},
+      {0, imin, imin, imin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // 3037000500 * 3037000500 = 2^63 + 145474192
+  check_wrapping<int64_t>({
+      {lmax, 1, lmin, lmax - 1, lmax},
+      {lmin, -1, lmax, lmin + 1, lmin},
+      {lmin, 1, lmin + 1, lmax, lmin},
+      {lmax, lmax, -2, 0, 1},
+      {lmin, lmin, 0, 0, 0},
+      {lmax, lmin, -1, -1, lmin},
+      {lmax, 2, lmin + 1, lmax - 2, -2},
+      {4294967296, 4294967296, 8589934592, 0, 0},
+      {3037000500, 3037000500, 6074001000, 0, lmin + 145474192},
+      {0, lmin, lmin, lmin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // The operands of uint16 are promoted to int, where 65535 * 65535 overflows.
+  check_wrapping<uint16_t>(
+      {
+          {65535, 65535, 65534, 0, 1},
+          {65535, 65534, 65533, 1, 2},
+          {256, 256, 512, 0, 0},
+          {65535, 1, 0, 65534, 65535},
+          {0, 1, 1, 65535, 0},
+          {300, 300, 600, 0, 24464},
+          {65535, 2, 1, 65533, 65534},
+          {32768, 2, 32770, 32766, 0},
+          {255, 255, 510, 0, 65025},
+      },
+      2);
+
+  // A scalar against an array takes the broadcast kernels. Rows are v,
+  // imax + v, v * imax, v - imax, imin - v.
+  struct BroadcastRow {
+    int32_t v, sum, prod, vdiff, sdiff;
+  };
+  std::vector<BroadcastRow> rows = {
+      {1, imin, imax, imin + 2, imax},
+      {2, imin + 1, -2, imin + 3, imax - 1},
+      {imax, -2, 1, 0, 1},
+      {imin, -1, imin, 1, 0},
+      {-1, imax - 1, imin + 1, imin, imin + 1},
+      {0, imax, 0, imin + 1, imin},
+      {3, imin + 2, imax - 2, imin + 4, imax - 2},
+      {imax - 1, -3, imin + 2, -1, 2},
+      {imin + 1, 0, -1, 2, -1},
+  };
+  std::vector<int32_t> v, sum, prod, vdiff, sdiff;
+  for (const auto& r : rows) {
+    v.push_back(r.v);
+    sum.push_back(r.sum);
+    prod.push_back(r.prod);
+    vdiff.push_back(r.vdiff);
+    sdiff.push_back(r.sdiff);
+  }
+  Shape shape{static_cast<int>(rows.size())};
+  auto make = [&](const std::vector<int32_t>& x) {
+    return array(x.begin(), shape, int32);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(v);
+  array smax(imax);
+  array smin(imin);
+  CHECK(equal(add(smax, x), make(sum)));
+  CHECK(equal(multiply(x, smax), make(prod)));
+  CHECK(equal(subtract(x, smax), make(vdiff)));
+  CHECK(equal(subtract(smin, x), make(sdiff)));
+}
+
+// The cases below check the integer sums and products that do not go through
+// the operators of simd::Simd: scan, scatter and the scalar operators of the
+// reductions. Like the case above they pass without a sanitizer where the
+// hardware wraps around, and fail under UBSan (USE_UBSAN=ON with
+// UBSAN_OPTIONS=halt_on_error=1) if the arithmetic overflows a signed type.
+namespace {
+
+// a has this shape and these values (and its own dtype).
+template <typename T>
+bool equal_to(const array& a, const std::vector<T>& want, const Shape& shape) {
+  auto w = array(want.begin(), shape, a.dtype());
+  return a.shape() == shape && array_equal(a, w).item<bool>();
+}
+
+template <typename T>
+bool equal_to(const array& a, const std::vector<T>& want) {
+  return equal_to(a, want, {static_cast<int>(want.size())});
+}
+
+} // namespace
+
+TEST_CASE("test cumsum and cumprod of integers wrap around") {
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+
+  // imax + 1 = imin, imin + imax = -1, imax * 3 = imax - 2 and
+  // (imax - 2) * imax = 3, the same with lmax.
+  auto x = array({imax, 1, imax, 2}, int32);
+  CHECK(equal_to<int32_t>(cumsum(x), {imax, imin, -1, 1}));
+  CHECK(equal_to<int32_t>(cumsum(x, true), {1, imin + 2, imin + 1, 2}));
+  CHECK(equal_to<int32_t>(cumsum(x, false, false), {0, imax, imin, -1}));
+  CHECK(equal_to<int32_t>(cumsum(x, true, false), {imin + 2, imin + 1, 2, 0}));
+  CHECK(
+      equal_to<int32_t>(
+          cumprod(array({imax, 3, imax, -1}, int32)), {imax, imax - 2, 3, -3}));
+
+  auto y = array({lmax, int64_t(1), lmax, int64_t(2)}, int64);
+  CHECK(equal_to<int64_t>(cumsum(y), {lmax, lmin, -1, 1}));
+  CHECK(
+      equal_to<int64_t>(
+          cumprod(array({lmax, int64_t(3), lmax, int64_t(-1)}, int64)),
+          {lmax, lmax - 2, 3, -3}));
+
+  // Along the first axis of a 4 x 2 array the scan is strided. Reversed,
+  // the products of column 0 are 2, 2 * imax = -2, -2 and -2 * imax = 2.
+  auto z = array({imax, 1, 1, 1, imax, 1, 2, 1}, {4, 2}, int32);
+  CHECK(
+      equal_to<int32_t>(cumsum(z, 0), {imax, 1, imin, 2, -1, 3, 1, 4}, {4, 2}));
+  CHECK(
+      equal_to<int32_t>(
+          cumprod(z, 0, true), {2, 1, -2, 1, -2, 1, 2, 1}, {4, 2}));
+
+  // uint16 is promoted to int, where 65535 * 65535 overflows.
+  CHECK(
+      equal_to<uint16_t>(
+          cumprod(array({65535, 65535, 3, 65535}, uint16)),
+          {65535, 1, 3, 65533}));
+}
+
+TEST_CASE("test scatter add and prod of integers wrap around") {
+  // Scope switch to the cpu: this tests the CPU scatter.
+  StreamContext sc(Device::cpu);
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  auto idx = array({0, 2, 0}, int32);
+
+  // a[0] = imax + 1 + imax = -1, a[2] = imin - 1 = imax.
+  auto a = array({imax, 5, imin}, int32);
+  auto u = array({1, -1, imax}, {3, 1}, int32);
+  CHECK(equal_to<int32_t>(scatter_add(a, idx, u, 0), {-1, 5, imax}));
+  // a[0] = imax * 3 * imax = 3, a[2] = 65536 * 65536 = 0.
+  a = array({imax, 5, 65536}, int32);
+  u = array({3, 65536, imax}, {3, 1}, int32);
+  CHECK(equal_to<int32_t>(scatter_prod(a, idx, u, 0), {3, 5, 0}));
+
+  auto b = array({lmax, int64_t(5), lmin}, int64);
+  auto v = array({int64_t(1), int64_t(-1), lmax}, {3, 1}, int64);
+  CHECK(equal_to<int64_t>(scatter_add(b, idx, v, 0), {-1, 5, lmax}));
+  b = array({lmax, int64_t(5), int64_t(1) << 32}, int64);
+  v = array({int64_t(3), int64_t(1) << 32, lmax}, {3, 1}, int64);
+  CHECK(equal_to<int64_t>(scatter_prod(b, idx, v, 0), {3, 5, 0}));
+
+  // uint16 is promoted to int: 65535 * 65535 * 3 = 3 (mod 2^16).
+  auto c = scatter_prod(
+      array({65535, 7}, uint16),
+      array({0, 0}, int32),
+      array({65535, 3}, {2, 1}, uint16),
+      0);
+  CHECK(equal_to<uint16_t>(c, {3, 7}));
+
+  // scatter_add_axis: column 0 gets imax + 1 and imin - 1, column 1 gets
+  // 2 + imax + imax.
+  auto d = scatter_add_axis(
+      array({imax, 1, imin, 2}, {2, 2}, int32),
+      array({0, 1, 1, 1}, {2, 2}, int32),
+      array({1, imax, -1, imax}, {2, 2}, int32),
+      0);
+  CHECK(equal_to<int32_t>(d, {imin, 1, imax, 0}, {2, 2}));
+  auto e = scatter_add_axis(
+      array({lmax, int64_t(0)}, int64),
+      array({0, 0}, int32),
+      array({int64_t(1), lmax}, int64),
+      0);
+  CHECK(equal_to<int64_t>(e, {-1, 0}));
+}
+
+TEST_CASE("test sum and prod of integers wrap around in every reduction") {
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+
+  // Axes 0 and 2 of a 2 x 1 x 2 array are two contiguous segments, whose
+  // totals are combined by the scalar operator.
+  auto x = array({imax, 0, 1, 0}, {2, 1, 2}, int32);
+  CHECK(equal_to<int32_t>(sum(x, std::vector<int>{0, 2}), {imin}));
+  x = array({imax, 1, 3, 1}, {2, 1, 2}, int32);
+  CHECK(equal_to<int32_t>(prod(x, std::vector<int>{0, 2}), {imax - 2}));
+
+  // A broadcast input is reduced one element at a time by the scalar
+  // operator: 3 * imax = imax - 2 and imax * imax = 1.
+  CHECK(equal_to<int32_t>(sum(broadcast_to(array(imax), {3})), {imax - 2}, {}));
+  CHECK(equal_to<int32_t>(prod(broadcast_to(array(imax), {2})), {1}, {}));
+  CHECK(equal_to<int64_t>(sum(broadcast_to(array(lmax), {3})), {lmax - 2}, {}));
+  CHECK(equal_to<int64_t>(prod(broadcast_to(array(lmax), {2})), {1}, {}));
+  // uint16 is accumulated in int32: 65535 * 65535 overflows it.
+  auto p = prod(broadcast_to(array(65535, uint16), {2}));
+  CHECK_EQ(p.dtype(), uint32);
+  CHECK(equal_to<uint32_t>(p, {4294836225u}, {}));
+
+  // Longer than the widest SIMD loop (max_size in simd/accelerate_simd.h):
+  // where there is a vector loop, the last element is added by the scalar
+  // operator.
+  std::vector<int32_t> v(9, 0);
+  v[0] = imax;
+  v[8] = 1;
+  CHECK(equal_to<int32_t>(sum(array(v.begin(), {9}, int32)), {imin}, {}));
+  std::fill(v.begin(), v.end(), 1);
+  v[0] = imax;
+  v[8] = 3;
+  CHECK(equal_to<int32_t>(prod(array(v.begin(), {9}, int32)), {imax - 2}, {}));
+  std::vector<int64_t> w(5, 0);
+  w[0] = lmax;
+  w[4] = 1;
+  CHECK(equal_to<int64_t>(sum(array(w.begin(), {5}, int64)), {lmin}, {}));
+}
+
 TEST_CASE("test broadcast") {
   auto s = broadcast_shapes({1}, {1, 2});
   CHECK_EQ(s, Shape{1, 2});
