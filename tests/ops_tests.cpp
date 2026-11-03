@@ -2057,6 +2057,586 @@ TEST_CASE("test arithmetic binary ops") {
   CHECK_EQ(logaddexp(x, y).item<complex64_t>(), complex64_t{1, 1});
 }
 
+namespace {
+
+template <typename T>
+struct WrapRow {
+  T a, b, sum, diff, prod;
+};
+
+// add, subtract and multiply of the rows, which are repeated `reps` times
+template <typename T>
+void check_wrapping(const std::vector<WrapRow<T>>& rows, int reps = 1) {
+  std::vector<T> a, b, sum, diff, prod;
+  for (int i = 0; i < reps; ++i) {
+    for (const auto& r : rows) {
+      a.push_back(r.a);
+      b.push_back(r.b);
+      sum.push_back(r.sum);
+      diff.push_back(r.diff);
+      prod.push_back(r.prod);
+    }
+  }
+  Dtype dtype = TypeToDtype<T>();
+  Shape shape{static_cast<int>(a.size())};
+  auto make = [&](const std::vector<T>& v) {
+    return array(v.begin(), shape, dtype);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(a);
+  auto y = make(b);
+  CHECK(equal(add(x, y), make(sum)));
+  CHECK(equal(subtract(x, y), make(diff)));
+  CHECK(equal(multiply(x, y), make(prod)));
+}
+
+} // namespace
+
+TEST_CASE("test integer arithmetic wraps around") {
+  // Integer add, subtract and multiply wrap around on overflow, as in numpy.
+  // Signed overflow is undefined in C++, so the scalar kernels do the
+  // arithmetic in unsigned types: this case fails under UBSan (USE_UBSAN=ON
+  // with UBSAN_OPTIONS=halt_on_error=1) if they stop doing so. The arrays are
+  // longer than the widest SIMD loop (max_size in simd/accelerate_simd.h), so
+  // that the vector loop and the scalar tail both run where there is a vector
+  // loop.
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+
+  // Rows are a, b, a + b, a - b, a * b. 46341 * 46341 = 2^31 + 4633.
+  check_wrapping<int32_t>({
+      {imax, 1, imin, imax - 1, imax},
+      {imin, -1, imax, imin + 1, imin},
+      {imin, 1, imin + 1, imax, imin},
+      {imax, imax, -2, 0, 1},
+      {imin, imin, 0, 0, 0},
+      {imax, imin, -1, -1, imin},
+      {imax, 2, imin + 1, imax - 2, -2},
+      {65536, 65536, 131072, 0, 0},
+      {46341, 46341, 92682, 0, imin + 4633},
+      {0, imin, imin, imin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // 3037000500 * 3037000500 = 2^63 + 145474192
+  check_wrapping<int64_t>({
+      {lmax, 1, lmin, lmax - 1, lmax},
+      {lmin, -1, lmax, lmin + 1, lmin},
+      {lmin, 1, lmin + 1, lmax, lmin},
+      {lmax, lmax, -2, 0, 1},
+      {lmin, lmin, 0, 0, 0},
+      {lmax, lmin, -1, -1, lmin},
+      {lmax, 2, lmin + 1, lmax - 2, -2},
+      {4294967296, 4294967296, 8589934592, 0, 0},
+      {3037000500, 3037000500, 6074001000, 0, lmin + 145474192},
+      {0, lmin, lmin, lmin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // The operands of uint16 are promoted to int, where 65535 * 65535 overflows.
+  check_wrapping<uint16_t>(
+      {
+          {65535, 65535, 65534, 0, 1},
+          {65535, 65534, 65533, 1, 2},
+          {256, 256, 512, 0, 0},
+          {65535, 1, 0, 65534, 65535},
+          {0, 1, 1, 65535, 0},
+          {300, 300, 600, 0, 24464},
+          {65535, 2, 1, 65533, 65534},
+          {32768, 2, 32770, 32766, 0},
+          {255, 255, 510, 0, 65025},
+      },
+      2);
+
+  // A scalar against an array takes the broadcast kernels. Rows are v,
+  // imax + v, v * imax, v - imax, imin - v.
+  struct BroadcastRow {
+    int32_t v, sum, prod, vdiff, sdiff;
+  };
+  std::vector<BroadcastRow> rows = {
+      {1, imin, imax, imin + 2, imax},
+      {2, imin + 1, -2, imin + 3, imax - 1},
+      {imax, -2, 1, 0, 1},
+      {imin, -1, imin, 1, 0},
+      {-1, imax - 1, imin + 1, imin, imin + 1},
+      {0, imax, 0, imin + 1, imin},
+      {3, imin + 2, imax - 2, imin + 4, imax - 2},
+      {imax - 1, -3, imin + 2, -1, 2},
+      {imin + 1, 0, -1, 2, -1},
+  };
+  std::vector<int32_t> v, sum, prod, vdiff, sdiff;
+  for (const auto& r : rows) {
+    v.push_back(r.v);
+    sum.push_back(r.sum);
+    prod.push_back(r.prod);
+    vdiff.push_back(r.vdiff);
+    sdiff.push_back(r.sdiff);
+  }
+  Shape shape{static_cast<int>(rows.size())};
+  auto make = [&](const std::vector<int32_t>& x) {
+    return array(x.begin(), shape, int32);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(v);
+  array smax(imax);
+  array smin(imin);
+  CHECK(equal(add(smax, x), make(sum)));
+  CHECK(equal(multiply(x, smax), make(prod)));
+  CHECK(equal(subtract(x, smax), make(vdiff)));
+  CHECK(equal(subtract(smin, x), make(sdiff)));
+}
+
+namespace {
+
+template <typename T>
+struct UnaryRow {
+  T x, neg, abs;
+};
+
+template <typename T>
+struct PowRow {
+  T base, exp, res;
+};
+
+bool same(const array& p, const array& q) {
+  return array_equal(p, q).item<bool>();
+}
+
+// negative and abs of the rows
+template <typename T>
+void check_negative_abs(const std::vector<UnaryRow<T>>& rows) {
+  std::vector<T> x, neg, abs_x;
+  for (const auto& r : rows) {
+    x.push_back(r.x);
+    neg.push_back(r.neg);
+    abs_x.push_back(r.abs);
+  }
+  Dtype dtype = TypeToDtype<T>();
+  Shape shape{static_cast<int>(x.size())};
+  auto make = [&](const std::vector<T>& v) {
+    return array(v.begin(), shape, dtype);
+  };
+  CHECK(same(negative(make(x)), make(neg)));
+  CHECK(same(abs(make(x)), make(abs_x)));
+}
+
+// base ^ exp of the rows
+template <typename T>
+void check_power(const std::vector<PowRow<T>>& rows) {
+  std::vector<T> base, exp, res;
+  for (const auto& r : rows) {
+    base.push_back(r.base);
+    exp.push_back(r.exp);
+    res.push_back(r.res);
+  }
+  Dtype dtype = TypeToDtype<T>();
+  Shape shape{static_cast<int>(base.size())};
+  auto make = [&](const std::vector<T>& v) {
+    return array(v.begin(), shape, dtype);
+  };
+  CHECK(same(power(make(base), make(exp)), make(res)));
+}
+
+} // namespace
+
+TEST_CASE("test integer unary ops and pow wrap around") {
+  // Integer negative, abs and pow wrap around, as in numpy: -MIN and abs(MIN)
+  // are MIN, and a power is the exact one modulo 2^N (a negative exponent
+  // still gives 0). Signed overflow is undefined in C++, so the scalar kernels
+  // do the arithmetic in unsigned types: this case fails under UBSan
+  // (USE_UBSAN=ON with UBSAN_OPTIONS=halt_on_error=1) if they stop doing so.
+  // The arrays are longer than the widest SIMD loop (max_size in
+  // simd/accelerate_simd.h), so that the vector loop and the scalar tail both
+  // run where there is a vector loop. The expected values are exact integer
+  // powers, reduced modulo 2^N. Rows are x, -x, abs(x) and base, exp, base^exp.
+  const int8_t cmax = std::numeric_limits<int8_t>::max();
+  const int8_t cmin = std::numeric_limits<int8_t>::min();
+  const int16_t smax = std::numeric_limits<int16_t>::max();
+  const int16_t smin = std::numeric_limits<int16_t>::min();
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  const uint8_t u8max = std::numeric_limits<uint8_t>::max();
+  const uint16_t u16max = std::numeric_limits<uint16_t>::max();
+  const uint32_t u32max = std::numeric_limits<uint32_t>::max();
+  const uint64_t u64max = std::numeric_limits<uint64_t>::max();
+
+  check_negative_abs<int8_t>({
+      {cmin, cmin, cmin},
+      {cmin + 1, cmax, cmax},
+      {cmax, cmin + 1, cmax},
+      {0, 0, 0},
+      {1, -1, 1},
+      {-1, 1, 1},
+      {cmax - 1, cmin + 2, cmax - 1},
+      {cmin + 2, cmax - 1, cmax - 1},
+      {64, -64, 64},
+      {-64, 64, 64},
+      {100, -100, 100},
+      {-100, 100, 100},
+      {50, -50, 50},
+      {-3, 3, 3},
+      {2, -2, 2},
+      {3, -3, 3},
+      {-2, 2, 2},
+      {77, -77, 77},
+  });
+
+  check_negative_abs<int16_t>({
+      {smin, smin, smin},
+      {smin + 1, smax, smax},
+      {smax, smin + 1, smax},
+      {0, 0, 0},
+      {1, -1, 1},
+      {-1, 1, 1},
+      {2, -2, 2},
+      {-2, 2, 2},
+      {255, -255, 255},
+      {-255, 255, 255},
+      {256, -256, 256},
+      {-256, 256, 256},
+      {smax - 1, smin + 2, smax - 1},
+      {smin + 2, smax - 1, smax - 1},
+      {12345, -12345, 12345},
+      {-12345, 12345, 12345},
+      {1000, -1000, 1000},
+      {7, -7, 7},
+  });
+
+  std::vector<UnaryRow<int32_t>> rows32 = {
+      {imin, imin, imin},
+      {imin + 1, imax, imax},
+      {imax, imin + 1, imax},
+      {0, 0, 0},
+      {1, -1, 1},
+      {-1, 1, 1},
+      {2, -2, 2},
+      {-2, 2, 2},
+      {imax - 1, imin + 2, imax - 1},
+      {imin + 2, imax - 1, imax - 1},
+      {65536, -65536, 65536},
+      {-65536, 65536, 65536},
+      {123456789, -123456789, 123456789},
+      {-123456789, 123456789, 123456789},
+  };
+  check_negative_abs(rows32);
+
+  check_negative_abs<int64_t>({
+      {lmin, lmin, lmin},
+      {lmin + 1, lmax, lmax},
+      {lmax, lmin + 1, lmax},
+      {0, 0, 0},
+      {1, -1, 1},
+      {-1, 1, 1},
+      {4294967296, -4294967296, 4294967296},
+      {-4294967296, 4294967296, 4294967296},
+      {lmax - 1, lmin + 2, lmax - 1},
+      {lmin + 2, lmax - 1, lmax - 1},
+      {3037000500, -3037000500, 3037000500},
+      {-3037000500, 3037000500, 3037000500},
+  });
+
+  check_negative_abs<uint8_t>({
+      {0, 0, 0},
+      {1, u8max, 1},
+      {2, u8max - 1, 2},
+      {127, 129, 127},
+      {128, 128, 128},
+      {129, 127, 129},
+      {u8max - 1, 2, u8max - 1},
+      {u8max, 1, u8max},
+      {3, u8max - 2, 3},
+      {100, 156, 100},
+      {200, 56, 200},
+      {16, 240, 16},
+      {15, 241, 15},
+      {17, 239, 17},
+      {64, 192, 64},
+      {192, 64, 192},
+      {77, 179, 77},
+      {5, 251, 5},
+  });
+
+  check_negative_abs<uint16_t>({
+      {0, 0, 0},
+      {1, u16max, 1},
+      {2, u16max - 1, 2},
+      {32767, 32769, 32767},
+      {32768, 32768, 32768},
+      {32769, 32767, 32769},
+      {u16max - 1, 2, u16max - 1},
+      {u16max, 1, u16max},
+      {3, u16max - 2, 3},
+      {1000, 64536, 1000},
+      {40000, 25536, 40000},
+      {256, 65280, 256},
+      {255, 65281, 255},
+      {257, 65279, 257},
+      {16384, 49152, 16384},
+      {49152, 16384, 49152},
+      {12345, 53191, 12345},
+      {5, 65531, 5},
+  });
+
+  check_negative_abs<uint32_t>({
+      {0, 0, 0},
+      {1, u32max, 1},
+      {2, u32max - 1, 2},
+      {2147483647, 2147483649u, 2147483647},
+      {2147483648u, 2147483648u, 2147483648u},
+      {2147483649u, 2147483647, 2147483649u},
+      {u32max - 1, 2, u32max - 1},
+      {u32max, 1, u32max},
+      {65536, 4294901760u, 65536},
+      {123456789, 4171510507u, 123456789},
+  });
+
+  check_negative_abs<uint64_t>({
+      {0, 0, 0},
+      {1, u64max, 1},
+      {2, u64max - 1, 2},
+      {9223372036854775807, 9223372036854775809ULL, 9223372036854775807},
+      {9223372036854775808ULL, 9223372036854775808ULL, 9223372036854775808ULL},
+      {9223372036854775809ULL, 9223372036854775807, 9223372036854775809ULL},
+      {u64max - 1, 2, u64max - 1},
+      {u64max, 1, u64max},
+      {4294967296, 18446744069414584320ULL, 4294967296},
+      {3037000500, 18446744070672551116ULL, 3037000500},
+  });
+
+  check_power<int8_t>({
+      {3, 5, -13},     {3, 4, 81},      {2, 6, 64},   {2, 7, cmin},
+      {2, 8, 0},       {cmin, 1, cmin}, {cmin, 2, 0}, {cmax, 2, 1},
+      {cmax, 3, cmax}, {-1, 7, -1},     {-1, 8, 1},   {5, 3, cmax - 2},
+      {11, 2, 121},    {12, 2, -112},   {0, 0, 1},    {0, 9, 0},
+      {-2, 7, cmin},   {-2, 8, 0},      {3, -1, 0},   {-5, 3, cmin + 3},
+  });
+
+  check_power<int16_t>({
+      {3, 11, -19461}, {181, 2, 32761}, {182, 2, -32412}, {smin, 2, 0},
+      {smin, 1, smin}, {2, 14, 16384},  {2, 15, smin},    {2, 16, 0},
+      {smax, 2, 1},    {-1, 15, -1},    {-1, 16, 1},      {5, 7, 12589},
+      {7, 5, 16807},   {0, 0, 1},       {0, 3, 0},        {1, 100, 1},
+      {-2, 15, smin},  {-3, -1, 0},     {smin, smin, 0},
+  });
+
+  check_power<int32_t>({
+      {3, 40, 689956897},
+      {3, 21, 1870418611},
+      {2, 30, 1073741824},
+      {2, 31, imin},
+      {2, 32, 0},
+      {100000, 1, 100000},
+      {100000, 2, 1410065408},
+      {-2, 31, imin},
+      {-2, 32, 0},
+      {46341, 2, -2147479015},
+      {-3, 21, -1870418611},
+      {imax, 2, 1},
+      {imax, imax, imax},
+      {imin, 1, imin},
+      {imin, 2, 0},
+      {7, 0, 1},
+      {0, 0, 1},
+      {0, 5, 0},
+      {-1, 31, -1},
+      {3, -1, 0},
+      {imin, -5, 0},
+      {3, 2, 9},
+  });
+
+  check_power<int64_t>({
+      {3, 41, -420491770248316829},
+      {3, 40, -6289078614652622815},
+      {2, 62, 4611686018427387904},
+      {2, 63, lmin},
+      {2, 64, 0},
+      {3000000000, 1, 3000000000},
+      {4000000000, 1, 4000000000},
+      {3037000500, 2, -9223372036709301616},
+      {-2, 63, lmin},
+      {lmax, 2, 1},
+      {lmax, lmax, lmax},
+      {lmin, 1, lmin},
+      {lmin, 2, 0},
+      {10, 19, -8446744073709551616},
+      {-1, 63, -1},
+      {5, 0, 1},
+      {3, -2, 0},
+      {7, 3, 343},
+  });
+
+  check_power<uint8_t>({
+      {u8max, 2, 1},
+      {u8max, 3, u8max},
+      {3, 7, 139},
+      {2, 7, 128},
+      {2, 8, 0},
+      {16, 2, 0},
+      {15, 2, 225},
+      {17, 2, 33},
+      {0, 0, 1},
+      {1, 200, 1},
+      {u8max - 1, 2, 4},
+      {128, 2, 0},
+      {7, 3, 87},
+      {6, 4, 16},
+      {9, 3, 217},
+      {10, 3, 232},
+      {11, 3, 51},
+      {200, 2, 64},
+  });
+
+  check_power<uint16_t>({
+      {u16max, 1, u16max},
+      {u16max, 2, 1},
+      {u16max, 3, u16max},
+      {257, 2, 513},
+      {3, 11, 46075},
+      {255, 2, 65025},
+      {2, 15, 32768},
+      {2, 16, 0},
+      {u16max - 1, 2, 4},
+      {46341, 2, 4633},
+      {46340, 2, 43024},
+      {181, 2, 32761},
+      {182, 3, 64792},
+      {3, 20, 7057},
+      {0, 0, 1},
+      {1, u16max, 1},
+      {u16max, u16max, u16max},
+      {12345, 7, 52425},
+      {300, 2, 24464},
+  });
+
+  check_power<uint32_t>({
+      {u32max, 2, 1},
+      {65537, 2, 131073},
+      {65536, 2, 0},
+      {3, 40, 689956897},
+      {2, 31, 2147483648u},
+      {2, 32, 0},
+      {46341, 2, 2147488281u},
+      {7, 0, 1},
+      {5, 13, 1220703125},
+      {u32max, u32max, u32max},
+  });
+
+  check_power<uint64_t>({
+      {u64max, 2, 1},
+      {4294967297, 2, 8589934593},
+      {4294967296, 2, 0},
+      {3, 41, 18026252303461234787ULL},
+      {2, 63, 9223372036854775808ULL},
+      {2, 64, 0},
+      {3037000500, 2, 9223372037000250000ULL},
+      {5, 0, 1},
+      {7, 30, 1576789505350337489},
+  });
+
+  // A strided input and 0-d arrays take other kernels than a contiguous one.
+  {
+    std::vector<int32_t> padded, neg, abs_x;
+    for (const auto& r : rows32) {
+      padded.push_back(r.x);
+      padded.push_back(0);
+      neg.push_back(r.neg);
+      abs_x.push_back(r.abs);
+    }
+    int n = static_cast<int>(rows32.size());
+    array a(padded.begin(), {2 * n}, int32);
+    auto s = slice(a, {0}, {2 * n}, {2});
+    CHECK(same(negative(s), array(neg.begin(), {n}, int32)));
+    CHECK(same(abs(s), array(abs_x.begin(), {n}, int32)));
+    CHECK_EQ(negative(array(imin)).item<int32_t>(), imin);
+    CHECK_EQ(abs(array(imin)).item<int32_t>(), imin);
+  }
+
+  // A scalar base or exponent against an array takes the broadcast kernels:
+  // 3^e, and b^2.
+  {
+    std::vector<int32_t> e = {40, 21, 2, 0, 1, 31, 32, 3, 5};
+    std::vector<int32_t> p = {
+        689956897, 1870418611, 9, 1, 3, 1264544299, -501334399, 27, 243};
+    std::vector<int32_t> b = {
+        imin, imax, 46341, 65536, 65535, -46341, 0, 1, -1};
+    std::vector<int32_t> sq = {
+        0, 1, -2147479015, 0, -131071, -2147479015, 0, 1, 1};
+    auto make = [](const std::vector<int32_t>& v) {
+      return array(v.begin(), {static_cast<int>(v.size())}, int32);
+    };
+    CHECK(same(power(array(3), make(e)), make(p)));
+    CHECK(same(power(make(b), array(2)), make(sq)));
+  }
+}
+
+namespace {
+
+array zero_like_dtype(const array& x) {
+  return array(0, x.dtype());
+}
+
+// abs and negative compared with 0 and with the input, each in its own fused
+// kernel (the five inputs hold the same values; a shared abs or negative would
+// not be fused into the comparisons). A compiler that takes signed overflow
+// as impossible may fold these comparisons (abs(x) < 0 is false, -x > 0 is
+// x < 0, ...), which gives the wrong answer at MIN without any sanitizer.
+std::vector<array> compare_abs_negative(const std::vector<array>& in) {
+  return {
+      less(abs(in[0]), zero_like_dtype(in[0])),
+      greater_equal(abs(in[1]), zero_like_dtype(in[1])),
+      greater(negative(in[2]), zero_like_dtype(in[2])),
+      less(negative(in[3]), zero_like_dtype(in[3])),
+      equal(negative(in[4]), in[4])};
+}
+
+} // namespace
+
+TEST_CASE("test compiled integer unary ops wrap around") {
+  // Scope switch to the cpu: compile() builds these kernels with the CPU JIT.
+  StreamContext sc(Device::cpu);
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  std::vector<int32_t> v32 = {imin, imin + 1, -1, 0, 1, imax};
+  std::vector<int64_t> v64 = {lmin, lmin + 1, -1, 0, 1, lmax};
+
+  // Expected for x = MIN, MIN + 1, -1, 0, 1, MAX.
+  std::vector<std::vector<bool>> expected = {
+      {true, false, false, false, false, false}, // abs(x) < 0
+      {false, true, true, true, true, true}, // abs(x) >= 0
+      {false, true, true, false, false, false}, // -x > 0
+      {true, false, false, false, true, true}, // -x < 0
+      {true, false, false, true, false, false}, // -x == x
+  };
+  auto compiled = compile(compare_abs_negative);
+  auto check = [&](const std::vector<array>& inputs) {
+    auto out = compiled(inputs);
+    REQUIRE_EQ(out.size(), 5);
+    for (int i = 0; i < 5; ++i) {
+      array want(expected[i].begin(), {6}, bool_);
+      CHECK(same(out[i], want));
+    }
+  };
+  auto fresh = [](const auto& v, Dtype dtype) {
+    std::vector<array> inputs;
+    for (int i = 0; i < 5; ++i) {
+      inputs.push_back(array(v.begin(), {6}, dtype));
+    }
+    return inputs;
+  };
+  check(fresh(v32, int32));
+  check(fresh(v64, int64));
+}
+
 TEST_CASE("test broadcast") {
   auto s = broadcast_shapes({1}, {1, 2});
   CHECK_EQ(s, Shape{1, 2});
