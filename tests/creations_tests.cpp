@@ -334,6 +334,12 @@ void check_float_to_int(const std::vector<CastRow<T>>& rows, Mode mode) {
             dtype,
             Device::cpu),
         slice(e4, {0, 0, 0, 0}, {4, 4, 4, 4}, {2, 2, 2, 2})));
+    // Rows of 17 values with a unit stride
+    auto x20 = reshape(x, {n / 20, 20});
+    auto e20 = reshape(expected, {n / 20, 20});
+    CHECK(equal(
+        astype(slice(x20, {0, 0}, {n / 20, 17}), dtype, Device::cpu),
+        slice(e20, {0, 0}, {n / 20, 17})));
   }
 }
 
