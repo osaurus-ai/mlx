@@ -4,8 +4,8 @@
 #include <deque>
 #include <future>
 #include <numeric>
-#include <ranges>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stack>
 #include <unordered_map>
@@ -86,7 +86,7 @@ auto get_inputs(auto& a) {
       count -= a.outputs().size();
     }
   }
-  return std::views::take(a.inputs(), count);
+  return std::span(a.inputs().data(), count);
 }
 
 } // namespace
@@ -518,7 +518,9 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
       cache.insert(s.id());
     }
 
-    std::ranges::for_each(get_inputs(a), recurse);
+    for (auto& input : get_inputs(a)) {
+      recurse(input);
+    }
 
     // Stop grad
     if (a.has_primitive()) {
@@ -540,7 +542,9 @@ std::pair<std::vector<array>, std::vector<array>> vjp(
     }
   };
 
-  std::ranges::for_each(outputs, recurse);
+  for (auto& out : outputs) {
+    recurse(out);
+  }
 
   // Run the tape backwards, computing vector-jacobian
   // products for each primitive
@@ -683,7 +687,9 @@ std::pair<std::vector<array>, std::vector<array>> jvp(
       cache.insert(s.id());
     }
 
-    std::ranges::for_each(get_inputs(a), recurse);
+    for (auto& input : get_inputs(a)) {
+      recurse(input);
+    }
 
     // Stop grad
     if (a.has_primitive()) {
@@ -705,7 +711,9 @@ std::pair<std::vector<array>, std::vector<array>> jvp(
     }
   };
 
-  std::ranges::for_each(outputs, recurse);
+  for (auto& out : outputs) {
+    recurse(out);
+  }
 
   std::unordered_map<std::uintptr_t, array> tan_map;
   for (int i = 0; i < primals_.size(); ++i) {
@@ -911,7 +919,9 @@ std::vector<array> vmap_replace(
     }
 
     // Recurse on inputs
-    std::ranges::for_each(get_inputs(a), recurse);
+    for (auto& input : get_inputs(a)) {
+      recurse(input);
+    }
 
     // If any input needs a vmap, then the outputs also need
     // a vmap
