@@ -1700,6 +1700,13 @@ class TestArray(mlx_tests.MLXTestCase):
         a = a.at[1:3, :, 0].minimum(update)
         self.assertEqualArray(a[1:3, :, 0], mx.minimum(a[1:3, :, 0], update))
 
+        # Indices and updates with negative strides
+        idx = mx.array([0, 1, 2, 3])
+        upd = mx.array([1.0, 2.0, 3.0, 4.0])
+        expected = [4.0, 3.0, 2.0, 1.0]
+        self.assertEqual(mx.zeros(4).at[idx[::-1]].add(upd).tolist(), expected)
+        self.assertEqual(mx.zeros(4).at[idx].add(upd[::-1]).tolist(), expected)
+
     @unittest.skipIf(not mx.is_available(mx.gpu), "No GPU available")
     def test_array_at_complex_add_gpu(self):
         n = 4096
@@ -2766,6 +2773,13 @@ class TestArray(mlx_tests.MLXTestCase):
         expected = mx.array([5.0, 5.0, 5.0])
         a[mask] = 5.0
         self.assertTrue(mx.array_equal(a, expected))
+
+        # Scalar target and scalar mask
+        for selected in (False, True):
+            a = mx.array(False)
+            a[mx.array(selected)] = True
+            self.assertEqual(a.shape, ())
+            self.assertEqual(a.item(), selected)
 
         mask_np = np.zeros((1, 10, 10), dtype=bool)
         with self.assertRaises(ValueError):
