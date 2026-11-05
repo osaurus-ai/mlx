@@ -13,6 +13,7 @@
 #include <intrin.h> // For _BitScanReverse
 #endif
 
+#include "mlx/backend/cpu/simd/saturating_cast.h"
 #include "mlx/types/complex.h"
 #include "mlx/types/half_types.h"
 
@@ -29,9 +30,9 @@ struct Simd<T, 1> {
   T value;
   Simd() {}
   template <typename U>
-  Simd(Simd<U, 1> v) : value(v.value) {}
+  Simd(Simd<U, 1> v) : value(saturating_cast<T>(v.value)) {}
   template <typename U>
-  Simd(U v) : value(v) {}
+  Simd(U v) : value(saturating_cast<T>(v)) {}
 
   T operator[](int) const {
     return value;
@@ -41,6 +42,12 @@ struct Simd<T, 1> {
     return value;
   }
 };
+
+// Conversion of a value that is known to fit in To, without a range test.
+template <typename To, typename T>
+Simd<To, 1> convert_in_range(Simd<T, 1> v) {
+  return static_cast<To>(v.value);
+}
 
 template <typename T, int N>
 Simd<T, N> load(const T* x) {
