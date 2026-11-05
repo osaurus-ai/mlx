@@ -13,6 +13,7 @@ set(COMPILE_DEPS
     ${PROJECT_SOURCE_DIR}/mlx/types/complex.h
     simd/simd.h
     simd/base_simd.h
+    simd/saturating_cast.h
     simd/math.h
     simd/type.h
     unary_ops.h

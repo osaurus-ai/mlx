@@ -44,8 +44,13 @@ Simd<T, N> exp(Simd<T, N> in) {
     x = fma(x, fpart, 1.000000000000000f);
 
     // generate 2**ipart in the floating point representation using integer
-    // bitshifting
-    Simd<int, N> epart = (Simd<int, N>(ipart) + 127) << 23;
+    // bitshifting. The exponent field is ipart + 127. ipart is integral, so
+    // adding 1.5 * 2**23 + 127 puts ipart + 127 in the low bits of the
+    // mantissa, and the shift by 23 keeps only these bits. This is exact for
+    // |ipart| < 2**22, other lanes are replaced below. Nothing converts a
+    // float to an integer.
+    Simd<float, N> magic = ipart + 12583039.0f;
+    auto epart = (*(Simd<uint32_t, N>*)&magic) << 23;
 
     // Deal with NaN and Inf
     auto result = select(isnan(x_init), x_init, (*(Simd<float, N>*)&epart) * x);
@@ -68,8 +73,10 @@ Simd<T, N> sincos(Simd<T, N> in) {
   // scale by 4/Pi
   auto y = x * 1.27323954473516f;
 
-  // store the integer part of y in mm0
-  Simd<uint32_t, N> emm2 = y;
+  // store the integer part of y in mm0. sincos_checked sends |x| > 2**23 to
+  // libm, so y is in [0, 2**24) or NaN, and NaN lanes become 0.
+  Simd<uint32_t, N> emm2 =
+      convert_in_range<uint32_t>(select(isnan(y), Simd<float, N>(0), y));
 
   // j=(j+1) & (~1) (see the cephes sources)
   emm2 = emm2 + 1;
