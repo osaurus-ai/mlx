@@ -1451,6 +1451,22 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertTrue(mx.all(f16_sub).item())
         self.assertTrue(mx.all(bf16_sub).item())
 
+    def test_complex_bool_cast(self):
+        # True if either part is nonzero, as in numpy
+        x_np = np.array(
+            [0j, 1j, 1 + 0j, complex(-0.0, -0.0), complex(np.nan, 0.0)],
+            dtype=np.complex64,
+        )
+        x = mx.array(x_np)
+        self.assertEqual(x.astype(mx.bool_).tolist(), x_np.astype(bool).tolist())
+        self.assertEqual(mx.logical_not(x).tolist(), np.logical_not(x_np).tolist())
+        self.assertTrue(mx.any(mx.array([0j, 1j])).item())
+        self.assertTrue(mx.all(mx.array([1j, 1 + 0j])).item())
+        self.assertFalse(mx.any(mx.array([complex(0.0, -0.0), 0j])).item())
+
+        out = mx.array([True, False]).astype(mx.complex64)
+        self.assertEqual(out.tolist(), [1 + 0j, 0j])
+
     def test_stop_gradient(self):
         def func(x):
             return mx.sum(2 * x + mx.stop_gradient(3 * x))
@@ -3821,6 +3837,11 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(c.shape, (3, 2, 5))
         self.assertTrue(mx.array_equal(c, mx.ones((3, 2, 5), dtype=mx.bool_)))
 
+        x = mx.array([1, -1, 1, -1])
+        y = mx.array([1, 1, -1, -1])
+        out = (x > 0) ^ (y > 0)
+        self.assertEqual(out.tolist(), [False, True, True, False])
+
     def test_bitwise_grad(self):
         a = np.random.randint(0, 10, size=(4, 3))
         b = np.random.randint(0, 10, size=(4, 3))
@@ -4117,6 +4138,23 @@ class TestOps(mlx_tests.MLXTestCase):
         expected[1:, 2:, 3:] = update
         self.assertTrue(mx.array_equal(expected, out))
 
+        # Strided, broadcast and reversed start indices
+        x = mx.arange(64).reshape(8, 8)
+        update = mx.zeros((2, 2), dtype=x.dtype)
+        starts = [
+            (mx.array([1, 5, 2, 5])[::2], (1, 2)),
+            (mx.broadcast_to(mx.array([2]), (2,)), (2, 2)),
+            (mx.array([4, 1])[::-1], (1, 4)),
+        ]
+        for start, (i, j) in starts:
+            out = mx.slice(x, start, (0, 1), (2, 2))
+            self.assertTrue(mx.array_equal(out, x[i : i + 2, j : j + 2]))
+
+            out = mx.slice_update(x, update, start, (0, 1))
+            expected = mx.arange(64).reshape(8, 8)
+            expected[i : i + 2, j : j + 2] = update
+            self.assertTrue(mx.array_equal(out, expected))
+
     def test_broadcast_arrays(self):
         a = mx.array(1)
         b = mx.array(1.0)
@@ -4392,6 +4430,25 @@ class TestOps(mlx_tests.MLXTestCase):
         # The carry must not fire one byte early: 0x7e/0xfe stay finite
         finite = mx.from_fp8(mx.array([0x7E, 0xFE], dtype=mx.uint8), mx.float32)
         self.assertTrue(mx.array_equal(finite, mx.array([448.0, -448.0])))
+
+        for dt in [mx.float32, mx.float16, mx.bfloat16]:
+            nan_arr = mx.array([float("nan"), -float("nan")], dtype=dt)
+            fp8_nan = mx.to_fp8(nan_arr)
+            self.assertEqual(fp8_nan[0].item(), 0x7F)
+            self.assertIn(fp8_nan[1].item(), [0x7F, 0xFF])
+
+            back = mx.from_fp8(fp8_nan, dtype=dt)
+            self.assertTrue(mx.isnan(back[0]).item())
+            self.assertTrue(mx.isnan(back[1]).item())
+
+            overflow_arr = mx.array([float("inf"), -float("inf"), 1e5, -1e5], dtype=dt)
+            fp8_sat = mx.to_fp8(overflow_arr)
+            self.assertTrue(
+                mx.array_equal(
+                    fp8_sat,
+                    mx.array([0x7E, 0xFE, 0x7E, 0xFE], dtype=mx.uint8),
+                )
+            )
 
     def test_zeros_ones_empty_like_dtype(self):
         x = mx.array([1, 2, 3], dtype=mx.int32)
