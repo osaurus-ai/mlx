@@ -1013,6 +1013,40 @@ class TestQuantized(mlx_tests.MLXTestCase):
                 self.assertEqual(y_q.shape, y_hat.shape)
                 self.assertLess((y_q - y_hat).abs().max(), 1e-3)
 
+    def test_qmm_accumulation_precision(self):
+        # x repeats [1, eps, -1, 0] and each block of four weights along K is
+        # equal, so each block adds eps * w. A sum in the input type loses
+        # eps * w next to w. In float32 every partial sum is exact.
+        N, K = 128, 256
+        for dtype, transpose, gs, bits in product(
+            [mx.bfloat16, mx.float16],
+            [True, False],
+            [32, 64, 128],
+            [2, 4, 8],
+        ):
+            with self.subTest(dtype=dtype, transpose=transpose, gs=gs, bits=bits):
+                eps = 1 / 256 if dtype == mx.bfloat16 else 1 / 2048
+                x = mx.tile(mx.array([1, eps, -1, 0], dtype), K // 4)
+                x = mx.stack([x, -x])
+                # All bits set give the code 2**bits - 1, and the bias moves w to v.
+                if transpose:
+                    rows, cols = N, K
+                    v = mx.arange(rows)[:, None] + 3 * mx.arange(cols // gs)
+                else:
+                    rows, cols = K, N
+                    v = mx.arange(rows)[:, None] // 4 + 3 * mx.arange(cols // gs)
+                v = v % 8 + 1
+                q = mx.full((rows, cols * bits // 32), 0xFFFFFFFF, mx.uint32)
+                scales = mx.ones(v.shape, dtype)
+                biases = (v - (2**bits - 1)).astype(dtype)
+                w = mx.dequantize(q, scales, biases, group_size=gs, bits=bits)
+                w = w.astype(mx.float32)
+                y_ref = x.astype(mx.float32) @ (w.T if transpose else w)
+                y = mx.quantized_matmul(
+                    x, q, scales, biases, transpose=transpose, group_size=gs, bits=bits
+                )
+                self.assertTrue(mx.array_equal(y, y_ref.astype(dtype)).item())
+
     def test_fp_qmv(self):
         key = mx.random.key(0)
         k1, k2 = mx.random.split(key)
