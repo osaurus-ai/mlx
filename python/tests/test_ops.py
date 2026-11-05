@@ -2463,6 +2463,13 @@ class TestOps(mlx_tests.MLXTestCase):
         _, df = mx.vjp(f, [a_fwd], [a_bwd])
         self.assertTrue(mx.allclose(a_bwd[4:-2, 2:-4], df[0]).item())
 
+    def test_pad_large_offsets(self):
+        # Row 2**27 of the output starts at offset 2**31
+        rows = 2**27 + 1
+        x = mx.broadcast_to(mx.array([[1, 2, 3]], mx.uint8), (rows, 3))
+        y = mx.pad(x, ((0, 0), (0, 13)))
+        self.assertEqual(y[-1].tolist(), [1, 2, 3] + [0] * 13)
+
     def test_where(self):
         self.assertCmpNumpy([True, mx.array([[1, 2], [3, 4]]), 1], mx.where, np.where)
         self.assertCmpNumpy([True, 1, mx.array([[1, 2], [3, 4]])], mx.where, np.where)
@@ -3264,6 +3271,14 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(x.flatten(start_axis=1).shape, (2, 3 * 4))
         self.assertEqual(x.flatten(end_axis=1).shape, (2 * 3, 4))
 
+    def test_reshape_col_contiguous(self):
+        # Reshape without a copy
+        a = mx.arange(12).reshape(3, 4).T.reshape(2, 2, 3)
+        b = mx.arange(12).reshape(3, 2, 2).T
+        a_np = np.arange(12).reshape(3, 4).T.reshape(2, 2, 3)
+        b_np = np.arange(12).reshape(3, 2, 2).T
+        self.assertTrue(np.array_equal(a + b, a_np + b_np))
+
     def test_clip(self):
         a = np.array([1, 4, 3, 8, 5], np.int32)
         expected = np.clip(a, 2, 6)
@@ -3886,6 +3901,26 @@ class TestOps(mlx_tests.MLXTestCase):
             out = a.view(getattr(mx, t))
             a_out = out.view(mx.int32)
             self.assertTrue(mx.array_equal(a_out, a, equal_nan=True))
+
+        # Size one last axis
+        a = mx.arange(4, dtype=mx.int32).reshape(1, 4).T
+        expected = np.arange(4, dtype=np.int32).reshape(4, 1).view(np.int16)
+        self.assertTrue(np.array_equal(a.view(mx.int16), expected))
+
+        # Byte offsets that are not a multiple of the new item size
+        a = mx.arange(64, dtype=mx.uint8)
+        a_np = np.arange(64, dtype=np.uint8)
+        for start in range(8):
+            out = a[start : start + 16].view(mx.int32)
+            expected = a_np[start : start + 16].view(np.int32)
+            self.assertTrue(np.array_equal(out + 0, expected))  # read in a kernel
+
+        # View of an (n, 1) array
+        a = mx.arange(4, dtype=mx.int32).reshape(4, 1).view(mx.int16)
+        b = mx.arange(8, dtype=mx.int16).reshape(2, 4).T
+        expected = np.arange(4, dtype=np.int32).reshape(4, 1).view(np.int16)
+        expected = expected + np.arange(8, dtype=np.int16).reshape(2, 4).T
+        self.assertTrue(np.array_equal(a + b, expected))
 
     def _hadamard(self, N):
         # Matches scipy.linalg.hadamard

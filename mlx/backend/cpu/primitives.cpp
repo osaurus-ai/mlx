@@ -79,7 +79,14 @@ static std::pair<array, bool> compute_dynamic_offset(
 }
 
 void AsStrided::eval_cpu(const std::vector<array>& inputs, array& out) {
-  eval(inputs, out);
+  assert(inputs.size() == 1);
+  if (inputs[0].flags().row_contiguous) {
+    eval(inputs[0], out);
+  } else {
+    auto copy = contiguous_copy_cpu(inputs[0], stream());
+    cpu::get_command_encoder(stream()).add_temporary(copy);
+    eval(copy, out);
+  }
 }
 void Broadcast::eval_cpu(const std::vector<array>& inputs, array& out) {
   eval(inputs, out);
@@ -380,8 +387,20 @@ void View::eval_cpu(const std::vector<array>& inputs, array& out) {
       strides[i] *= ibytes;
       strides[i] /= obytes;
     }
+    // Last axis can have any stride
+    if (obytes < ibytes) {
+      strides.back() = 1;
+    }
+    auto flags = in.flags();
+    if (ibytes != obytes) {
+      // Last axis size can change contiguity
+      auto [_, row_contiguous, col_contiguous] =
+          check_contiguity(out.shape(), strides);
+      flags.row_contiguous = row_contiguous;
+      flags.col_contiguous = col_contiguous;
+    }
     out.copy_shared_buffer(
-        in, strides, in.flags(), in.data_size() * ibytes / obytes);
+        in, strides, flags, in.data_size() * ibytes / obytes);
   } else {
     auto tmp = array(
         in.shape(), in.dtype() == bool_ ? uint8 : in.dtype(), nullptr, {});
