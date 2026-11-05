@@ -26,3 +26,11 @@ repos:
   rev: v0.6.13
   hooks:
     - id: cmake-format
+- repo: local
+  hooks:
+    - id: check-stream-args
+      name: check stream arguments
+      entry: python .github/scripts/check_stream_args.py
+      language: python
+      files: ^(mlx/.*\.(cpp|h)|\.github/scripts/check_stream_args\.py)$
+      pass_filenames: false

@@ -97,7 +97,7 @@ array indices_or_default(
           << " Got indices with invalid dtype. Indices must be integral.";
       throw std::invalid_argument(msg.str());
     }
-    return astype(indices.value(), uint32);
+    return astype(indices.value(), uint32, s);
   }
 
   Shape shape(x.shape().begin(), x.shape().end() - 2);
@@ -3172,7 +3172,8 @@ array floor_divide(
   auto zero = array(0, dtype);
   auto step = logical_and(
       not_equal(rem, zero, s),
-      not_equal(less(a, zero, s), less(b, zero, s), s));
+      not_equal(less(a, zero, s), less(b, zero, s), s),
+      s);
   return subtract(quotient, astype(step, dtype, s), s);
 }
 
@@ -3611,7 +3612,7 @@ array gather(
   }
 
   // Broadcast and cast indices if necessary
-  auto inputs = broadcast_arrays(indices);
+  auto inputs = broadcast_arrays(indices, s);
   for (auto& idx : inputs) {
     idx = astype(idx, dtype, s);
   }
@@ -3749,8 +3750,9 @@ array take(const array& a, int index, int axis, StreamOrDevice s /* = {} */) {
         "[take] Cannot do a non-empty take from an array with zero elements.");
   }
 
-  // Handle negative axis
+  // Handle negative axis and index
   axis = axis < 0 ? a.ndim() + axis : axis;
+  index = index < 0 ? a.shape(axis) + index : index;
 
   Shape starts(a.ndim(), 0);
   Shape stops = a.shape();
@@ -3889,7 +3891,7 @@ array scatter(
   }
 
   // Broadcast and cast indices if necessary
-  auto inputs = broadcast_arrays(indices);
+  auto inputs = broadcast_arrays(indices, s);
 
   Shape idx_shape;
   if (!inputs.empty()) {
@@ -4293,12 +4295,13 @@ array logcumsumexp(
     bool inclusive /* = true*/,
     StreamOrDevice s /* = {}*/) {
   axis = normalize_axis_index(axis, a.ndim(), "[logcumsumexp] ");
+  auto out_type = at_least_float(a.dtype());
   return array(
       a.shape(),
-      a.dtype(),
+      out_type,
       std::make_shared<Scan>(
           to_stream(s), Scan::ReduceType::LogAddExp, axis, reverse, inclusive),
-      {a});
+      {astype(a, out_type, s)});
 }
 
 array logcumsumexp(
@@ -4613,22 +4616,35 @@ array conv_general(
     has_neg_padding |= (pd < 0);
   }
 
-  // Handle negative padding
+  // Negative padding counts positions of the dilated input. Keep the input
+  // elements inside the window and pad the gap left before or after them.
+  bool only_padding = false;
   if (has_neg_padding) {
     Shape starts(in.ndim(), 0);
     auto stops = in.shape();
 
     for (int i = 0; i < spatial_dims; i++) {
-      if (padding_lo[i] < 0) {
-        starts[i + 1] = safe_cast(
-            starts[i + 1] - static_cast<int64_t>(padding_lo[i]), "conv");
-        padding_lo[i] = 0;
+      int64_t dil = input_dilation[i];
+      int64_t len = (in.shape(i + 1) - 1) * dil + 1;
+      int64_t lo = padding_lo[i];
+      int64_t hi = padding_hi[i];
+      int64_t start = lo < 0 ? (safe_cast(-lo, "conv") + dil - 1) / dil : 0;
+      int64_t stop = hi < 0 ? std::max<int64_t>(len + hi + dil - 1, 0) / dil
+                            : in.shape(i + 1);
+      if (stop <= start) {
+        // Only zeros are left, keep the padded size for the output shape
+        only_padding = true;
+        start = stop = 0;
+        lo = 0;
+        hi = len + padding_lo[i] + hi + dil - 1;
+      } else {
+        lo += start * dil;
+        hi += len - (stop - 1) * dil - 1;
       }
-
-      if (padding_hi[i] < 0) {
-        stops[i + 1] += padding_hi[i];
-        padding_hi[i] = 0;
-      }
+      starts[i + 1] = safe_cast(start, "conv");
+      stops[i + 1] = safe_cast(stop, "conv");
+      padding_lo[i] = safe_cast(lo, "conv");
+      padding_hi[i] = safe_cast(hi, "conv");
     }
 
     in = slice(in, std::move(starts), std::move(stops), s);
@@ -4643,6 +4659,10 @@ array conv_general(
       padding_hi,
       kernel_dilation,
       input_dilation);
+
+  if (only_padding) {
+    return zeros(std::move(out_shape), in.dtype(), s);
+  }
 
   return array(
       std::move(out_shape),
@@ -5087,7 +5107,7 @@ affine_quantize(const array& w, int group_size, int bits, StreamOrDevice s_) {
       scales = where(mask, scales, negative(scales, s), s);
       array edge = where(mask, w_min, w_max, s);
       array q0 = round(divide(edge, scales, s), s);
-      scales = where(not_equal(q0, zero, s), divide(edge, q0, s), scales);
+      scales = where(not_equal(q0, zero, s), divide(edge, q0, s), scales, s);
       biases = where(equal(q0, zero, s), zero, edge, s);
     }
 
@@ -6482,10 +6502,15 @@ std::vector<array> depends(
   std::vector<array> all_inputs = inputs;
   all_inputs.insert(all_inputs.end(), dependencies.begin(), dependencies.end());
 
-  // Compute the stream. Maybe do it in a smarter way at some point in the
-  // future.
-  Stream s = (inputs[0].has_primitive()) ? inputs[0].primitive().stream()
-                                         : to_stream({});
+  // Use the stream of the first input or dependency that has one.
+  std::optional<Stream> found;
+  for (auto& in : all_inputs) {
+    if (in.has_primitive()) {
+      found = in.primitive().stream();
+      break;
+    }
+  }
+  Stream s = found ? *found : to_stream({});
   // Make the output info
   std::vector<Shape> shapes;
   std::vector<Dtype> dtypes;
@@ -6589,12 +6614,14 @@ array number_of_elements(
     }
     return array(inverted ? 1.0 / numel : numel, dtype);
   }
-  return stop_gradient(array(
-      Shape{},
-      dtype,
-      std::make_shared<NumberOfElements>(
-          to_stream(s), std::move(axes), inverted, dtype),
-      {a}));
+  return stop_gradient(
+      array(
+          Shape{},
+          dtype,
+          std::make_shared<NumberOfElements>(
+              to_stream(s), std::move(axes), inverted, dtype),
+          {a}),
+      s);
 }
 
 array conjugate(const array& a, StreamOrDevice s /* = {} */) {
@@ -6822,7 +6849,7 @@ array real(const array& a, StreamOrDevice s /* = {} */) {
 
 array imag(const array& a, StreamOrDevice s /* = {} */) {
   if (!issubdtype(a.dtype(), complexfloating)) {
-    return zeros_like(a);
+    return zeros_like(a, s);
   }
   return array(a.shape(), float32, std::make_shared<Imag>(to_stream(s)), {a});
 }

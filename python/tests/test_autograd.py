@@ -1319,6 +1319,21 @@ class TestAutograd(mlx_tests.MLXTestCase):
         self.assertNotEqual(id(a_1), id(arrs[1]))
         self.assertEqual(id(a_2), id(arrs[2]))
 
+    def test_pad_value_grad(self):
+        x = mx.ones((2, 3))
+        v = mx.array(5.0)
+
+        def fun(x, v):
+            return mx.pad(x, pad_width=1, constant_values=v).sum()
+
+        # Padded elements: 4 * 5 - 2 * 3 = 14
+        gx, gv = mx.grad(fun, argnums=(0, 1))(x, v)
+        self.assertTrue(mx.array_equal(gx, mx.ones((2, 3))))
+        self.assertEqual(gv.item(), 14.0)
+
+        _, (tangent,) = mx.jvp(fun, [x, v], [mx.zeros((2, 3)), mx.array(1.0)])
+        self.assertEqual(tangent.item(), 14.0)
+
     def test_conv_second_order_grad_with_padding(self):
         x = mx.random.normal((1, 4, 4, 1))
         w = mx.random.normal((1, 2, 2, 1))
@@ -1485,11 +1500,41 @@ class TestAutograd(mlx_tests.MLXTestCase):
             mx.tan: lambda x: 1 / mx.cos(x) ** 2,
             mx.tanh: lambda x: 1 - mx.tanh(x) ** 2,
             mx.log1p: lambda x: 1 / (1 + x),
+            mx.cos: lambda x: -mx.sin(x),
+            mx.sqrt: lambda x: 0.5 / mx.sqrt(x),
+            mx.rsqrt: lambda x: -0.5 * mx.rsqrt(x) / x,
+            mx.arcsin: lambda x: 1 / mx.sqrt(1 - mx.square(x)),
+            mx.arccos: lambda x: -1 / mx.sqrt(1 - mx.square(x)),
+            mx.arctan: lambda x: 1 / (1 + mx.square(x)),
+            mx.arcsinh: lambda x: 1 / mx.sqrt(mx.square(x) + 1),
+            # 1 / sqrt(x**2 - 1) has the wrong sign when Re(x) < 0
+            mx.arccosh: lambda x: 1 / (mx.sqrt(x - 1) * mx.sqrt(x + 1)),
+            mx.arctanh: lambda x: 1 / (1 - mx.square(x)),
         }
         for fn, deriv in ops.items():
+            _, (jvp,) = mx.jvp(fn, [z], [cotangent])
+            expected = cotangent * deriv(z)
+            self.assertTrue(mx.allclose(jvp, expected, atol=1e-5), msg=str(fn))
+
             _, (vjp,) = mx.vjp(fn, [z], [cotangent])
             expected = cotangent * mx.conj(deriv(z))
             self.assertTrue(mx.allclose(vjp, expected, atol=1e-5), msg=str(fn))
+
+    def test_complex_power_vjps(self):
+        mx.random.seed(0)
+        z = mx.random.normal((3, 4, 5), dtype=mx.complex64) + 2.0
+        w = 0.5 * mx.random.normal((3, 4, 5), dtype=mx.complex64)
+        cotangent = mx.random.normal((3, 4, 5), dtype=mx.complex64)
+        dz = w * mx.power(z, w - 1)
+        dw = mx.log(z) * mx.power(z, w)
+
+        _, (jvp,) = mx.jvp(mx.power, [z, w], [cotangent, cotangent])
+        expected = cotangent * (dz + dw)
+        self.assertTrue(mx.allclose(jvp, expected, atol=1e-4))
+
+        _, (vjp_z, vjp_w) = mx.vjp(mx.power, [z, w], [cotangent])
+        self.assertTrue(mx.allclose(vjp_z, cotangent * mx.conj(dz), atol=1e-4))
+        self.assertTrue(mx.allclose(vjp_w, cotangent * mx.conj(dw), atol=1e-4))
 
     def test_complex_abs_grad(self):
         mx.random.seed(0)
