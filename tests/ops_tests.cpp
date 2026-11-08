@@ -11,9 +11,6 @@
 
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/simd/base_simd.h"
-#if defined(MLX_USE_HIGHWAY_KERNELS)
-#include "mlx/backend/cpu/simd/simd.h"
-#endif
 #include "mlx/backend/cuda/cuda.h"
 #include "mlx/mlx.h"
 #include "mlx/primitives.h"
@@ -7641,7 +7638,10 @@ double max_relative_error(const array& y, const std::vector<double>& truth) {
 // The lanes of the CPU's float32 sums (simd::max_size<float>): 8 with
 // Accelerate on arm64, else 1.
 #if defined(MLX_USE_HIGHWAY_KERNELS)
-constexpr int sum_lanes = mlx::core::simd::max_size<float>;
+// In highway_simd_tests.cpp: simd.h declares a global bfloat16_t on arm64.
+int highway_float_lanes();
+float highway_reduce_sum(const float* lanes);
+const int sum_lanes = highway_float_lanes();
 #elif defined(MLX_USE_ACCELERATE) && !defined(__x86_64__)
 constexpr int sum_lanes = 8;
 #else
@@ -7651,7 +7651,7 @@ constexpr int sum_lanes = 1;
 // The CPU's float32 sum of up to 4096 elements: one sum per lane, the lanes
 // halved as Apple's simd_reduce_add does, then the tail.
 float lane_order_sum(const std::vector<float>& x) {
-  constexpr int N = sum_lanes;
+  const int N = sum_lanes;
   std::vector<float> lanes(N, 0.0f);
   size_t i = 0;
   for (; i + N <= x.size(); i += N) {
@@ -7660,8 +7660,7 @@ float lane_order_sum(const std::vector<float>& x) {
     }
   }
 #if defined(MLX_USE_HIGHWAY_KERNELS)
-  float total =
-      mlx::core::simd::sum(mlx::core::simd::load<float, N>(lanes.data()));
+  float total = highway_reduce_sum(lanes.data());
 #else
   for (int n = N / 2; n >= 1; n /= 2) {
     for (int j = 0; j < n; j++) {
