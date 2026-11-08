@@ -1031,5 +1031,16 @@ MLX_HIGHWAY_TRANSCENDENTAL(tan, tan)
 MLX_HIGHWAY_TRANSCENDENTAL(tanh, tanh)
 #undef MLX_HIGHWAY_TRANSCENDENTAL
 
+// Conversion of a value that is known to fit in To, without a range test.
+// The vector form of convert_in_range in base_simd.h.
+template <
+    typename To,
+    typename T,
+    int N,
+    highway_detail::EnableIfVector<N> = 0>
+inline Simd<To, N> convert_in_range(Simd<T, N> v) {
+  return Simd<To, N>(v);
+}
+
 } // namespace mlx::core::simd
 HWY_AFTER_NAMESPACE();
