@@ -908,7 +908,9 @@ float dequantize_fp_scale(
       bfloat16_t f;
       uint16_t i;
     } out;
-    out.i = encoded == 0 ? 0x40 : (static_cast<uint16_t>(encoded) << 7);
+    out.i = encoded == 0
+        ? 0x40
+        : (encoded == 0xFF ? 0x7FC0 : (static_cast<uint16_t>(encoded) << 7));
     return static_cast<float>(out.f) * scale_factor;
   }
 }
