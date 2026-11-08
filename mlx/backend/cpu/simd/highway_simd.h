@@ -282,7 +282,13 @@ struct Simd {
         !highway_detail::is_half_v<T> && !highway_detail::is_half_v<U> &&
         !std::is_same_v<T, bool> && !std::is_same_v<U, bool> &&
         sizeof(T) == sizeof(U)) {
-      value = hn::ConvertTo(D(), other.value);
+      if constexpr (is_float_to_int_cast_v<T, U>) {
+        // ConvertTo saturates. Its result for NaN depends on the target.
+        value = hn::ConvertTo(
+            D(), hn::IfThenZeroElse(hn::IsNaN(other.value), other.value));
+      } else {
+        value = hn::ConvertTo(D(), other.value);
+      }
     } else if constexpr (std::is_same_v<U, bool>) {
       const D d;
       value = hn::IfThenElse(
@@ -294,7 +300,7 @@ struct Simd {
       alignas(64) T tmp_out[N];
       other.store(tmp_in);
       for (int i = 0; i < N; ++i) {
-        tmp_out[i] = static_cast<T>(tmp_in[i]);
+        tmp_out[i] = saturating_cast<T>(tmp_in[i]);
       }
       value = load(tmp_out).value;
     }
