@@ -903,20 +903,7 @@ template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> pow(Simd<T, N> base, Simd<T, N> exp) {
   if constexpr (std::is_integral_v<T>) {
     return highway_detail::map_integer_binary(base, exp, [](T x, T y) {
-      T result = 1;
-      if constexpr (std::is_signed_v<T>) {
-        if (y < 0) {
-          return T(0);
-        }
-      }
-      while (y) {
-        if (y & 1) {
-          result = static_cast<T>(result * x);
-        }
-        y = static_cast<T>(y >> 1);
-        x = static_cast<T>(x * x);
-      }
-      return result;
+      return pow(Simd<T, 1>(x), Simd<T, 1>(y)).value;
     });
   } else {
     return highway_detail::map_binary(
