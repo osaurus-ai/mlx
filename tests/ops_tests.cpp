@@ -17,6 +17,12 @@
 
 using namespace mlx::core;
 
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+// In highway_simd_tests.cpp: simd.h declares a global bfloat16_t on arm64.
+int highway_float_lanes();
+float highway_reduce_sum(const float* lanes);
+#endif
+
 TEST_CASE("test copy") {
   array x(1.0);
   auto y = copy(x);
@@ -7638,9 +7644,6 @@ double max_relative_error(const array& y, const std::vector<double>& truth) {
 // The lanes of the CPU's float32 sums (simd::max_size<float>): 8 with
 // Accelerate on arm64, else 1.
 #if defined(MLX_USE_HIGHWAY_KERNELS)
-// In highway_simd_tests.cpp: simd.h declares a global bfloat16_t on arm64.
-int highway_float_lanes();
-float highway_reduce_sum(const float* lanes);
 const int sum_lanes = highway_float_lanes();
 #elif defined(MLX_USE_ACCELERATE) && !defined(__x86_64__)
 constexpr int sum_lanes = 8;
