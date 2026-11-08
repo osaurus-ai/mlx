@@ -11,6 +11,9 @@
 
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/simd/base_simd.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+#include "mlx/backend/cpu/simd/simd.h"
+#endif
 #include "mlx/backend/cuda/cuda.h"
 #include "mlx/mlx.h"
 #include "mlx/primitives.h"
@@ -7637,7 +7640,9 @@ double max_relative_error(const array& y, const std::vector<double>& truth) {
 
 // The lanes of the CPU's float32 sums (simd::max_size<float>): 8 with
 // Accelerate on arm64, else 1.
-#if defined(MLX_USE_ACCELERATE) && !defined(__x86_64__)
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+constexpr int sum_lanes = mlx::core::simd::max_size<float>;
+#elif defined(MLX_USE_ACCELERATE) && !defined(__x86_64__)
 constexpr int sum_lanes = 8;
 #else
 constexpr int sum_lanes = 1;
@@ -7654,12 +7659,17 @@ float lane_order_sum(const std::vector<float>& x) {
       lanes[j] = lanes[j] + x[i + j];
     }
   }
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  float total =
+      mlx::core::simd::sum(mlx::core::simd::load<float, N>(lanes.data()));
+#else
   for (int n = N / 2; n >= 1; n /= 2) {
     for (int j = 0; j < n; j++) {
       lanes[j] = lanes[j] + lanes[j + n];
     }
   }
   float total = lanes[0];
+#endif
   for (; i < x.size(); i++) {
     total = total + x[i];
   }
@@ -7774,6 +7784,25 @@ TEST_CASE("test layer_norm fallback over a long row on the cpu") {
   }
   auto x = array(v.begin(), {1, n}, float32);
   auto y = fast::layer_norm(x, std::nullopt, std::nullopt, 1e-5f, s);
+  CHECK_LE(max_relative_error(y, truth), 1e-5);
+}
+
+TEST_CASE("test rms_norm over a long row on the cpu") {
+  auto s = Device::cpu;
+  constexpr int n = 3 << 23;
+  std::vector<float> v(n);
+  double mean_sq = 0;
+  for (int i = 0; i < n; i++) {
+    v[i] = unit_value(i) + 0.25f;
+    mean_sq += double(v[i]) * v[i];
+  }
+  mean_sq /= n;
+  std::vector<double> truth(n);
+  for (int i = 0; i < n; i++) {
+    truth[i] = v[i] / std::sqrt(mean_sq + 1e-5);
+  }
+  auto x = array(v.begin(), {1, n}, float32);
+  auto y = fast::rms_norm(x, std::nullopt, 1e-5f, s);
   CHECK_LE(max_relative_error(y, truth), 1e-5);
 }
 
