@@ -2738,6 +2738,9 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   // No path here quantizes w; quantized.cpp raises the same error.
   if (inputs[1].dtype() != uint32) {
     throw std::runtime_error("[QQMatmul] NYI for the general case");
