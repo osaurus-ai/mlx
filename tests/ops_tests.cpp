@@ -4692,6 +4692,55 @@ TEST_CASE("test quantize dequantize") {
   }
 }
 
+TEST_CASE("test affine quantized matmul accumulates in float32 on the cpu") {
+  // As ml-explore/mlx#4803's test: x repeats [1, eps, -1, 0] and each block of
+  // four weights along K is equal, so each block adds eps * w. A sum in the
+  // input type loses eps * w next to w; in float32 every partial sum is exact.
+  auto s = Device::cpu;
+  constexpr int N = 128, K = 256;
+  for (auto dtype : {bfloat16, float16}) {
+    float eps = dtype == bfloat16 ? 1.0f / 256 : 1.0f / 2048;
+    std::vector<float> xv;
+    for (int i = 0; i < K / 4; i++) {
+      xv.insert(xv.end(), {1.0f, eps, -1.0f, 0.0f});
+    }
+    auto x1 = array(xv.begin(), {K}, float32);
+    auto x = astype(stack({x1, negative(x1, s)}, s), dtype, s);
+    for (bool tr : {true, false}) {
+      for (int gs : {32, 64, 128}) {
+        for (int bits : {2, 4, 8}) {
+          CAPTURE(dtype);
+          CAPTURE(tr);
+          CAPTURE(gs);
+          CAPTURE(bits);
+          int rows = tr ? N : K, cols = tr ? K : N, groups = cols / gs;
+          // All bits set give the code 2**bits - 1, and the bias moves w to v.
+          std::vector<int32_t> vv(rows * groups);
+          for (int i = 0; i < rows; i++) {
+            for (int j = 0; j < groups; j++) {
+              vv[i * groups + j] = ((tr ? i : i / 4) + 3 * j) % 8 + 1;
+            }
+          }
+          auto v = array(vv.begin(), {rows, groups}, int32);
+          auto q = full(
+              {rows, cols * bits / 32}, array(uint32_t(0xFFFFFFFF)), uint32, s);
+          auto scales = ones(v.shape(), dtype, s);
+          auto biases = astype(subtract(v, array((1 << bits) - 1), s), dtype, s);
+          auto w = astype(
+              dequantize(
+                  q, scales, biases, gs, bits, "affine", std::nullopt,
+                  std::nullopt, s),
+              float32,
+              s);
+          auto y_ref = matmul(astype(x, float32, s), tr ? transpose(w, s) : w, s);
+          auto y = quantized_matmul(x, q, scales, biases, tr, gs, bits, "affine", s);
+          CHECK(array_equal(y, astype(y_ref, dtype, s), false, s).item<bool>());
+        }
+      }
+    }
+  }
+}
+
 TEST_CASE("test repeat") {
   auto data = array({13, 3, 16, 6, 14, 4, 15, 5, 11, 1, 12, 2}, {3, 2, 2});
   auto repeat_axis_0 = repeat(data, 2, 0);
