@@ -169,12 +169,13 @@ TEST_CASE("test concurrent allocator statistics") {
     }
     try {
       for (int i = 0; i < 10000; ++i) {
-        auto buffer = allocator::malloc((i & 1) ? 4096 : 8192);
-        if (buffer.ptr() == nullptr) {
-          allocation_failed = true;
-          break;
-        }
-        allocator::free(buffer);
+        {
+          auto data = allocator::malloc((i & 1) ? 4096 : 8192);
+          if (data.buffer().ptr() == nullptr) {
+            allocation_failed = true;
+            break;
+          }
+        } // allocator::Data frees what it allocated (#4634)
         if ((i & 63) == 0) {
           std::this_thread::yield();
         }
