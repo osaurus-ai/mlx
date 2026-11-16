@@ -1666,4 +1666,25 @@ TEST_CASE("unnamed mmap regions retain their unregistered behavior") {
   CHECK_EQ(bank.nbytes(), file.page);
   CHECK_EQ(safetensors_mmap_tracked_buffer_bytes(), baseline);
 }
+
+TEST_CASE("an mmap region is never donated to an op's output") {
+  // The mapping is read-only: an op that writes its output there faults.
+  NamedMmapFixture file; // zeros
+  if (!metal::is_available()) {
+    return; // only the Metal allocator can adopt a mapping
+  }
+  const int n = static_cast<int>(file.page / 4);
+  auto bank = mmap_file_region(file.path, file.page, file.page, {n}, uint32);
+  CHECK_FALSE(bank.is_donatable());
+  if (bank.is_donatable()) {
+    return; // the op below would write into the mapping and kill the suite
+  }
+  auto out = bitwise_invert(std::move(bank), Device::cpu);
+  eval(out);
+  CHECK(array_equal(out, full({n}, 0xFFFFFFFFu, uint32)).item<bool>());
+  std::ifstream in(file.path, std::ios::binary);
+  std::vector<char> bytes(file.page * 4);
+  in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  CHECK(std::all_of(bytes.begin(), bytes.end(), [](char c) { return c == 0; }));
+}
 #endif
