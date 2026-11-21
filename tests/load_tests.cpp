@@ -1,5 +1,7 @@
 // Copyright © 2023 Apple Inc.
 
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -44,6 +46,55 @@ TEST_CASE("test save_safetensors") {
   CHECK_EQ(test2.dtype(), float32);
   CHECK_EQ(test2.shape(), Shape{2, 2});
   CHECK(array_equal(test2, ones({2, 2})).item<bool>());
+}
+
+TEST_CASE("test save_safetensors aligns tensors without holes") {
+  // Odd sizes of every width: packed in the map's order, each tensor would
+  // shift the ones after it off their alignment.
+  std::unordered_map<std::string, array> map = {
+      {"bool", astype(array({1, 0, 1}), bool_)},
+      {"int8", astype(arange(5), int8)},
+      {"float16", astype(arange(3), float16)},
+      {"bfloat16", astype(arange(5), bfloat16)},
+      {"float32", astype(arange(3), float32)},
+      {"int64", astype(arange(3), int64)},
+      {"complex64", astype(arange(3), complex64)},
+      {"empty", zeros({0}, float32)},
+  };
+  std::string file_path = get_temp_file("test_aligned.safetensors");
+  save_safetensors(file_path, map);
+
+  std::ifstream in(file_path, std::ios::binary | std::ios::ate);
+  const size_t file_size = in.tellg();
+  in.seekg(0);
+  uint64_t header_len = 0;
+  in.read(reinterpret_cast<char*>(&header_len), 8);
+  std::string header(header_len, ' ');
+  in.read(header.data(), header_len);
+  const size_t data_start = 8 + header_len;
+  CHECK_EQ(data_start % 8, 0);
+
+  std::vector<std::pair<size_t, size_t>> spans;
+  for (auto& [key, arr] : map) {
+    CAPTURE(key);
+    std::string field = "\"" + key + "\":{\"data_offsets\":[";
+    auto at = header.find(field);
+    REQUIRE(at != std::string::npos);
+    char* end = nullptr;
+    size_t begin = std::strtoull(header.c_str() + at + field.size(), &end, 10);
+    size_t stop = std::strtoull(end + 1, nullptr, 10);
+    CHECK_EQ(stop - begin, arr.nbytes());
+    CHECK_EQ((data_start + begin) % arr.itemsize(), 0);
+    spans.emplace_back(begin, stop);
+  }
+  // The format allows no holes: the spans tile the data up to the file's end.
+  std::sort(spans.begin(), spans.end());
+  size_t offset = 0;
+  for (auto& [begin, stop] : spans) {
+    CHECK_EQ(begin, offset);
+    offset = stop;
+  }
+  CHECK_EQ(data_start + offset, file_size);
 }
 
 // Helper to write a raw safetensors file from a JSON header and data buffer
