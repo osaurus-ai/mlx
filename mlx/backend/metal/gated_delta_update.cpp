@@ -59,15 +59,22 @@ void GatedDeltaUpdate::eval_gpu(
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  auto& out = outputs[0];
+  auto& hf = outputs[1];
+
+  // With no steps the final state is the initial state
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    copy_gpu(inputs[5], hf, CopyType::General, s);
+    return;
+  }
+
   auto q = ensure_row_contiguous(inputs[0], d, s);
   auto k = ensure_row_contiguous(inputs[1], d, s);
   auto v = ensure_row_contiguous(inputs[2], d, s);
   auto g = ensure_row_contiguous(inputs[3], d, s);
   auto beta = ensure_row_contiguous(inputs[4], d, s);
   auto h0 = ensure_row_contiguous(inputs[5], d, s);
-
-  auto& out = outputs[0];
-  auto& hf = outputs[1];
 
   int B = q.shape(0);
   int T = q.shape(1);

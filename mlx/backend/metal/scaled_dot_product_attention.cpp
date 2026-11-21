@@ -937,6 +937,13 @@ void ScaledDotProductAttention::eval_gpu(
   auto& v_pre = inputs[2];
   auto& o = outputs[0];
 
+  if (o.size() == 0) {
+    for (auto& out : outputs) {
+      out.set_data(allocator::malloc(out.nbytes()));
+    }
+    return;
+  }
+
   std::vector<array> copies;
 
   // Define some copy functions to ensure the layout of the inputs is as
