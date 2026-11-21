@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -1108,4 +1109,20 @@ TEST_CASE("test array construction from float to integer matches astype") {
     check_init_matches_astype<double, T>(rows_as<double>(rows, 0).first);
     check_init_matches_astype<complex64_t, T>(complex_rows(rows, 0).first);
   });
+}
+
+TEST_CASE("test unaligned scalar item") {
+  uint64_t expected = 0x0123456789abcdef;
+  for (size_t offset = 1; offset < sizeof(expected); ++offset) {
+    std::vector<uint8_t> data(offset + sizeof(expected));
+    std::memcpy(data.data() + offset, &expected, sizeof(expected));
+    auto storage = array(data.data(), {static_cast<int>(data.size())}, uint8);
+    auto scalar = view(as_strided(storage, {8}, {1}, offset), uint64);
+    eval(scalar);
+    if (default_device() == Device::cpu) {
+      CHECK_EQ(scalar.data<void>(), storage.data<uint8_t>() + offset);
+    }
+    CHECK_EQ(scalar.item<uint64_t>(), expected);
+    CHECK_EQ(static_cast<const array&>(scalar).item<uint64_t>(), expected);
+  }
 }
