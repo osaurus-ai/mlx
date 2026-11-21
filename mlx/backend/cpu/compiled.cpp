@@ -241,8 +241,8 @@ inline void build_kernel(
     os << "  " << get_type_string(x.dtype()) << " tmp_" << namer.get_name(x)
        << " = ";
     if (is_static_cast(x.primitive())) {
-      os << "static_cast<" << get_type_string(x.dtype()) << ">(tmp_"
-         << namer.get_name(x.inputs()[0]) << ");" << std::endl;
+      os << "mlx::core::simd::saturating_cast<" << get_type_string(x.dtype())
+         << ">(tmp_" << namer.get_name(x.inputs()[0]) << ");" << std::endl;
     } else {
       os << x.primitive().name();
       os << "()(";
