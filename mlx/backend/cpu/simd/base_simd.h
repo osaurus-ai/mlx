@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <complex>
 #include <functional>
+#include <limits>
 
 #ifdef _MSC_VER
 #include <intrin.h> // For _BitScanReverse
@@ -204,8 +205,8 @@ Simd<T, 1> clz(Simd<T, 1> x_) {
 #endif
 }
 
-// Integer division by zero traps on x86 and returns 0 on arm64. Define the
-// quotient as 0 on all platforms, which keeps a == (a / b) * b + (a % b).
+// Integer division by zero and min / -1 trap on x86. Use the arm64 results
+// (0 and min) on all platforms, which keep a == (a / b) * b + (a % b).
 template <typename T>
 Simd<T, 1> divide(Simd<T, 1> a_, Simd<T, 1> b_) {
   T a = a_.value;
@@ -213,6 +214,11 @@ Simd<T, 1> divide(Simd<T, 1> a_, Simd<T, 1> b_) {
   if constexpr (std::is_integral_v<T>) {
     if (b == 0) {
       return T(0);
+    }
+    if constexpr (std::is_signed_v<T>) {
+      if (a == std::numeric_limits<T>::min() && b == -1) {
+        return a;
+      }
     }
   }
   return a / b;
@@ -226,6 +232,12 @@ Simd<T, 1> remainder(Simd<T, 1> a_, Simd<T, 1> b_) {
   if constexpr (std::is_integral_v<T>) {
     if (b == 0) {
       return a;
+    }
+    // a % -1 is 0, and min % -1 traps on x86.
+    if constexpr (std::is_signed_v<T>) {
+      if (b == -1) {
+        return T(0);
+      }
     }
     r = a % b;
   } else {

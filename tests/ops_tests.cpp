@@ -3690,6 +3690,505 @@ TEST_CASE("test divmod") {
   CHECK_EQ(out_holder[0].item<float>(), 1.0);
 }
 
+TEST_CASE("test integer division of the minimum by -1") {
+  // On x86 this division traps. The quotient is the minimum, remainder 0.
+  // Eleven pairs, so that the SIMD lanes and the scalar tail both run.
+  auto check = [](auto lo) {
+    using T = decltype(lo);
+    auto s = Device::cpu;
+    auto a =
+        array({lo, T(-7), T(7), T(7), T(-7), lo, T(5), T(-5), lo, T(-7), T(0)});
+    auto b = array(
+        {T(-1), T(2), T(0), T(-2), T(-2), T(1), T(3), T(3), T(-1), T(0), T(0)});
+    auto q =
+        array({lo, T(-4), T(0), T(-4), T(3), lo, T(1), T(-2), lo, T(-1), T(0)});
+    auto r = array(
+        {T(0), T(1), T(7), T(-1), T(-1), T(0), T(2), T(1), T(0), T(-7), T(0)});
+    auto dtype = a.dtype();
+    CAPTURE(dtype);
+    auto fq = floor_divide(a, b, s);
+    auto fr = remainder(a, b, s);
+    CHECK(array_equal(fq, q, s).item<bool>());
+    CHECK(array_equal(fr, r, s).item<bool>());
+
+    // divmod gives floor_divide and remainder, also for a zero divisor.
+    auto qr = divmod(a, b, s);
+    CHECK(array_equal(qr[0], fq, s).item<bool>());
+    CHECK(array_equal(qr[1], fr, s).item<bool>());
+    CHECK(array_equal(qr[0], q, s).item<bool>());
+    CHECK(array_equal(qr[1], r, s).item<bool>());
+  };
+  check(std::numeric_limits<int32_t>::min());
+  check(std::numeric_limits<int64_t>::min());
+}
+
+namespace {
+
+bool division_equal(const array& p, const array& q, StreamOrDevice s = {}) {
+  return array_equal(p, q, s).item<bool>();
+}
+
+// One row is a, b, floor_divide(a, b) and remainder(a, b). A zero divisor
+// keeps the guards of the CPU ops: floor_divide(a, 0) is -1 for a negative a
+// and 0 otherwise, remainder(a, 0) is a. MIN // -1 wraps around to MIN, and
+// MIN % -1 is 0. The expected values are exact: the floor quotient and the
+// floor modulus, reduced modulo 2^N.
+template <typename T>
+struct DivRow {
+  T a, b, q, r;
+};
+
+enum class DivOp { FloorDivide, Remainder, DivMod };
+
+std::vector<array> apply_div(DivOp op, const array& a, const array& b) {
+  auto s = Device::cpu;
+  switch (op) {
+    case DivOp::FloorDivide:
+      return {floor_divide(a, b, s)};
+    case DivOp::Remainder:
+      return {remainder(a, b, s)};
+    default:
+      return divmod(a, b, s);
+  }
+}
+
+// The outputs of the CPU op on the pairs (a, b), against the rows rs, for each
+// of the broadcast paths: two arrays, a 0-d divisor, a 0-d dividend, stride-2
+// slices and two 0-d arrays. The arrays are longer than the widest SIMD loop
+// (max_size in simd/accelerate_simd.h), so that the vector loop and the scalar
+// tail both run where there is a vector loop. A trap or a sanitizer report in
+// the old code ends or marks the case before a value is compared.
+template <typename T>
+void check_division(DivOp op, const std::vector<DivRow<T>>& rows) {
+  Dtype dtype = TypeToDtype<T>();
+  auto make = [&](const std::vector<T>& v, const Shape& shape) {
+    return array(v.begin(), shape, dtype);
+  };
+  auto check = [&](const array& a,
+                   const array& b,
+                   const std::vector<DivRow<T>>& rs,
+                   const Shape& shape) {
+    std::vector<T> q, r;
+    for (const auto& x : rs) {
+      q.push_back(x.q);
+      r.push_back(x.r);
+    }
+    auto out = apply_div(op, a, b);
+    if (op == DivOp::FloorDivide) {
+      REQUIRE_EQ(out.size(), 1);
+      CHECK(division_equal(out[0], make(q, shape), Device::cpu));
+    } else if (op == DivOp::Remainder) {
+      REQUIRE_EQ(out.size(), 1);
+      CHECK(division_equal(out[0], make(r, shape), Device::cpu));
+    } else {
+      REQUIRE_EQ(out.size(), 2);
+      CHECK(division_equal(out[0], make(q, shape), Device::cpu));
+      CHECK(division_equal(out[1], make(r, shape), Device::cpu));
+    }
+  };
+  auto column = [&](const std::vector<DivRow<T>>& rs, bool first) {
+    std::vector<T> v;
+    for (const auto& x : rs) {
+      v.push_back(first ? x.a : x.b);
+    }
+    return v;
+  };
+  Shape shape{static_cast<int>(rows.size())};
+  auto a = make(column(rows, true), shape);
+  auto b = make(column(rows, false), shape);
+
+  // Two arrays.
+  check(a, b, rows, shape);
+
+  // A 0-d divisor, for the divisors -1 and 0 (the unsigned types: 0 and 1).
+  for (T d :
+       {static_cast<T>(std::is_signed_v<T> ? -1 : 1), static_cast<T>(0)}) {
+    std::vector<DivRow<T>> rs;
+    for (const auto& x : rows) {
+      if (x.b == d) {
+        rs.push_back(x);
+      }
+    }
+    if (!rs.empty()) {
+      Shape s{static_cast<int>(rs.size())};
+      check(make(column(rs, true), s), array(d, dtype), rs, s);
+    }
+  }
+
+  // A 0-d dividend: the first dividend (MIN for the signed types) against
+  // every divisor of its rows.
+  {
+    std::vector<DivRow<T>> rs;
+    for (const auto& x : rows) {
+      if (x.a == rows[0].a) {
+        rs.push_back(x);
+      }
+    }
+    Shape s{static_cast<int>(rs.size())};
+    check(array(rows[0].a, dtype), make(column(rs, false), s), rs, s);
+  }
+
+  // Stride-2 slices of both operands, with a filler pair (1, 1) in between.
+  {
+    std::vector<T> fa, fb;
+    for (const auto& x : rows) {
+      fa.push_back(x.a);
+      fa.push_back(1);
+      fb.push_back(x.b);
+      fb.push_back(1);
+    }
+    Shape big{static_cast<int>(fa.size())};
+    Shape stop = big;
+    check(
+        slice(make(fa, big), {0}, stop, {2}, Device::cpu),
+        slice(make(fb, big), {0}, stop, {2}, Device::cpu),
+        rows,
+        shape);
+  }
+
+  // Two 0-d arrays: the first rows.
+  for (size_t i = 0; i < rows.size() && i < 4; ++i) {
+    check(array(rows[i].a, dtype), array(rows[i].b, dtype), {rows[i]}, Shape{});
+  }
+}
+
+std::vector<DivRow<int8_t>> rows_int8() {
+  const int8_t cmax = std::numeric_limits<int8_t>::max();
+  const int8_t cmin = std::numeric_limits<int8_t>::min();
+  return {
+      {cmin, -1, cmin, 0},
+      {cmin, 0, -1, cmin},
+      {cmin, 2, -64, 0},
+      {cmin, -3, 42, -2},
+      {cmin + 1, -1, cmax, 0},
+      {cmin + 1, 0, -1, cmin + 1},
+      {cmin + 1, 2, -64, 1},
+      {cmin + 1, -3, 42, -1},
+      {-7, -1, 7, 0},
+      {-7, 0, -1, -7},
+      {-7, 2, -4, 1},
+      {-7, -3, 2, -1},
+      {-1, -1, 1, 0},
+      {-1, 0, -1, -1},
+      {-1, 2, -1, 1},
+      {-1, -3, 0, -1},
+      {0, -1, 0, 0},
+      {0, 0, 0, 0},
+      {0, 2, 0, 0},
+      {0, -3, 0, 0},
+      {1, -1, -1, 0},
+      {1, 0, 0, 1},
+      {1, 2, 0, 1},
+      {1, -3, -1, -2},
+      {7, -1, -7, 0},
+      {7, 0, 0, 7},
+      {7, 2, 3, 1},
+      {7, -3, -3, -2},
+      {cmax, -1, cmin + 1, 0},
+      {cmax, 0, 0, cmax},
+      {cmax, 2, 63, 1},
+      {cmax, -3, -43, -2},
+  };
+}
+
+std::vector<DivRow<int16_t>> rows_int16() {
+  const int16_t smax = std::numeric_limits<int16_t>::max();
+  const int16_t smin = std::numeric_limits<int16_t>::min();
+  return {
+      {smin, -1, smin, 0},
+      {smin, 0, -1, smin},
+      {smin, 2, -16384, 0},
+      {smin, -3, 10922, -2},
+      {smin + 1, -1, smax, 0},
+      {smin + 1, 0, -1, smin + 1},
+      {smin + 1, 2, -16384, 1},
+      {smin + 1, -3, 10922, -1},
+      {-7, -1, 7, 0},
+      {-7, 0, -1, -7},
+      {-7, 2, -4, 1},
+      {-7, -3, 2, -1},
+      {-1, -1, 1, 0},
+      {-1, 0, -1, -1},
+      {-1, 2, -1, 1},
+      {-1, -3, 0, -1},
+      {0, -1, 0, 0},
+      {0, 0, 0, 0},
+      {0, 2, 0, 0},
+      {0, -3, 0, 0},
+      {1, -1, -1, 0},
+      {1, 0, 0, 1},
+      {1, 2, 0, 1},
+      {1, -3, -1, -2},
+      {7, -1, -7, 0},
+      {7, 0, 0, 7},
+      {7, 2, 3, 1},
+      {7, -3, -3, -2},
+      {smax, -1, smin + 1, 0},
+      {smax, 0, 0, smax},
+      {smax, 2, 16383, 1},
+      {smax, -3, -10923, -2},
+  };
+}
+
+std::vector<DivRow<int32_t>> rows_int32() {
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  return {
+      {imin, -1, imin, 0},
+      {imin, 0, -1, imin},
+      {imin, 2, -1073741824, 0},
+      {imin, -3, 715827882, -2},
+      {imin + 1, -1, imax, 0},
+      {imin + 1, 0, -1, imin + 1},
+      {imin + 1, 2, -1073741824, 1},
+      {imin + 1, -3, 715827882, -1},
+      {-7, -1, 7, 0},
+      {-7, 0, -1, -7},
+      {-7, 2, -4, 1},
+      {-7, -3, 2, -1},
+      {-1, -1, 1, 0},
+      {-1, 0, -1, -1},
+      {-1, 2, -1, 1},
+      {-1, -3, 0, -1},
+      {0, -1, 0, 0},
+      {0, 0, 0, 0},
+      {0, 2, 0, 0},
+      {0, -3, 0, 0},
+      {1, -1, -1, 0},
+      {1, 0, 0, 1},
+      {1, 2, 0, 1},
+      {1, -3, -1, -2},
+      {7, -1, -7, 0},
+      {7, 0, 0, 7},
+      {7, 2, 3, 1},
+      {7, -3, -3, -2},
+      {imax, -1, imin + 1, 0},
+      {imax, 0, 0, imax},
+      {imax, 2, 1073741823, 1},
+      {imax, -3, -715827883, -2},
+  };
+}
+
+std::vector<DivRow<int64_t>> rows_int64() {
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  return {
+      {lmin, -1, lmin, 0},
+      {lmin, 0, -1, lmin},
+      {lmin, 2, -4611686018427387904, 0},
+      {lmin, -3, 3074457345618258602, -2},
+      {lmin + 1, -1, lmax, 0},
+      {lmin + 1, 0, -1, lmin + 1},
+      {lmin + 1, 2, -4611686018427387904, 1},
+      {lmin + 1, -3, 3074457345618258602, -1},
+      {-7, -1, 7, 0},
+      {-7, 0, -1, -7},
+      {-7, 2, -4, 1},
+      {-7, -3, 2, -1},
+      {-1, -1, 1, 0},
+      {-1, 0, -1, -1},
+      {-1, 2, -1, 1},
+      {-1, -3, 0, -1},
+      {0, -1, 0, 0},
+      {0, 0, 0, 0},
+      {0, 2, 0, 0},
+      {0, -3, 0, 0},
+      {1, -1, -1, 0},
+      {1, 0, 0, 1},
+      {1, 2, 0, 1},
+      {1, -3, -1, -2},
+      {7, -1, -7, 0},
+      {7, 0, 0, 7},
+      {7, 2, 3, 1},
+      {7, -3, -3, -2},
+      {lmax, -1, lmin + 1, 0},
+      {lmax, 0, 0, lmax},
+      {lmax, 2, 4611686018427387903, 1},
+      {lmax, -3, -3074457345618258603, -2},
+  };
+}
+
+std::vector<DivRow<uint8_t>> rows_uint8() {
+  const uint8_t u8max = std::numeric_limits<uint8_t>::max();
+  return {
+      {0, 0, 0, 0},         {0, 1, 0, 0},       {0, 2, 0, 0},
+      {0, 7, 0, 0},         {1, 0, 0, 1},       {1, 1, 1, 0},
+      {1, 2, 0, 1},         {1, 7, 0, 1},       {7, 0, 0, 7},
+      {7, 1, 7, 0},         {7, 2, 3, 1},       {7, 7, 1, 0},
+      {127, 0, 0, 127},     {127, 1, 127, 0},   {127, 2, 63, 1},
+      {127, 7, 18, 1},      {128, 0, 0, 128},   {128, 1, 128, 0},
+      {128, 2, 64, 0},      {128, 7, 18, 2},    {u8max, 0, 0, u8max},
+      {u8max, 1, u8max, 0}, {u8max, 2, 127, 1}, {u8max, 7, 36, 3},
+  };
+}
+
+std::vector<DivRow<uint16_t>> rows_uint16() {
+  const uint16_t u16max = std::numeric_limits<uint16_t>::max();
+  return {
+      {0, 0, 0, 0},           {0, 1, 0, 0},          {0, 2, 0, 0},
+      {0, 7, 0, 0},           {1, 0, 0, 1},          {1, 1, 1, 0},
+      {1, 2, 0, 1},           {1, 7, 0, 1},          {7, 0, 0, 7},
+      {7, 1, 7, 0},           {7, 2, 3, 1},          {7, 7, 1, 0},
+      {32767, 0, 0, 32767},   {32767, 1, 32767, 0},  {32767, 2, 16383, 1},
+      {32767, 7, 4681, 0},    {32768, 0, 0, 32768},  {32768, 1, 32768, 0},
+      {32768, 2, 16384, 0},   {32768, 7, 4681, 1},   {u16max, 0, 0, u16max},
+      {u16max, 1, u16max, 0}, {u16max, 2, 32767, 1}, {u16max, 7, 9362, 1},
+  };
+}
+
+std::vector<DivRow<uint32_t>> rows_uint32() {
+  const uint32_t u32max = std::numeric_limits<uint32_t>::max();
+  return {
+      {0, 0, 0, 0},
+      {0, 1, 0, 0},
+      {0, 2, 0, 0},
+      {0, 7, 0, 0},
+      {1, 0, 0, 1},
+      {1, 1, 1, 0},
+      {1, 2, 0, 1},
+      {1, 7, 0, 1},
+      {7, 0, 0, 7},
+      {7, 1, 7, 0},
+      {7, 2, 3, 1},
+      {7, 7, 1, 0},
+      {2147483647, 0, 0, 2147483647},
+      {2147483647, 1, 2147483647, 0},
+      {2147483647, 2, 1073741823, 1},
+      {2147483647, 7, 306783378, 1},
+      {2147483648u, 0, 0, 2147483648u},
+      {2147483648u, 1, 2147483648u, 0},
+      {2147483648u, 2, 1073741824, 0},
+      {2147483648u, 7, 306783378, 2},
+      {u32max, 0, 0, u32max},
+      {u32max, 1, u32max, 0},
+      {u32max, 2, 2147483647, 1},
+      {u32max, 7, 613566756, 3},
+  };
+}
+
+std::vector<DivRow<uint64_t>> rows_uint64() {
+  const uint64_t u64max = std::numeric_limits<uint64_t>::max();
+  return {
+      {0, 0, 0, 0},
+      {0, 1, 0, 0},
+      {0, 2, 0, 0},
+      {0, 7, 0, 0},
+      {1, 0, 0, 1},
+      {1, 1, 1, 0},
+      {1, 2, 0, 1},
+      {1, 7, 0, 1},
+      {7, 0, 0, 7},
+      {7, 1, 7, 0},
+      {7, 2, 3, 1},
+      {7, 7, 1, 0},
+      {9223372036854775807, 0, 0, 9223372036854775807},
+      {9223372036854775807, 1, 9223372036854775807, 0},
+      {9223372036854775807, 2, 4611686018427387903, 1},
+      {9223372036854775807, 7, 1317624576693539401, 0},
+      {9223372036854775808ULL, 0, 0, 9223372036854775808ULL},
+      {9223372036854775808ULL, 1, 9223372036854775808ULL, 0},
+      {9223372036854775808ULL, 2, 4611686018427387904, 0},
+      {9223372036854775808ULL, 7, 1317624576693539401, 1},
+      {u64max, 0, 0, u64max},
+      {u64max, 1, u64max, 0},
+      {u64max, 2, 9223372036854775807, 1},
+      {u64max, 7, 2635249153387078802, 1},
+  };
+}
+
+std::vector<DivRow<bool>> rows_bool() {
+  return {
+      {false, false, false, false},
+      {false, true, false, false},
+      {true, false, false, true},
+      {true, true, true, false},
+  };
+}
+
+void check_division_tables(DivOp op) {
+  check_division(op, rows_int8());
+  check_division(op, rows_int16());
+  check_division(op, rows_int32());
+  check_division(op, rows_int64());
+  check_division(op, rows_uint8());
+  check_division(op, rows_uint16());
+  check_division(op, rows_uint32());
+  check_division(op, rows_uint64());
+  check_division(op, rows_bool());
+}
+
+// floor_divide(x, -1) > 0, < 0 and == x, one chain per output and distinct
+// inputs, so that each is fused into one kernel with the constant -1.
+std::vector<array> compare_floor_divide_by_minus_one(
+    const std::vector<array>& in) {
+  auto zero = array(0, in[0].dtype());
+  auto minus_one = array(-1, in[0].dtype());
+  return {
+      greater(floor_divide(in[0], minus_one), zero),
+      less(floor_divide(in[1], minus_one), zero),
+      equal(floor_divide(in[2], minus_one), in[2])};
+}
+
+} // namespace
+
+TEST_CASE("test floor_divide at the minimum and at zero") {
+  // floor_divide(MIN, -1) is MIN: the quotient wraps around, as in two's
+  // complement. It is undefined in C++ and traps on x86. A zero divisor gives
+  // 0, or -1 for a negative dividend, as before.
+  check_division_tables(DivOp::FloorDivide);
+}
+
+TEST_CASE("test remainder at the minimum and at zero") {
+  // remainder(MIN, -1) is 0, which traps on x86 when computed with %. A zero
+  // divisor gives the dividend, as before.
+  check_division_tables(DivOp::Remainder);
+}
+
+TEST_CASE("test divmod at the minimum and at zero") {
+  // divmod gives floor_divide and remainder, also at (MIN, -1), where it
+  // trapped on x86, and at a zero divisor, where it trapped on x86 and where
+  // the compiler took the divisor of a bool to be true (divmod(true, false)
+  // gave (true, false) in a Release build).
+  check_division_tables(DivOp::DivMod);
+}
+
+TEST_CASE("test compiled floor_divide by a constant -1") {
+  // The compiled kernel is built with the constant -1 as the divisor. The
+  // compiler may not take MIN / -1 to be impossible: -x > 0 is not x < 0.
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  std::vector<int32_t> v32 = {imin, imin + 1, -1, 0, 1, imax};
+  std::vector<int64_t> v64 = {lmin, lmin + 1, -1, 0, 1, lmax};
+
+  // Expected for x = MIN, MIN + 1, -1, 0, 1, MAX: floor_divide(x, -1) is MIN,
+  // MAX, 1, 0, -1, MIN + 1.
+  std::vector<std::vector<bool>> expected = {
+      {false, true, true, false, false, false}, // x // -1 > 0
+      {true, false, false, false, true, true}, // x // -1 < 0
+      {true, false, false, true, false, false}, // x // -1 == x
+  };
+  auto compiled = compile(compare_floor_divide_by_minus_one);
+  auto check = [&](const std::vector<array>& inputs) {
+    auto out = compiled(inputs);
+    REQUIRE_EQ(out.size(), 3);
+    for (int i = 0; i < 3; ++i) {
+      array want(expected[i].begin(), {6}, bool_);
+      CHECK(division_equal(out[i], want));
+    }
+  };
+  auto fresh = [](const auto& v, Dtype dtype) {
+    std::vector<array> inputs;
+    for (int i = 0; i < 3; ++i) {
+      inputs.push_back(array(v.begin(), {6}, dtype));
+    }
+    return inputs;
+  };
+  check(fresh(v32, int32));
+  check(fresh(v64, int64));
+}
+
 TEST_CASE("test diagonal") {
   auto x = array({0, 1, 2, 3, 4, 5, 6, 7}, {4, 2});
   auto out = diagonal(x);
