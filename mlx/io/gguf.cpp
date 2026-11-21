@@ -144,6 +144,8 @@ std::tuple<allocator::Buffer, Dtype> extract_tensor_data(gguf_tensor* tensor) {
   return {buffer, float16};
 }
 
+inline size_t gguf_value_type_size(uint32_t type);
+
 void set_mx_value_from_gguf(
     gguf_ctx* ctx,
     uint32_t type,
@@ -247,6 +249,8 @@ void set_mx_value_from_gguf(
           throw std::runtime_error(
               "[load_gguf] Multiple levels of nested arrays are not supported.");
       }
+      // The strings of a string array moved ctx->off one by one above.
+      ctx->off += gguf_value_type_size(header.type) * size;
       break;
     }
     default:
@@ -255,8 +259,8 @@ void set_mx_value_from_gguf(
   }
   if (type == GGUF_VALUE_TYPE_STRING) {
     ctx->off += (sizeof(gguf_string) + std::get<std::string>(value).size());
-  } else if (auto pv = std::get_if<array>(&value); pv) {
-    ctx->off += pv->nbytes();
+  } else if (type != GGUF_VALUE_TYPE_ARRAY) {
+    ctx->off += gguf_value_type_size(type);
   }
 }
 
