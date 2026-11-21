@@ -123,6 +123,161 @@ TEST_CASE("test arange") {
   }
 }
 
+TEST_CASE("test arange computes each element from start") {
+  auto s = Device::cpu;
+  // A running sum in float32 stops at 2^24.
+  int start = (1 << 24) - 1024;
+  std::vector<float> counts(2048);
+  for (int i = 0; i < 2048; ++i) {
+    counts[i] = static_cast<float>(start + i);
+  }
+  auto x = arange(static_cast<double>(start), start + 2048.0, float32, s);
+  auto expected = array(counts.data(), {2048}, float32);
+  auto error = max(abs(subtract(x, expected, s), s), s);
+  CHECK_EQ(error.item<float>(), 0.0f);
+
+  // 16-bit types compute start + i * step in double. A running sum drifts.
+  x = arange(0.0, 1.0, 0.1, float16, s);
+  expected = array(
+      {0.0f,
+       0.0999755859375f,
+       0.199951171875f,
+       0.2998046875f,
+       0.39990234375f,
+       0.5f,
+       0.599609375f,
+       0.69970703125f,
+       0.7998046875f,
+       0.89990234375f},
+      float16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+  x = arange(0.0, 1.0, 0.1, bfloat16, s);
+  expected = array(
+      {0.0f,
+       0.10009765625f,
+       0.2001953125f,
+       0.30078125f,
+       0.400390625f,
+       0.5f,
+       0.6015625f,
+       0.69921875f,
+       0.80078125f,
+       0.90234375f},
+      bfloat16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+
+  // Element 0 is start, also when the step overflows to inf.
+  x = arange(0.0, 1e5, 7e4, float16, s);
+  expected = array({0.0f, std::numeric_limits<float>::infinity()}, float16);
+  CHECK(array_equal(x, expected, s).item<bool>());
+
+  // float64 rounds i * step, then the sum, as Python does. An FMA rounds
+  // once, which gives other values at these indices.
+  x = arange(0.3, 14000.0, 0.7, float64, s);
+  CHECK(x.shape() == Shape{20000});
+  auto indices =
+      array({3, 6, 13, 15, 10000, 10005, 19991, 19993, 19996, 19998});
+  expected = array(
+      {2.3999999999999995,
+       4.499999999999999,
+       9.4,
+       10.8,
+       7000.3,
+       7003.8,
+       13993.999999999998,
+       13995.399999999998,
+       13997.499999999998,
+       13998.899999999998},
+      float64);
+  CHECK(array_equal(take(x, indices, 0, s), expected, s).item<bool>());
+}
+
+namespace {
+
+// a has this shape and these values (and its own dtype).
+template <typename T>
+bool equal_to(const array& a, const std::vector<T>& want, const Shape& shape) {
+  auto w = array(want.begin(), shape, a.dtype());
+  return a.shape() == shape && array_equal(a, w).item<bool>();
+}
+
+template <typename T>
+bool equal_to(const array& a, const std::vector<T>& want) {
+  return equal_to(a, want, {static_cast<int>(want.size())});
+}
+
+} // namespace
+
+TEST_CASE("test arange of integers near the limits of the type") {
+  // Scope switch to the cpu: this tests the CPU arange.
+  StreamContext sc(Device::cpu);
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+  const int64_t p62 = int64_t(1) << 62;
+
+  // Every output fits; the step, or the value after the last output, does
+  // not. Doubles near 2^63 are 1024 apart.
+  CHECK(
+      equal_to<int32_t>(
+          arange(2147483646.0, 2147483648.0, 1.0, int32), {imax - 1, imax}));
+  CHECK(
+      equal_to<int32_t>(
+          arange(-2147483647.0, -2147483649.0, -1.0, int32), {imin + 1, imin}));
+  CHECK(
+      equal_to<int32_t>(
+          arange(-2e9, 2e9, 3e9, int32), {-2000000000, 1000000000}));
+  CHECK(
+      equal_to<int32_t>(
+          arange(-2147483648.0, 2147483648.0, 2147483648.0, int32), {imin, 0}));
+  CHECK(
+      equal_to<int64_t>(
+          arange(
+              4611686018427387904.0, 9223372036854774784.0, p62 / 2.0, int64),
+          {p62, p62 + p62 / 2}));
+  CHECK(
+      equal_to<int64_t>(
+          arange(-9223372036854775808.0, 9223372036854775808.0, 0x1p63, int64),
+          {lmin, 0}));
+  CHECK(
+      equal_to<uint32_t>(
+          arange(4294967295.0, 4294967293.0, -1.0, uint32),
+          {4294967295u, 4294967294u}));
+
+  // start + step does not fit, for one output, and start does not fit, for
+  // none.
+  CHECK(
+      equal_to<int32_t>(
+          arange(2147483647.0, 2147483648.0, 1.0, int32), {imax}));
+  CHECK(
+      equal_to<int64_t>(
+          arange(9223372036854774784.0, 0x1p63, 1024.0, int64), {lmax - 1023}));
+  auto empty = arange(3e9, 2.9e9, 1.0, int32);
+  eval(empty);
+  CHECK_EQ(empty.size(), 0);
+
+  // Outputs that do not fit: start and start + step saturate.
+  CHECK(
+      equal_to<int32_t>(
+          arange(2147483648.0, 2147483651.0, 1.0, int32), {imax, imax, imax}));
+  CHECK(
+      equal_to<int32_t>(
+          arange(-2147483651.0, -2147483648.0, 1.0, int32),
+          {imin, imin, imin}));
+  CHECK(equal_to<uint32_t>(arange(-1.0, 2.0, 1.0, uint32), {0, 0, 0}));
+  CHECK(
+      equal_to<int64_t>(
+          arange(0x1p63, 0x1p63 + 6144.0, 2048.0, int64), {lmax, lmax, lmax}));
+  // For 8 and 16 bit types, only that the result is defined: the values are
+  // not specified.
+  for (auto t : {int8, uint8, int16, uint16}) {
+    auto r = arange(-1e6, -1e6 + 3, 1.0, t);
+    eval(r);
+    CHECK_EQ(r.size(), 3);
+  }
+}
+
 TEST_CASE("test astype") {
   // Check type conversions
   {
