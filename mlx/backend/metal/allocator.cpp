@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 namespace mlx::core {
@@ -213,8 +214,11 @@ Buffer MetalAllocator::malloc(size_t size) {
   std::unique_lock lk(mutex_);
   MTL::Buffer* buf = buffer_cache_.reuse_from_cache(size);
   if (!buf) {
-    size_t mem_required =
-        get_active_memory() + buffer_cache_.cache_size() + size;
+    size_t active = active_memory_.load(std::memory_order_relaxed);
+    size_t cache_size = buffer_cache_.cache_size();
+    assert(active <= std::numeric_limits<size_t>::max() - cache_size);
+    assert(size <= std::numeric_limits<size_t>::max() - active - cache_size);
+    size_t mem_required = active + cache_size + size;
 
     // If we have a lot of memory pressure try to reclaim memory from the cache
     if (mem_required >= gc_limit_ || num_resources_ >= resource_limit_) {
@@ -248,6 +252,9 @@ Buffer MetalAllocator::malloc(size_t size) {
     }
   }
 
+  assert(
+      buf->length() <= std::numeric_limits<size_t>::max() -
+          active_memory_.load(std::memory_order_relaxed));
   active_memory_.store(
       active_memory_.load(std::memory_order_relaxed) + buf->length(),
       std::memory_order_relaxed);
@@ -277,6 +284,7 @@ void MetalAllocator::free(Buffer buffer) {
     return;
   }
   std::unique_lock lk(mutex_);
+  assert(buf->length() <= active_memory_.load(std::memory_order_relaxed));
   active_memory_.store(
       active_memory_.load(std::memory_order_relaxed) - buf->length(),
       std::memory_order_relaxed);
@@ -307,6 +315,9 @@ Buffer MetalAllocator::make_buffer(void* ptr, size_t size) {
   }
   std::unique_lock lk(mutex_);
   residency_sets_.insert(buf);
+  assert(
+      buf->length() <= std::numeric_limits<size_t>::max() -
+          active_memory_.load(std::memory_order_relaxed));
   active_memory_.store(
       active_memory_.load(std::memory_order_relaxed) + buf->length(),
       std::memory_order_relaxed);
@@ -325,6 +336,7 @@ void MetalAllocator::release(Buffer buffer) {
     return;
   }
   std::unique_lock lk(mutex_);
+  assert(buf->length() <= active_memory_.load(std::memory_order_relaxed));
   active_memory_.store(
       active_memory_.load(std::memory_order_relaxed) - buf->length(),
       std::memory_order_relaxed);
@@ -345,6 +357,14 @@ MetalAllocator& allocator() {
 }
 
 } // namespace metal
+
+namespace allocator {
+
+bool over_memory_limit() {
+  return metal::allocator().over_memory_limit();
+}
+
+} // namespace allocator
 
 size_t set_cache_limit(size_t limit) {
   return metal::allocator().set_cache_limit(limit);
