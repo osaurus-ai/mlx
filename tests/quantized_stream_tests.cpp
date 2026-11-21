@@ -84,7 +84,7 @@ TEST_CASE("test mixed affine gather storage follows the selected consumer") {
                 stream);
             const bool matrix = sorted && rows >= 16 && rows / experts >= 4;
             const bool mixed_vector =
-                device == Device::gpu && metal::is_available() && !matrix;
+                (device == Device::cpu || metal::is_available()) && !matrix;
             CHECK(output.dtype() == (mixed_vector ? bfloat16 : float32));
             CHECK(output.primitive().stream() == stream);
             auto expected = broadcast_to(
@@ -200,6 +200,215 @@ TEST_CASE("test affine quantized matmul casts preserve explicit stream") {
           synchronize(stream);
         }
       }
+    }
+  }
+}
+
+namespace {
+
+// bf16 x with f16 biases and, by default, f16 scales, in the mixed path's
+// layout. The f16 values need f16's precision. Every partial sum is exact
+// in float32.
+struct MixedInputs {
+  array x, w, scales, biases;
+  // The float32 weights the codes stand for; none at 6 bits.
+  std::optional<array> deq;
+};
+
+MixedInputs mixed_inputs(int bits, Stream s, Dtype scales_type = float16) {
+  constexpr int N = 32, K = 512;
+  auto g = reshape(arange(N * K / 64, s), {N, K / 64}, s);
+  auto odd = add(multiply(remainder(g, array(4), s), array(2), s), array(1), s);
+  // Scales of other types are the integers 1 and 2.
+  auto scales = scales_type == float16
+      ? add(divide(astype(odd, float32, s), array(256.0f), s), array(1.0f), s)
+      : astype(add(remainder(g, array(2), s), array(1), s), float32, s);
+  auto biases =
+      add(astype(subtract(remainder(g, array(5), s), array(2), s), float32, s),
+          array(1.0f / 256),
+          s);
+  auto x = subtract(remainder(arange(K, s), array(7), s), array(3), s);
+  auto codes = reshape(
+      remainder(arange(N * K, s), array(bits == 4 ? 13 : 15), s), {N, K}, s);
+  auto pack = [&]() {
+    // Code j of a word is at bits [bits * j, bits * (j + 1)).
+    int per = 32 / bits;
+    auto words = reshape(astype(codes, uint32, s), {N, K / per, per}, s);
+    auto shift = astype(multiply(arange(per, s), array(bits), s), uint32, s);
+    return sum(left_shift(words, shift, s), -1, false, s);
+  };
+  auto w = bits == 6
+      ? quantize(
+            reshape(sin(arange(N * K, float32, s), s), {N, K}, s),
+            64,
+            6,
+            "affine",
+            std::nullopt,
+            s)[0]
+      : pack();
+  std::optional<array> deq;
+  if (bits != 6) {
+    deq =
+        add(multiply(repeat(scales, 64, 1, s), astype(codes, float32, s), s),
+            repeat(biases, 64, 1, s),
+            s);
+  }
+  return {
+      astype(reshape(x, {1, K}, s), bfloat16, s),
+      w,
+      astype(scales, scales_type, s),
+      astype(biases, float16, s),
+      deq};
+}
+
+} // namespace
+
+TEST_CASE("test mixed bf16 and f16 quantized_matmul") {
+  // As on Metal: bf16 at 4 and 8 bits, from the f16 values with float32
+  // sums, rounded once. The inputs and references are built on the CPU.
+  auto cpu = new_stream(Device::cpu);
+  for (auto device : {Device::cpu, Device::gpu}) {
+    if (!is_available(device)) {
+      continue;
+    }
+    auto s = new_stream(device);
+    for (int bits : {4, 8}) {
+      CAPTURE(device);
+      CAPTURE(bits);
+      auto [x, w, scales, biases, deq] = mixed_inputs(bits, cpu);
+      auto y =
+          quantized_matmul(x, w, scales, biases, true, 64, bits, "affine", s);
+      // A BLAS matmul, not the quantized kernels.
+      auto ref = matmul(astype(x, float32, cpu), transpose(*deq, cpu), cpu);
+      CHECK(y.dtype() == bfloat16);
+      CHECK(
+          array_equal(y, astype(ref, bfloat16, cpu), false, cpu).item<bool>());
+    }
+  }
+  // 6 bits keeps its float32 output: the op still promotes.
+  auto [x, w, scales, biases, deq] = mixed_inputs(6, cpu);
+  auto y = quantized_matmul(x, w, scales, biases, true, 64, 6, "affine", cpu);
+  CHECK(y.dtype() == float32);
+  CHECK(y.inputs()[0].dtype() == float32);
+  auto ref = quantized_matmul(
+      astype(x, float32, cpu),
+      w,
+      astype(scales, float32, cpu),
+      astype(biases, float32, cpu),
+      true,
+      64,
+      6,
+      "affine",
+      cpu);
+  CHECK(array_equal(y, ref, false, cpu).item<bool>());
+}
+
+TEST_CASE("test mixed bf16 and f16 gather_qmm") {
+  // One expert: the same dtype and values as quantized_matmul gives.
+  auto cpu = new_stream(Device::cpu);
+  auto expert = array({0}, uint32);
+  auto one = [&](const array& a) { return expand_dims(a, 0, cpu); };
+  for (auto device : {Device::cpu, Device::gpu}) {
+    if (!is_available(device)) {
+      continue;
+    }
+    auto s = new_stream(device);
+    for (int bits : {4, 8}) {
+      CAPTURE(device);
+      CAPTURE(bits);
+      auto [x, w, scales, biases, deq] = mixed_inputs(bits, cpu);
+      auto g = gather_qmm(
+          x,
+          one(w),
+          one(scales),
+          one(biases),
+          std::nullopt,
+          expert,
+          true,
+          64,
+          bits,
+          "affine",
+          std::nullopt,
+          false,
+          s);
+      auto ref = matmul(astype(x, float32, cpu), transpose(*deq, cpu), cpu);
+      ref = astype(reshape(ref, {1, 1, ref.shape(-1)}, cpu), bfloat16, cpu);
+      CHECK(g.dtype() == bfloat16);
+      CHECK(array_equal(g, ref, false, cpu).item<bool>());
+    }
+  }
+  // 6 bits promotes, as in quantized_matmul.
+  auto [x, w, scales, biases, deq] = mixed_inputs(6, cpu);
+  auto g = gather_qmm(
+      x,
+      one(w),
+      one(scales),
+      one(biases),
+      std::nullopt,
+      expert,
+      true,
+      64,
+      6,
+      "affine",
+      std::nullopt,
+      false,
+      cpu);
+  CHECK(g.dtype() == float32);
+  CHECK(g.inputs()[0].dtype() == float32);
+  auto ref = gather_qmm(
+      astype(x, float32, cpu),
+      one(w),
+      one(astype(scales, float32, cpu)),
+      one(astype(biases, float32, cpu)),
+      std::nullopt,
+      expert,
+      true,
+      64,
+      6,
+      "affine",
+      std::nullopt,
+      false,
+      cpu);
+  CHECK(array_equal(g, ref, false, cpu).item<bool>());
+}
+
+TEST_CASE("test int16 scales with f16 biases promote") {
+  // Only f16 scales take the mixed path. Other scales promote to float32.
+  auto cpu = new_stream(Device::cpu);
+  auto expert = array({0}, uint32);
+  auto one = [&](const array& a) { return expand_dims(a, 0, cpu); };
+  for (auto device : {Device::cpu, Device::gpu}) {
+    if (!is_available(device)) {
+      continue;
+    }
+    for (int bits : {4, 8}) {
+      CAPTURE(device);
+      CAPTURE(bits);
+      auto [x, w, scales, biases, deq] = mixed_inputs(bits, cpu, int16);
+      auto ref = matmul(astype(x, float32, cpu), transpose(*deq, cpu), cpu);
+      // A failed op leaves its error on its stream, for the stream's next
+      // eval to throw. So each op gets a new stream.
+      auto y = quantized_matmul(
+          x, w, scales, biases, true, 64, bits, "affine", new_stream(device));
+      CHECK(y.dtype() == float32);
+      CHECK(array_equal(y, ref, false, cpu).item<bool>());
+      auto g = gather_qmm(
+          x,
+          one(w),
+          one(scales),
+          one(biases),
+          std::nullopt,
+          expert,
+          true,
+          64,
+          bits,
+          "affine",
+          std::nullopt,
+          false,
+          new_stream(device));
+      ref = reshape(ref, {1, 1, ref.shape(-1)}, cpu);
+      CHECK(g.dtype() == float32);
+      CHECK(array_equal(g, ref, false, cpu).item<bool>());
     }
   }
 }
