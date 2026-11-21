@@ -2057,6 +2057,141 @@ TEST_CASE("test arithmetic binary ops") {
   CHECK_EQ(logaddexp(x, y).item<complex64_t>(), complex64_t{1, 1});
 }
 
+namespace {
+
+template <typename T>
+struct WrapRow {
+  T a, b, sum, diff, prod;
+};
+
+// add, subtract and multiply of the rows, which are repeated `reps` times
+template <typename T>
+void check_wrapping(const std::vector<WrapRow<T>>& rows, int reps = 1) {
+  std::vector<T> a, b, sum, diff, prod;
+  for (int i = 0; i < reps; ++i) {
+    for (const auto& r : rows) {
+      a.push_back(r.a);
+      b.push_back(r.b);
+      sum.push_back(r.sum);
+      diff.push_back(r.diff);
+      prod.push_back(r.prod);
+    }
+  }
+  Dtype dtype = TypeToDtype<T>();
+  Shape shape{static_cast<int>(a.size())};
+  auto make = [&](const std::vector<T>& v) {
+    return array(v.begin(), shape, dtype);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(a);
+  auto y = make(b);
+  CHECK(equal(add(x, y), make(sum)));
+  CHECK(equal(subtract(x, y), make(diff)));
+  CHECK(equal(multiply(x, y), make(prod)));
+}
+
+} // namespace
+
+TEST_CASE("test integer arithmetic wraps around") {
+  // Integer add, subtract and multiply wrap around on overflow, as in numpy.
+  // Signed overflow is undefined in C++, so the scalar kernels do the
+  // arithmetic in unsigned types: this case fails under UBSan (USE_UBSAN=ON
+  // with UBSAN_OPTIONS=halt_on_error=1) if they stop doing so. The arrays are
+  // longer than the widest SIMD loop (max_size in simd/accelerate_simd.h), so
+  // that the vector loop and the scalar tail both run where there is a vector
+  // loop.
+  const int32_t imax = std::numeric_limits<int32_t>::max();
+  const int32_t imin = std::numeric_limits<int32_t>::min();
+  const int64_t lmax = std::numeric_limits<int64_t>::max();
+  const int64_t lmin = std::numeric_limits<int64_t>::min();
+
+  // Rows are a, b, a + b, a - b, a * b. 46341 * 46341 = 2^31 + 4633.
+  check_wrapping<int32_t>({
+      {imax, 1, imin, imax - 1, imax},
+      {imin, -1, imax, imin + 1, imin},
+      {imin, 1, imin + 1, imax, imin},
+      {imax, imax, -2, 0, 1},
+      {imin, imin, 0, 0, 0},
+      {imax, imin, -1, -1, imin},
+      {imax, 2, imin + 1, imax - 2, -2},
+      {65536, 65536, 131072, 0, 0},
+      {46341, 46341, 92682, 0, imin + 4633},
+      {0, imin, imin, imin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // 3037000500 * 3037000500 = 2^63 + 145474192
+  check_wrapping<int64_t>({
+      {lmax, 1, lmin, lmax - 1, lmax},
+      {lmin, -1, lmax, lmin + 1, lmin},
+      {lmin, 1, lmin + 1, lmax, lmin},
+      {lmax, lmax, -2, 0, 1},
+      {lmin, lmin, 0, 0, 0},
+      {lmax, lmin, -1, -1, lmin},
+      {lmax, 2, lmin + 1, lmax - 2, -2},
+      {4294967296, 4294967296, 8589934592, 0, 0},
+      {3037000500, 3037000500, 6074001000, 0, lmin + 145474192},
+      {0, lmin, lmin, lmin, 0},
+      {-3, 7, 4, -10, -21},
+  });
+
+  // The operands of uint16 are promoted to int, where 65535 * 65535 overflows.
+  check_wrapping<uint16_t>(
+      {
+          {65535, 65535, 65534, 0, 1},
+          {65535, 65534, 65533, 1, 2},
+          {256, 256, 512, 0, 0},
+          {65535, 1, 0, 65534, 65535},
+          {0, 1, 1, 65535, 0},
+          {300, 300, 600, 0, 24464},
+          {65535, 2, 1, 65533, 65534},
+          {32768, 2, 32770, 32766, 0},
+          {255, 255, 510, 0, 65025},
+      },
+      2);
+
+  // A scalar against an array takes the broadcast kernels. Rows are v,
+  // imax + v, v * imax, v - imax, imin - v.
+  struct BroadcastRow {
+    int32_t v, sum, prod, vdiff, sdiff;
+  };
+  std::vector<BroadcastRow> rows = {
+      {1, imin, imax, imin + 2, imax},
+      {2, imin + 1, -2, imin + 3, imax - 1},
+      {imax, -2, 1, 0, 1},
+      {imin, -1, imin, 1, 0},
+      {-1, imax - 1, imin + 1, imin, imin + 1},
+      {0, imax, 0, imin + 1, imin},
+      {3, imin + 2, imax - 2, imin + 4, imax - 2},
+      {imax - 1, -3, imin + 2, -1, 2},
+      {imin + 1, 0, -1, 2, -1},
+  };
+  std::vector<int32_t> v, sum, prod, vdiff, sdiff;
+  for (const auto& r : rows) {
+    v.push_back(r.v);
+    sum.push_back(r.sum);
+    prod.push_back(r.prod);
+    vdiff.push_back(r.vdiff);
+    sdiff.push_back(r.sdiff);
+  }
+  Shape shape{static_cast<int>(rows.size())};
+  auto make = [&](const std::vector<int32_t>& x) {
+    return array(x.begin(), shape, int32);
+  };
+  auto equal = [](const array& p, const array& q) {
+    return array_equal(p, q).item<bool>();
+  };
+  auto x = make(v);
+  array smax(imax);
+  array smin(imin);
+  CHECK(equal(add(smax, x), make(sum)));
+  CHECK(equal(multiply(x, smax), make(prod)));
+  CHECK(equal(subtract(x, smax), make(vdiff)));
+  CHECK(equal(subtract(smin, x), make(sdiff)));
+}
+
 TEST_CASE("test broadcast") {
   auto s = broadcast_shapes({1}, {1, 2});
   CHECK_EQ(s, Shape{1, 2});
