@@ -569,6 +569,14 @@ class TestQuantized(mlx_tests.MLXTestCase):
         self.assertEqual(y_q.shape, y_hat.shape)
         self.assertLess((y_q - y_hat).abs().max(), 1e-3)
 
+    def test_qqmm_unsupported_mode(self):
+        x = mx.zeros((32, 128))
+        w = mx.zeros((64, 128))
+        with self.assertRaises(ValueError):
+            mx.qqmm(x, w, mode="affine")
+        with self.assertRaises(ValueError):
+            mx.gather_qqmm(x, w, mode="affine")
+
     def test_qmm(self):
         key = mx.random.key(0)
         k1, k2 = mx.random.split(key)
