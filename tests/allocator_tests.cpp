@@ -143,6 +143,20 @@ TEST_CASE("test clear cache synchronizes cpu streams") {
 TEST_CASE("test concurrent allocator statistics") {
   // The linked backend supplies the actual allocator (CPU or Metal). Only tiny
   // buffers are allocated; no array graph, model or shader is needed.
+  // Earlier cases can leave buffers that Metal frees later, in a command
+  // buffer's completion handler. Wait for them before the baseline is read.
+  // Defensive: without a GPU, a non-empty clear_cache() syncs CPU streams too.
+  for (const auto& s : get_streams()) {
+    if (s.device == Device::cpu) {
+      synchronize(s);
+    }
+  }
+  // Only this thread's default GPU stream is synchronized here.
+  if (is_available(Device{Device::gpu})) {
+    if (auto gpu_stream = peek_default_stream(Device{Device::gpu})) {
+      synchronize(*gpu_stream);
+    }
+  }
   clear_cache();
   const auto initial_active = get_active_memory();
   const auto initial_limit = get_memory_limit();
