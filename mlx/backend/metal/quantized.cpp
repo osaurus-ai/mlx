@@ -713,6 +713,19 @@ void qmv_wide(
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
 
+// The fork's mixed q6 AR result is the exact F32 single-row reduction. A
+// multi-row kernel with another reduction order must not take these rows.
+inline bool exact_q6_f32_rows(
+    bool affine,
+    int bits,
+    Dtype dtype,
+    int group_size,
+    int K,
+    int N) {
+  return affine && bits == 6 && dtype == float32 && group_size == 64 &&
+      K % 512 == 0 && N % 8 == 0;
+}
+
 inline bool use_qmv_mma(
     const array& x,
     const array& w,
@@ -753,14 +766,19 @@ inline bool use_qmv_mma(
         biases->dtype() != x.dtype()) {
       return false;
     }
+    // The exact F32 q6 rows keep their single-row reduction order.
+    if (exact_q6_f32_rows(true, bits, x.dtype(), group_size, K, N)) {
+      return false;
+    }
     // Ultra keeps the vector kernels.
     if (d.get_architecture().back() == 'd') {
       return false;
     }
-    // Only 4 and 8 bits are instantiated; affine pays off from a smaller N *
-    // K than fp.
-    return (bits == 4 || bits == 8) && (N >= 512) && (K >= 512) &&
-        (int64_t(N) * K >= (int64_t(1) << 21)) && (N % 16 == 0);
+    // qmv_mma reads 2 to 8 bits (not 7). Affine pays off from a smaller
+    // N * K than fp, and from 2^20 on gen 15+ (M4).
+    int nk_log2 = d.get_architecture_gen() >= 15 ? 20 : 21;
+    return (bits >= 2 && bits != 7) && (N >= 512) && (K >= 512) &&
+        (int64_t(N) * K >= (int64_t(1) << nk_log2)) && (N % 16 == 0);
   }
   if (nax) {
     return (env::enable_tf32() || x.dtype() != float32) && (N >= 2048) &&
@@ -2306,8 +2324,8 @@ void dispatch_qmv(
   // results (Qwen4ExpQ6MixedAffineTests.mixedDenseQ6LayoutsAndCompilation).
   // Other formats/shapes keep the upstream wide dispatch; matrix prefill is
   // selected before this function and is unaffected.
-  const bool exact_q6_rows = mode == "affine" && bits == 6 &&
-      x.dtype() == float32 && group_size == 64 && K % 512 == 0 && N % 8 == 0;
+  const bool exact_q6_rows = exact_q6_f32_rows(
+      mode == "affine", bits, x.dtype(), group_size, K, N);
   // Small batch so route to qmv_wide, which reuses each weight group across the
   // M vectors.
   if (M >= 2 && use_qmv_wide(mode, d) && !global_scale && !exact_q6_rows) {

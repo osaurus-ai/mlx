@@ -221,7 +221,11 @@
   instantiate_affine_qmv_mma_types(64, bits)    \
   instantiate_affine_qmv_mma_types(32, bits)
 
+instantiate_affine_qmv_mma_groups(2)
+instantiate_affine_qmv_mma_groups(3)
 instantiate_affine_qmv_mma_groups(4)
+instantiate_affine_qmv_mma_groups(5)
+instantiate_affine_qmv_mma_groups(6)
 instantiate_affine_qmv_mma_groups(8)
 
 instantiate_quantized_all() // clang-format on
