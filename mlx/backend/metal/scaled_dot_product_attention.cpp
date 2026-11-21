@@ -1463,6 +1463,16 @@ void ScaledDotProductAttentionVJP::eval_gpu(
         "[ScaledDotProductAttentionVJP] NYI: attention sinks");
   }
 
+  // Return 0s if q or k is empty
+  if (inputs[0].size() == 0 || inputs[1].size() == 0) {
+    array zero(0, outputs[0].dtype());
+    for (auto& out : outputs) {
+      fill_gpu(zero, out, s);
+    }
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
+
   auto q = ensure_row_contiguous(inputs[0], d, s);
   auto k = ensure_row_contiguous(inputs[1], d, s);
   auto v = ensure_row_contiguous(inputs[2], d, s);
