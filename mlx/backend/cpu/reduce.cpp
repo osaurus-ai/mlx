@@ -148,7 +148,7 @@ template <typename T, typename U, typename Op>
 void contiguous_reduce_block(
     const T* x,
     U* accumulator,
-    int size,
+    int64_t size,
     Op op,
     U init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
@@ -166,7 +166,12 @@ void contiguous_reduce_block(
 }
 
 template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+void contiguous_reduce(
+    const T* x,
+    U* accumulator,
+    int64_t size,
+    Op op,
+    U init) {
   if constexpr (cascade_sum<U, Op>) {
     // Each block sums from init in the lanes, then adds into the accumulator.
     for (; size > sum_block; size -= sum_block, x += sum_block) {
@@ -178,11 +183,11 @@ void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
 
 // Helper for the ndimensional strided loop
 void nd_loop(
-    std::function<void(int)> callback,
+    std::function<void(int64_t)> callback,
     const Shape& shape,
     const Strides& strides) {
-  std::function<void(int, int)> loop_inner;
-  loop_inner = [&](int dim, int offset) {
+  std::function<void(int, int64_t)> loop_inner;
+  loop_inner = [&](int dim, int64_t offset) {
     if (dim < shape.size() - 1) {
       auto size = shape[dim];
       auto stride = strides[dim];
@@ -234,16 +239,16 @@ void reduction_op(
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
     if (plan.shape.size() == 0) {
       for (int i = 0; i < out.size(); i++, out_ptr++) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         contiguous_reduce(in_ptr + offset, out_ptr, reduction_size, Op{}, init);
       }
     } else {
       for (int i = 0; i < out.size(); i++, out_ptr++) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         nd_loop(
-            [&](int extra_offset) {
+            [&](int64_t extra_offset) {
               contiguous_reduce(
                   in_ptr + offset + extra_offset,
                   out_ptr,
@@ -282,7 +287,7 @@ void reduction_op(
 
     if (plan.shape.size() == 0) {
       for (int i = 0; i < out.size(); i += reduction_stride) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         strided_reduce(
             in_ptr + offset, out_ptr, reduction_size, reduction_stride, Op{});
@@ -290,10 +295,10 @@ void reduction_op(
       }
     } else {
       for (int i = 0; i < out.size(); i += reduction_stride) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         nd_loop(
-            [&](int extra_offset) {
+            [&](int64_t extra_offset) {
               strided_reduce(
                   in_ptr + offset + extra_offset,
                   out_ptr,
@@ -345,10 +350,10 @@ void reduction_op(
     }
 
     for (int i = 0; i < out.size(); i++, out_ptr++) {
-      int offset = elem_to_loc(i, shape, strides);
+      int64_t offset = elem_to_loc(i, shape, strides);
       U val = init;
       nd_loop(
-          [&](int extra_offset) {
+          [&](int64_t extra_offset) {
             val = Op{}(val, *(in_ptr + offset + extra_offset));
           },
           plan.shape,
@@ -378,7 +383,7 @@ void float_reduction(
 struct AndReduce {
   template <typename T>
   bool operator()(bool x, T y) {
-    return x & (y != 0);
+    return x & static_cast<bool>(y);
   }
 
   bool operator()(bool x, bool y) {
@@ -404,7 +409,7 @@ struct AndReduce {
 struct OrReduce {
   template <typename T>
   bool operator()(bool x, T y) {
-    return x | (y != 0);
+    return x | static_cast<bool>(y);
   }
 
   bool operator()(bool x, bool y) {
@@ -606,11 +611,10 @@ void Reduce::eval_cpu(const std::vector<array>& inputs, array& out) {
             break;
           case uint64:
           case int64:
-          // complex64 stays on the integer path. Testing it as a complex
-          // would go through complex64_t's conversion to float and only look
-          // at the real part, which would miss 1j.
-          case complex64:
             reduce_dispatch_and_or<int64_t>(in, out, reduce_type_, axes_);
+            break;
+          case complex64:
+            reduce_dispatch_and_or<complex64_t>(in, out, reduce_type_, axes_);
             break;
           case float64:
             reduce_dispatch_and_or<double>(in, out, reduce_type_, axes_);
