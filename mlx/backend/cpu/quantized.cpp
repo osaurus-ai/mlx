@@ -370,7 +370,7 @@ void _qmm_dispatch_typed(
     bool transposed_w) {
   switch (bits) {
     case 1:
-      _qmm_dispatch_group<T, 1>(
+      _qmm_dispatch_group<T, ScaleT, 1>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 2:
