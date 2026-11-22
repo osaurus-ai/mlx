@@ -1343,6 +1343,52 @@ class TestFastSDPA(mlx_tests.MLXTestCase):
                         tolerance = {"rtol": 1e-2, "atol": 1e-2}
                     self.assertTrue(mx.allclose(ref, out, **tolerance))
 
+    def test_sdpa_grad_sinks_and_nested(self):
+        D = 64
+        scale = D**-0.5
+        q = mx.random.normal((1, 4, 128, D), mx.float16)
+        k = mx.random.normal((1, 2, 128, D), mx.float16)
+        v = mx.random.normal((1, 2, 128, D), mx.float16)
+        sinks = mx.random.normal((4,), mx.float16)
+
+        def ref_attn(q, k, v, sinks):
+            if sinks is not None:
+                sinks = sinks.astype(mx.float32)
+            with mx.stream(mx.cpu):
+                return mlx_ref_attn(
+                    q.astype(mx.float32),
+                    k.astype(mx.float32),
+                    v.astype(mx.float32),
+                    scale=scale,
+                    mask="causal",
+                    sinks=sinks,
+                )
+
+        def fast_attn(q, k, v, sinks):
+            return mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=scale, mask="causal", sinks=sinks
+            )
+
+        # Gradients of the sinks
+        cotan = mx.random.normal(q.shape, mx.float16)
+        _, ref = mx.vjp(ref_attn, [q, k, v, sinks], [cotan])
+        _, out = mx.vjp(fast_attn, [q, k, v, sinks], [cotan])
+        for r, o in zip(ref, out):
+            self.assertTrue(mx.allclose(r, o, atol=1e-2, rtol=1e-2))
+
+        # Gradients of gradients
+        def nested(attn):
+            def loss(q):
+                out = attn(q, k, v, None).astype(mx.float32)
+                return (out**2).sum()
+
+            grad = mx.grad(loss)
+            return mx.grad(lambda q: grad(q).astype(mx.float32).sum())(q)
+
+        ref = nested(ref_attn)
+        out = nested(fast_attn)
+        self.assertTrue(mx.allclose(ref, out, atol=5e-2, rtol=5e-2))
+
 
 if __name__ == "__main__":
     mlx_tests.MLXTestRunner(failfast=True)
