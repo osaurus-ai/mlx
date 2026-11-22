@@ -84,7 +84,6 @@ TEST_CASE("test upstream Metal FP4 half and bfloat fallback numerical parity") {
 }
 
 TEST_CASE("test one-bit affine endpoints CPU GPU and small-K dispatch") {
-  REQUIRE(is_available(Device::gpu));
   for (auto dtype : {float32, float16, bfloat16}) {
     for (int width : {64, 128}) {
       for (int group : {32, 64, 128}) {
@@ -103,6 +102,9 @@ TEST_CASE("test one-bit affine endpoints CPU GPU and small-K dispatch") {
           auto input = ones({1, width}, dtype, Device::cpu);
           auto expected = matmul(astype(input, float32, Device::cpu), transpose(astype(weights, float32, Device::cpu), Device::cpu), Device::cpu);
           for (auto device : {Device::cpu, Device::gpu}) {
+            if (!is_available(device)) {
+              continue;
+            }
             CAPTURE(device);
             auto quantized = quantize(astype(weights, dtype, device), group, 1, "affine", std::nullopt, device);
             auto decoded = dequantize(quantized[0], quantized[1], quantized[2], group, 1, "affine", std::nullopt, dtype, Device::cpu);

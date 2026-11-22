@@ -6,6 +6,9 @@
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/cpu/copy.h"
 #include "mlx/backend/cpu/encoder.h"
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+#include "mlx/backend/cpu/quantized_highway.h"
+#endif
 #include "mlx/backend/cpu/simd/simd.h"
 #include "mlx/backend/cpu/unary.h"
 #include "mlx/backend/cpu/unary_ops.h"
@@ -988,6 +991,10 @@ void fp_bs_qmm_dispatch(
   }
 }
 
+} // namespace
+
+namespace cpu {
+
 // An empty output has no work, and K = 0 gives an empty sum, which is 0.
 // Return true when this has set out.
 bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
@@ -1007,12 +1014,21 @@ bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
   return true;
 }
 
-} // namespace
+} // namespace cpu
 
 void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
+  if (cpu::empty_qmm_cpu(inputs[0], out, stream())) {
     return;
   }
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  // Keep the one-bit and mixed-scale contracts from the generic CPU kernels.
+  const bool use_generic = mode_ == QuantizationMode::Affine &&
+      (bits_ == 1 || inputs[0].dtype() != inputs[2].dtype());
+  if (!use_generic) {
+    cpu::quantized_matmul_highway(inputs, out, stream(), mode_, group_size_, bits_, transpose_);
+    return;
+  }
+#endif
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -1055,9 +1071,18 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
+  if (cpu::empty_qmm_cpu(inputs[0], out, stream())) {
     return;
   }
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  // Keep the one-bit and mixed-scale contracts from the generic CPU kernels.
+  const bool use_generic = mode_ == QuantizationMode::Affine &&
+      (bits_ == 1 || inputs[0].dtype() != inputs[2].dtype());
+  if (!use_generic) {
+    cpu::gather_qmm_highway(inputs, out, stream(), mode_, group_size_, bits_, transpose_);
+    return;
+  }
+#endif
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -1347,6 +1372,12 @@ void dispatch_quantize(
 void fast::Quantize::eval_cpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+#if defined(MLX_USE_HIGHWAY_KERNELS)
+  if (bits_ != 1) {
+    cpu::quantize_affine_highway(inputs, outputs, stream(), group_size_, bits_);
+    return;
+  }
+#endif
   auto& encoder = cpu::get_command_encoder(stream());
   auto w = ensure_row_contiguous(inputs[0], encoder, stream());
   auto& out = outputs[0];
@@ -1397,6 +1428,7 @@ void fast::Quantize::eval_cpu(
   });
 }
 
+#if !defined(MLX_USE_HIGHWAY_KERNELS)
 void fast::ConvertFP8::eval_cpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
@@ -1438,7 +1470,7 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
+  if (cpu::empty_qmm_cpu(inputs[0], out, stream())) {
     return;
   }
   auto& encoder = cpu::get_command_encoder(stream());
@@ -1499,5 +1531,7 @@ void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
 void GatherQQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
   throw std::runtime_error("[GatherQQMM] NYI");
 }
+
+#endif // !defined(MLX_USE_HIGHWAY_KERNELS)
 
 } // namespace mlx::core
