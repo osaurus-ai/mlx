@@ -2,6 +2,8 @@
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
 // Builds with Highway compile quantized_highway_backend.cpp instead.
 
+#include <cstring>
+
 #include "mlx/backend/common/quantized.h"
 #include "mlx/backend/common/unary.h"
 #include "mlx/backend/cpu/copy.h"
@@ -58,9 +60,17 @@ static inline T dequantize_scale(uint8_t s) {
       uint16_t i;
     };
     FOrI out;
-    out.i = (s == 0 ? 0x40 : (static_cast<uint16_t>(s) << 7));
+    out.i = (s == 0) ? 0x40
+                     : (s == 0xFF ? 0x7FC0 : (static_cast<uint16_t>(s) << 7));
     return static_cast<T>(out.f);
   }
+}
+
+// The block scale times scale_dec, the decode factor of an nvfp4 global scale.
+template <typename T, int group_size>
+static inline T dequantize_scale(uint8_t s, float scale_dec) {
+  return static_cast<T>(
+      static_cast<float>(dequantize_scale<T, group_size>(s)) * scale_dec);
 }
 
 template <typename T, int bits>
@@ -153,16 +163,18 @@ void _qmm(
   }
 }
 
-template <typename T, int bits, int group_size>
+template <typename T, typename ScaleT, int bits, int group_size>
 void _qmm_t(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K) {
+  // Mixed types sum in float32 and round once, as the Metal kernels do.
+  using AccT = std::conditional_t<std::is_same_v<T, ScaleT>, T, float>;
   constexpr int bitmask = (1 << bits) - 1;
 
   constexpr int pack_factor = get_pack_factor(bits, 8);
@@ -171,23 +183,23 @@ void _qmm_t(
 
   for (int m = 0; m < M; m++) {
     const uint8_t* w_local = (const uint8_t*)w;
-    const T* scales_local = scales;
-    const T* biases_local = biases;
+    const ScaleT* scales_local = scales;
+    const ScaleT* biases_local = biases;
 
     for (int n = 0; n < N; n++) {
       const T* x_local = x;
-      T sum = 0;
+      AccT sum = 0;
       for (int k = 0; k < K; k += group_size) {
-        T scale = *scales_local++;
-        T bias = *biases_local++;
+        AccT scale = static_cast<AccT>(*scales_local++);
+        AccT bias = static_cast<AccT>(*biases_local++);
 
         for (int kw = 0; kw < packs_in_group; kw++) {
           if constexpr (bits == 3 || bits == 5 || bits == 6) {
-            T wl[pack_factor];
-            extract_bits<T, bits>(w_local, wl);
+            AccT wl[pack_factor];
+            extract_bits<AccT, bits>(w_local, wl);
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
-              sum += x_local[p] * (scale * wl[p] + bias);
+              sum += static_cast<AccT>(x_local[p]) * (scale * wl[p] + bias);
             }
             w_local += bytes_per_pack;
             x_local += pack_factor;
@@ -196,8 +208,8 @@ void _qmm_t(
             uint8_t wi = *w_local++;
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
-              sum +=
-                  (*x_local++) * (scale * static_cast<T>(wi & bitmask) + bias);
+              sum += static_cast<AccT>(*x_local++) *
+                  (scale * static_cast<AccT>(wi & bitmask) + bias);
               if (bits != 8) {
                 wi >>= bits;
               }
@@ -205,7 +217,7 @@ void _qmm_t(
           }
         }
       }
-      *result = sum;
+      *result = static_cast<T>(sum);
       result++;
     }
 
@@ -285,36 +297,42 @@ void _qmm_t_simd(
   }
 }
 
-template <typename T, int bits, int group_size>
+template <typename T, typename ScaleT, int bits, int group_size>
 void _qmm_dispatch_transpose(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
     bool transposed_w) {
   if (transposed_w) {
     // the simd size must be a multiple of the number of elements per word
-    if constexpr (32 % bits == 0 && simd::max_size<T> % (32 / bits) == 0) {
+    if constexpr (
+        std::is_same_v<T, ScaleT> && 32 % bits == 0 &&
+        simd::max_size<T> % (32 / bits) == 0) {
       _qmm_t_simd<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
     } else {
-      _qmm_t<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
+      _qmm_t<T, ScaleT, bits, group_size>(
+          result, x, w, scales, biases, M, N, K);
     }
-  } else {
+  } else if constexpr (std::is_same_v<T, ScaleT>) {
     _qmm<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
+  } else {
+    throw std::invalid_argument(
+        "[quantized_matmul] Scales of another type than x need transposed weights.");
   }
 }
 
-template <typename T, int bits>
+template <typename T, typename ScaleT, int bits>
 void _qmm_dispatch_group(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
@@ -322,15 +340,15 @@ void _qmm_dispatch_group(
     bool transposed_w) {
   switch (group_size) {
     case 32:
-      _qmm_dispatch_transpose<T, bits, 32>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 32>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     case 64:
-      _qmm_dispatch_transpose<T, bits, 64>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 64>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     case 128:
-      _qmm_dispatch_transpose<T, bits, 128>(
+      _qmm_dispatch_transpose<T, ScaleT, bits, 128>(
           result, x, w, scales, biases, M, N, K, transposed_w);
       break;
     default:
@@ -339,13 +357,13 @@ void _qmm_dispatch_group(
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _qmm_dispatch_typed(
     T* result,
     const T* x,
     const uint32_t* w,
-    const T* scales,
-    const T* biases,
+    const ScaleT* scales,
+    const ScaleT* biases,
     int M,
     int N,
     int K,
@@ -353,36 +371,41 @@ void _qmm_dispatch_typed(
     int bits,
     bool transposed_w) {
   switch (bits) {
+    case 1:
+      _qmm_dispatch_group<T, ScaleT, 1>(
+          result, x, w, scales, biases, M, N, K, group_size, transposed_w);
+      break;
     case 2:
-      _qmm_dispatch_group<T, 2>(
+      _qmm_dispatch_group<T, ScaleT, 2>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 3:
-      _qmm_dispatch_group<T, 3>(
+      _qmm_dispatch_group<T, ScaleT, 3>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 4:
-      _qmm_dispatch_group<T, 4>(
+      _qmm_dispatch_group<T, ScaleT, 4>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 5:
-      _qmm_dispatch_group<T, 5>(
+      _qmm_dispatch_group<T, ScaleT, 5>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 6:
-      _qmm_dispatch_group<T, 6>(
+      _qmm_dispatch_group<T, ScaleT, 6>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     case 8:
-      _qmm_dispatch_group<T, 8>(
+      _qmm_dispatch_group<T, ScaleT, 8>(
           result, x, w, scales, biases, M, N, K, group_size, transposed_w);
       break;
     default:
-      throw std::invalid_argument("Quantization bits must be 2, 3, 4, 6 or 8.");
+      throw std::invalid_argument(
+          "Quantization bits must be 1, 2, 3, 4, 5, 6 or 8.");
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _qmm_dispatch_typed(
     array& out,
     const array& x,
@@ -397,15 +420,16 @@ void _qmm_dispatch_typed(
   int N = out.shape(-1);
   int w_els = w.ndim() > 2 ? w.shape(-1) * w.shape(-2) : 0;
   int g_els = w.ndim() > 2 ? scales.shape(-1) * scales.shape(-2) : 0;
-  int batch_size = x.size() / (K * M);
+  // out is not empty here (see empty_qmm_cpu). Count its matrices.
+  int batch_size = out.size() / (M * N);
 
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
   auto w_ptr = w.data<uint32_t>();
-  auto scales_ptr = scales.data<T>();
-  auto biases_ptr = biases.data<T>();
+  auto scales_ptr = scales.data<ScaleT>();
+  auto biases_ptr = biases.data<ScaleT>();
   for (int i = 0; i < batch_size; i++) {
-    _qmm_dispatch_typed<T>(
+    _qmm_dispatch_typed<T, ScaleT>(
         out_ptr + i * M * N,
         x_ptr + elem_to_loc(i * M * K, x.shape(), x.strides()),
         w_ptr + elem_to_loc(i * w_els, w.shape(), w.strides()),
@@ -429,6 +453,14 @@ void _qmm_dispatch(
     int bits,
     int group_size,
     bool transposed_w) {
+  // The kernels read scales and biases as x's type, or as f16 for bf16 x,
+  // and write x's type.
+  const bool mixed = x.dtype() == bfloat16 && scales.dtype() == float16;
+  if (biases.dtype() != scales.dtype() ||
+      (!mixed && scales.dtype() != x.dtype()) || out.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[quantized_matmul] Unsupported scale, bias or output type.");
+  }
   switch (x.dtype()) {
     case float32:
       _qmm_dispatch_typed<float>(
@@ -439,8 +471,13 @@ void _qmm_dispatch(
           out, x, w, scales, biases, bits, group_size, transposed_w);
       break;
     case bfloat16:
-      _qmm_dispatch_typed<bfloat16_t>(
-          out, x, w, scales, biases, bits, group_size, transposed_w);
+      if (scales.dtype() == float16) {
+        _qmm_dispatch_typed<bfloat16_t, float16_t>(
+            out, x, w, scales, biases, bits, group_size, transposed_w);
+      } else {
+        _qmm_dispatch_typed<bfloat16_t>(
+            out, x, w, scales, biases, bits, group_size, transposed_w);
+      }
       break;
     default:
       throw std::invalid_argument(
@@ -456,7 +493,8 @@ void fp_qmm(
     const uint8_t* scales,
     int M,
     int N,
-    int K) {
+    int K,
+    float scale_dec) {
   constexpr int pack_factor = get_pack_factor(bits, 8);
   constexpr int packs_in_group = group_size / pack_factor;
 
@@ -471,7 +509,7 @@ void fp_qmm(
       T xi = *x++;
 
       for (int n = 0; n < N; n += group_size) {
-        T scale = dequantize_scale<T, group_size>(*scales_local++);
+        T scale = dequantize_scale<T, group_size>(*scales_local++, scale_dec);
         for (int ng = 0; ng < packs_in_group; ng++) {
           if constexpr (bits == 4) {
             (*result_local++) +=
@@ -498,7 +536,8 @@ void fp_qmm_t(
     const uint8_t* scales,
     int M,
     int N,
-    int K) {
+    int K,
+    float scale_dec) {
   constexpr int pack_factor = get_pack_factor(bits, 8);
   constexpr int packs_in_group = group_size / pack_factor;
 
@@ -510,7 +549,7 @@ void fp_qmm_t(
       const T* x_local = x;
       T sum = 0;
       for (int k = 0; k < K; k += group_size) {
-        T scale = dequantize_scale<T, group_size>(*scales_local++);
+        T scale = dequantize_scale<T, group_size>(*scales_local++, scale_dec);
 
         T gsum = 0;
         for (int kw = 0; kw < packs_in_group; kw++) {
@@ -564,7 +603,8 @@ void fp_qmm_t_simd(
     const uint8_t* scales,
     int M,
     int N,
-    int K) {
+    int K,
+    float scale_dec) {
   constexpr int pack_factor = get_pack_factor(bits, 32);
   constexpr int packs_in_group = group_size / pack_factor;
   constexpr int S = simd::max_size<T>;
@@ -580,7 +620,7 @@ void fp_qmm_t_simd(
       simd::Simd<float, S> acc(0);
       auto x_local = x;
       for (int k = 0; k < K; k += group_size) {
-        T scale = dequantize_scale<T, group_size>(*scales_local++);
+        T scale = dequantize_scale<T, group_size>(*scales_local++, scale_dec);
 
         simd::Simd<float, S> g_acc(0);
         for (int kw = 0; kw < packs_in_group; kw += packs_per_simd) {
@@ -610,16 +650,18 @@ void fp_qmm_dispatch_transpose(
     int M,
     int N,
     int K,
-    bool transposed_w) {
+    bool transposed_w,
+    float scale_dec = 1.0f) {
   if (transposed_w) {
     // the simd size must be a multiple of the number of elements per word
     if constexpr (simd::max_size<T> % 8 == 0) {
-      fp_qmm_t_simd<T, group_size, bits>(result, x, w, scales, M, N, K);
+      fp_qmm_t_simd<T, group_size, bits>(
+          result, x, w, scales, M, N, K, scale_dec);
     } else {
-      fp_qmm_t<T, group_size, bits>(result, x, w, scales, M, N, K);
+      fp_qmm_t<T, group_size, bits>(result, x, w, scales, M, N, K, scale_dec);
     }
   } else {
-    fp_qmm<T, group_size, bits>(result, x, w, scales, M, N, K);
+    fp_qmm<T, group_size, bits>(result, x, w, scales, M, N, K, scale_dec);
   }
 }
 
@@ -629,13 +671,15 @@ void fp_qmm_dispatch_mode(
     const array& x,
     const array& w,
     const array& scales,
-    bool transposed_w) {
+    bool transposed_w,
+    float scale_dec) {
   int K = x.shape(-1);
   int M = x.ndim() > 1 ? x.shape(-2) : 1;
   int N = out.shape(-1);
   int w_els = w.ndim() > 2 ? w.shape(-1) * w.shape(-2) : 0;
   int g_els = w.ndim() > 2 ? scales.shape(-1) * scales.shape(-2) : 0;
-  int batch_size = x.size() / (K * M);
+  // out is not empty here (see empty_qmm_cpu). Count its matrices.
+  int batch_size = out.size() / (M * N);
 
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
@@ -650,7 +694,8 @@ void fp_qmm_dispatch_mode(
         M,
         N,
         K,
-        transposed_w);
+        transposed_w,
+        scale_dec);
   }
 }
 
@@ -662,13 +707,14 @@ void fp_qmm_dispatch_typed(
     const array& scales,
     int group_size,
     int bits,
-    bool transposed_w) {
+    bool transposed_w,
+    float scale_dec) {
   if (bits == 8) {
-    fp_qmm_dispatch_mode<T, 32, 8>(out, x, w, scales, transposed_w);
+    fp_qmm_dispatch_mode<T, 32, 8>(out, x, w, scales, transposed_w, scale_dec);
   } else if (group_size == 32) {
-    fp_qmm_dispatch_mode<T, 32, 4>(out, x, w, scales, transposed_w);
+    fp_qmm_dispatch_mode<T, 32, 4>(out, x, w, scales, transposed_w, scale_dec);
   } else {
-    fp_qmm_dispatch_mode<T, 16, 4>(out, x, w, scales, transposed_w);
+    fp_qmm_dispatch_mode<T, 16, 4>(out, x, w, scales, transposed_w, scale_dec);
   }
 }
 
@@ -679,19 +725,20 @@ void fp_qmm_dispatch(
     const array& scales,
     int group_size,
     int bits,
-    bool transposed_w) {
+    bool transposed_w,
+    float scale_dec = 1.0f) {
   switch (x.dtype()) {
     case bfloat16:
       fp_qmm_dispatch_typed<bfloat16_t>(
-          out, x, w, scales, group_size, bits, transposed_w);
+          out, x, w, scales, group_size, bits, transposed_w, scale_dec);
       break;
     case float16:
       fp_qmm_dispatch_typed<float16_t>(
-          out, x, w, scales, group_size, bits, transposed_w);
+          out, x, w, scales, group_size, bits, transposed_w, scale_dec);
       break;
     case float32:
       fp_qmm_dispatch_typed<float>(
-          out, x, w, scales, group_size, bits, transposed_w);
+          out, x, w, scales, group_size, bits, transposed_w, scale_dec);
       break;
     default:
       throw std::invalid_argument(
@@ -699,7 +746,7 @@ void fp_qmm_dispatch(
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT = T>
 void _bs_qmm_dispatch_typed(
     array& out,
     const array& x,
@@ -721,8 +768,8 @@ void _bs_qmm_dispatch_typed(
   auto out_ptr = out.data<T>();
   auto x_ptr = x.data<T>();
   auto w_ptr = w.data<uint32_t>();
-  auto scales_ptr = scales.data<T>();
-  auto biases_ptr = biases.data<T>();
+  auto scales_ptr = scales.data<ScaleT>();
+  auto biases_ptr = biases.data<ScaleT>();
   auto lhs_indices_ptr = lhs_indices.data<uint32_t>();
   auto rhs_indices_ptr = rhs_indices.data<uint32_t>();
 
@@ -731,7 +778,7 @@ void _bs_qmm_dispatch_typed(
         i, lhs_indices.shape(), lhs_indices.strides())];
     int w_idx = rhs_indices_ptr[elem_to_loc(
         i, rhs_indices.shape(), rhs_indices.strides())];
-    _qmm_dispatch_typed<T>(
+    _qmm_dispatch_typed<T, ScaleT>(
         out_ptr + i * M * N,
         x_ptr + elem_to_loc(x_idx * M * K, x.shape(), x.strides()),
         w_ptr + elem_to_loc(w_idx * w_els, w.shape(), w.strides()),
@@ -759,6 +806,14 @@ void _bs_qmm_dispatch(
     int bits,
     int group_size,
     bool transposed_w) {
+  // The kernels read scales and biases as x's type, or as f16 for bf16 x,
+  // and write x's type.
+  const bool mixed = x.dtype() == bfloat16 && scales.dtype() == float16;
+  if (biases.dtype() != scales.dtype() ||
+      (!mixed && scales.dtype() != x.dtype()) || out.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[gather_qmm] Unsupported scale, bias or output type.");
+  }
   switch (x.dtype()) {
     case float32:
       _bs_qmm_dispatch_typed<float>(
@@ -787,17 +842,31 @@ void _bs_qmm_dispatch(
           transposed_w);
       break;
     case bfloat16:
-      _bs_qmm_dispatch_typed<bfloat16_t>(
-          out,
-          x,
-          w,
-          scales,
-          biases,
-          lhs_indices,
-          rhs_indices,
-          bits,
-          group_size,
-          transposed_w);
+      if (scales.dtype() == float16) {
+        _bs_qmm_dispatch_typed<bfloat16_t, float16_t>(
+            out,
+            x,
+            w,
+            scales,
+            biases,
+            lhs_indices,
+            rhs_indices,
+            bits,
+            group_size,
+            transposed_w);
+      } else {
+        _bs_qmm_dispatch_typed<bfloat16_t>(
+            out,
+            x,
+            w,
+            scales,
+            biases,
+            lhs_indices,
+            rhs_indices,
+            bits,
+            group_size,
+            transposed_w);
+      }
       break;
     default:
       throw std::invalid_argument(
@@ -921,9 +990,31 @@ void fp_bs_qmm_dispatch(
   }
 }
 
+// An empty output has no work, and K = 0 gives an empty sum, which is 0.
+// Return true when this has set out.
+bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return true;
+  }
+  if (x.shape(-1) != 0) {
+    return false;
+  }
+  out.set_data(allocator::malloc(out.nbytes()));
+  auto& encoder = cpu::get_command_encoder(stream);
+  encoder.set_output_array(out);
+  encoder.dispatch([out_ptr = out.data<void>(), nbytes = out.nbytes()]() {
+    std::memset(out_ptr, 0, nbytes);
+  });
+  return true;
+}
+
 } // namespace
 
 void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -966,6 +1057,9 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -1107,7 +1201,8 @@ void fp_quantize_dequantize(
     array& out_arr,
     int bits,
     int group_size,
-    size_t w_size) {
+    size_t w_size,
+    float scale_enc) {
   auto w = w_arr.data<T>();
   auto out = out_arr.data<T>();
 
@@ -1121,20 +1216,21 @@ void fp_quantize_dequantize(
     }
     scale /= bits == 4 ? 6.0f : 448.0f;
     if (group_size == 16) {
-      scale = dequantize_scale<float, 16>(detail::ToFP8()(scale));
+      scale = dequantize_scale<float, 16>(detail::ToFP8()(scale * scale_enc));
     } else {
       scale = dequantize_scale<float, 32>(to_fp8_e8m0_round_up(scale));
     }
 
+    // scale_enc is 1 unless the mode is nvfp4 with global scales.
     for (int j = 0; j < group_size; ++j) {
-      float w_el = scale == 0 ? 0.0f : w[idx + j] / scale;
+      float w_el = scale == 0 ? 0.0f : w[idx + j] * scale_enc / scale;
       float output;
       if (bits == 8) {
         output = detail::FromFP8()(detail::ToFP8()(w_el));
       } else {
         output = FP4_LUT[to_fp4_e2m1(w_el)];
       }
-      out[idx + j] = static_cast<T>(scale * output);
+      out[idx + j] = static_cast<T>(scale * output / scale_enc);
     }
   }
 }
@@ -1143,13 +1239,17 @@ void dispatch_quantize_dequantize(
     const array& w,
     array& out,
     int bits,
-    int group_size) {
+    int group_size,
+    float scale_enc) {
   if (w.dtype() == float16) {
-    fp_quantize_dequantize<float16_t>(w, out, bits, group_size, w.size());
+    fp_quantize_dequantize<float16_t>(
+        w, out, bits, group_size, w.size(), scale_enc);
   } else if (w.dtype() == bfloat16) {
-    fp_quantize_dequantize<bfloat16_t>(w, out, bits, group_size, w.size());
+    fp_quantize_dequantize<bfloat16_t>(
+        w, out, bits, group_size, w.size(), scale_enc);
   } else if (w.dtype() == float32) {
-    fp_quantize_dequantize<float>(w, out, bits, group_size, w.size());
+    fp_quantize_dequantize<float>(
+        w, out, bits, group_size, w.size(), scale_enc);
   } else {
     throw std::runtime_error(
         "[quantize_dequantize] Only supports floating point inputs");
@@ -1183,15 +1283,24 @@ void quantize(
       w_min = std::min(w_min, (float)w[w_idx + j]);
     }
     bool mask = std::abs(w_min) > std::abs(w_max);
-    float scale = std::max((w_max - w_min) / n_bins, eps);
-    scale = mask ? scale : -scale;
+    float scale;
+    float bias;
 
-    float edge = mask ? w_min : w_max;
-    float q0 = std::rint(edge / scale);
-    float bias = 0;
-    if (q0 != 0) {
-      scale = edge / q0;
-      bias = edge;
+    if (bits == 1) {
+      // Affine 1-bit: bit 0 -> w_min, bit 1 -> w_max
+      scale = std::max(w_max - w_min, eps);
+      bias = w_min;
+    } else {
+      scale = std::max((w_max - w_min) / n_bins, eps);
+      scale = mask ? scale : -scale;
+
+      float edge = mask ? w_min : w_max;
+      float q0 = std::rint(edge / scale);
+      bias = 0;
+      if (q0 != 0) {
+        scale = edge / q0;
+        bias = edge;
+      }
     }
     size_t out_idx = i * int_per_group;
     for (int j = 0; j < int_per_group / bytes_per_pack; ++j) {
@@ -1331,6 +1440,9 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& encoder = cpu::get_command_encoder(stream());
 
   bool w_quantized = (inputs[1].dtype() == uint32);
@@ -1353,16 +1465,32 @@ void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
     encoder.set_input_array(x);
     encoder.set_input_array(w);
     encoder.set_input_array(scales);
+    // The nvfp4 global scales of x and w, if given, follow the scales.
+    std::vector<array> global_scales;
+    if (mode_ == QuantizationMode::Nvfp4 && inputs.size() == 5) {
+      for (int i : {3, 4}) {
+        encoder.set_input_array(inputs[i]);
+        global_scales.push_back(array::unsafe_weak_copy(inputs[i]));
+      }
+    }
     encoder.set_output_array(out);
     encoder.dispatch([out = array::unsafe_weak_copy(out),
                       x = array::unsafe_weak_copy(x),
                       xhat = array::unsafe_weak_copy(xhat),
                       w = array::unsafe_weak_copy(w),
                       scales = array::unsafe_weak_copy(scales),
+                      global_scales = std::move(global_scales),
                       group_size_ = group_size_,
                       bits_ = bits_]() mutable {
-      dispatch_quantize_dequantize(x, xhat, bits_, group_size_);
-      fp_qmm_dispatch(out, xhat, w, scales, group_size_, bits_, true);
+      float scale_enc = 1.0f;
+      float scale_dec = 1.0f;
+      if (!global_scales.empty()) {
+        scale_enc = (448.0f * 6.0f) / global_scales[0].data<float>()[0];
+        scale_dec = global_scales[1].data<float>()[0] / (448.0f * 6.0f);
+      }
+      dispatch_quantize_dequantize(x, xhat, bits_, group_size_, scale_enc);
+      fp_qmm_dispatch(
+          out, xhat, w, scales, group_size_, bits_, true, scale_dec);
     });
     return;
   } else {

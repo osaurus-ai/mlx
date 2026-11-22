@@ -31,12 +31,14 @@
 #include <algorithm>
 #include <complex>
 #include <functional>
+#include <limits>
 
 #ifdef _MSC_VER
 #include <intrin.h> // For _BitScanReverse
 #endif
 
 #endif // MLX_USE_HIGHWAY_KERNELS
+#include "mlx/backend/cpu/simd/saturating_cast.h"
 #include "mlx/types/complex.h"
 #include "mlx/types/half_types.h"
 
@@ -53,9 +55,9 @@ struct Simd<T, 1> {
   T value;
   Simd() {}
   template <typename U>
-  Simd(Simd<U, 1> v) : value(v.value) {}
+  Simd(Simd<U, 1> v) : value(saturating_cast<T>(v.value)) {}
   template <typename U>
-  Simd(U v) : value(v) {}
+  Simd(U v) : value(saturating_cast<T>(v)) {}
 
   T operator[](int) const {
     return value;
@@ -92,6 +94,12 @@ struct HasMemberStore<
 } // namespace detail
 
 #endif // MLX_USE_HIGHWAY_KERNELS
+// Conversion of a value that is known to fit in To, without a range test.
+template <typename To, typename T>
+Simd<To, 1> convert_in_range(Simd<T, 1> v) {
+  return static_cast<To>(v.value);
+}
+
 template <typename T, int N>
 Simd<T, N> load(const T* x) {
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
@@ -147,7 +155,6 @@ Simd<T, 1> recip(Simd<T, 1> in) {
     return op(in.value);           \
   }
 
-DEFAULT_UNARY(operator-, std::negate{})
 DEFAULT_UNARY(operator!, std::logical_not{})
 DEFAULT_UNARY(acos, std::acos)
 DEFAULT_UNARY(acosh, std::acosh)
@@ -166,15 +173,6 @@ DEFAULT_UNARY(sinh, std::sinh)
 DEFAULT_UNARY(sqrt, std::sqrt)
 DEFAULT_UNARY(tan, std::tan)
 DEFAULT_UNARY(tanh, std::tanh)
-
-template <typename T>
-Simd<T, 1> abs(Simd<T, 1> in) {
-  if constexpr (std::is_unsigned_v<T>) {
-    return in;
-  } else {
-    return std::abs(in.value);
-  }
-}
 
 template <typename T>
 Simd<T, 1> log1p(Simd<T, 1> in) {
@@ -242,9 +240,41 @@ Simd<bool, 1> isnan(Simd<T, 1> in) {
     return a.value OP b;                                                   \
   }
 
-DEFAULT_BINARY(+)
-DEFAULT_BINARY(-)
-DEFAULT_BINARY(*)
+// Signed integer overflow is undefined behavior in C++, while mlx wraps integer
+// add, subtract and multiply around. When the result type is a signed integer,
+// apply op to the operands converted to the unsigned type of the same size and
+// convert the result back (modular since C++20). The result type is the one to
+// look at: operands of 8 and 16 bits are promoted to int first, and the product
+// of two uint16 values can overflow int.
+template <typename Op, typename T1, typename T2>
+auto wrapping(Op op, T1 a, T2 b) {
+  using R = decltype(op(a, b));
+  if constexpr (std::is_integral_v<R> && std::is_signed_v<R>) {
+    using U = std::make_unsigned_t<R>;
+    return static_cast<R>(op(static_cast<U>(a), static_cast<U>(b)));
+  } else {
+    return op(a, b);
+  }
+}
+
+#define WRAPPING_BINARY(OP)                                                   \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(Simd<T1, 1> a, Simd<T2, 1> b)                              \
+      ->Simd<decltype(a.value OP b.value), 1> {                               \
+    return wrapping([](auto x, auto y) { return x OP y; }, a.value, b.value); \
+  }                                                                           \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(T1 a, Simd<T2, 1> b)->Simd<decltype(a OP b.value), 1> {    \
+    return wrapping([](auto x, auto y) { return x OP y; }, a, b.value);       \
+  }                                                                           \
+  template <typename T1, typename T2>                                         \
+  auto operator OP(Simd<T1, 1> a, T2 b)->Simd<decltype(a.value OP b), 1> {    \
+    return wrapping([](auto x, auto y) { return x OP y; }, a.value, b);       \
+  }
+
+WRAPPING_BINARY(+)
+WRAPPING_BINARY(-)
+WRAPPING_BINARY(*)
 DEFAULT_BINARY(/)
 DEFAULT_BINARY(<<)
 DEFAULT_BINARY(>>)
@@ -253,6 +283,29 @@ DEFAULT_BINARY(^)
 DEFAULT_BINARY(&)
 DEFAULT_BINARY(&&)
 DEFAULT_BINARY(||)
+
+// Negation and abs wrap around too: -MIN and abs(MIN) are MIN, as in two's
+// complement. A signed result is computed as 0 - x in the unsigned type, like
+// the arithmetic above.
+template <typename T>
+Simd<T, 1> operator-(Simd<T, 1> in) {
+  if constexpr (std::is_integral_v<T>) {
+    return wrapping([](auto x, auto y) { return x - y; }, T(0), in.value);
+  } else {
+    return std::negate{}(in.value);
+  }
+}
+
+template <typename T>
+Simd<T, 1> abs(Simd<T, 1> in) {
+  if constexpr (std::is_unsigned_v<T>) {
+    return in;
+  } else if constexpr (std::is_integral_v<T>) {
+    return in.value < 0 ? -in : in;
+  } else {
+    return std::abs(in.value);
+  }
+}
 
 template <typename T>
 Simd<T, 1> clz(Simd<T, 1> x_) {
@@ -273,8 +326,8 @@ Simd<T, 1> clz(Simd<T, 1> x_) {
 #endif
 }
 
-// Integer division by zero traps on x86 and returns 0 on arm64. Define the
-// quotient as 0 on all platforms, which keeps a == (a / b) * b + (a % b).
+// Integer division by zero and min / -1 trap on x86. Use the arm64 results
+// (0 and min) on all platforms, which keep a == (a / b) * b + (a % b).
 template <typename T>
 Simd<T, 1> divide(Simd<T, 1> a_, Simd<T, 1> b_) {
   T a = a_.value;
@@ -282,6 +335,11 @@ Simd<T, 1> divide(Simd<T, 1> a_, Simd<T, 1> b_) {
   if constexpr (std::is_integral_v<T>) {
     if (b == 0) {
       return T(0);
+    }
+    if constexpr (std::is_signed_v<T>) {
+      if (a == std::numeric_limits<T>::min() && b == -1) {
+        return a;
+      }
     }
   }
   return a / b;
@@ -295,6 +353,12 @@ Simd<T, 1> remainder(Simd<T, 1> a_, Simd<T, 1> b_) {
   if constexpr (std::is_integral_v<T>) {
     if (b == 0) {
       return a;
+    }
+    // a % -1 is 0, and min % -1 traps on x86.
+    if constexpr (std::is_signed_v<T>) {
+      if (b == -1) {
+        return T(0);
+      }
     }
     r = a % b;
   } else {
@@ -359,12 +423,15 @@ Simd<T, 1> pow(Simd<T, 1> a, Simd<T, 1> b) {
         return 0;
       }
     }
+    // The power is the exact one modulo 2^N: the products wrap around, and the
+    // last squaring of the base, which the result does not need, may too.
+    auto mul = [](auto x, auto y) { return x * y; };
     while (exp) {
       if (exp & 1) {
-        res *= base;
+        res = wrapping(mul, res, base);
       }
       exp >>= 1;
-      base *= base;
+      base = wrapping(mul, base, base);
     }
     return res;
   }

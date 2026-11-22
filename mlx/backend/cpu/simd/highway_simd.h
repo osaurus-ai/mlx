@@ -285,7 +285,13 @@ struct Simd {
         !highway_detail::is_half_v<T> && !highway_detail::is_half_v<U> &&
         !std::is_same_v<T, bool> && !std::is_same_v<U, bool> &&
         sizeof(T) == sizeof(U)) {
-      value = hn::ConvertTo(D(), other.value);
+      if constexpr (is_float_to_int_cast_v<T, U>) {
+        // ConvertTo saturates. Its result for NaN depends on the target.
+        value = hn::ConvertTo(
+            D(), hn::IfThenZeroElse(hn::IsNaN(other.value), other.value));
+      } else {
+        value = hn::ConvertTo(D(), other.value);
+      }
     } else if constexpr (std::is_same_v<U, bool>) {
       const D d;
       value = hn::IfThenElse(
@@ -297,7 +303,7 @@ struct Simd {
       alignas(64) T tmp_out[N];
       other.store(tmp_in);
       for (int i = 0; i < N; ++i) {
-        tmp_out[i] = static_cast<T>(tmp_in[i]);
+        tmp_out[i] = saturating_cast<T>(tmp_in[i]);
       }
       value = load(tmp_out).value;
     }
@@ -549,8 +555,9 @@ MLX_HIGHWAY_ARITHMETIC(operator*, Mul)
 template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> operator/(Simd<T, N> a, Simd<T, N> b) {
   if constexpr (std::is_integral_v<T>) {
-    return highway_detail::map_integer_binary(
-        a, b, [](T x, T y) { return static_cast<T>(x / y); });
+    return highway_detail::map_integer_binary(a, b, [](T x, T y) {
+      return divide(Simd<T, 1>(x), Simd<T, 1>(y)).value;
+    });
   } else if constexpr (highway_detail::is_half_v<T>) {
     return Simd<T, N>(Simd<float, N>(a) / Simd<float, N>(b));
   } else {
@@ -560,13 +567,14 @@ inline Simd<T, N> operator/(Simd<T, N> a, Simd<T, N> b) {
   }
 }
 
-// As base_simd.h's divide: an integer quotient by zero is 0. Each lane divides
-// as a scalar: hn::Div is implementation-defined for y == 0 and INT_MIN / -1.
+// base_simd.h's divide: each lane divides as a scalar, because hn::Div is
+// implementation-defined for y == 0 and INT_MIN / -1.
 template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> divide(Simd<T, N> a, Simd<T, N> b) {
   if constexpr (std::is_integral_v<T>) {
-    return highway_detail::map_integer_binary(
-        a, b, [](T x, T y) { return y == 0 ? T(0) : static_cast<T>(x / y); });
+    return highway_detail::map_integer_binary(a, b, [](T x, T y) {
+      return divide(Simd<T, 1>(x), Simd<T, 1>(y)).value;
+    });
   } else {
     return a / b;
   }
@@ -893,17 +901,7 @@ template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> remainder(Simd<T, N> a, Simd<T, N> b) {
   if constexpr (std::is_integral_v<T>) {
     return highway_detail::map_integer_binary(a, b, [](T x, T y) {
-      // As base_simd.h: a remainder by zero is the dividend.
-      if (y == 0) {
-        return x;
-      }
-      T r = static_cast<T>(x % y);
-      if constexpr (std::is_signed_v<T>) {
-        if (r != 0 && ((r < 0) != (y < 0))) {
-          r = static_cast<T>(r + y);
-        }
-      }
-      return r;
+      return remainder(Simd<T, 1>(x), Simd<T, 1>(y)).value;
     });
   } else {
     return highway_detail::map_binary(a, b, [](auto x, auto y) {
@@ -920,20 +918,7 @@ template <typename T, int N, highway_detail::EnableIfVector<N> = 0>
 inline Simd<T, N> pow(Simd<T, N> base, Simd<T, N> exp) {
   if constexpr (std::is_integral_v<T>) {
     return highway_detail::map_integer_binary(base, exp, [](T x, T y) {
-      T result = 1;
-      if constexpr (std::is_signed_v<T>) {
-        if (y < 0) {
-          return T(0);
-        }
-      }
-      while (y) {
-        if (y & 1) {
-          result = static_cast<T>(result * x);
-        }
-        y = static_cast<T>(y >> 1);
-        x = static_cast<T>(x * x);
-      }
-      return result;
+      return pow(Simd<T, 1>(x), Simd<T, 1>(y)).value;
     });
   } else {
     return highway_detail::map_binary(
@@ -1045,6 +1030,17 @@ MLX_HIGHWAY_TRANSCENDENTAL(sinh, sinh)
 MLX_HIGHWAY_TRANSCENDENTAL(tan, tan)
 MLX_HIGHWAY_TRANSCENDENTAL(tanh, tanh)
 #undef MLX_HIGHWAY_TRANSCENDENTAL
+
+// Conversion of a value that is known to fit in To, without a range test.
+// The vector form of convert_in_range in base_simd.h.
+template <
+    typename To,
+    typename T,
+    int N,
+    highway_detail::EnableIfVector<N> = 0>
+inline Simd<To, N> convert_in_range(Simd<T, N> v) {
+  return Simd<To, N>(v);
+}
 
 } // namespace mlx::core::simd
 HWY_AFTER_NAMESPACE();

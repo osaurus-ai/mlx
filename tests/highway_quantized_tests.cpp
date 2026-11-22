@@ -95,6 +95,19 @@ std::vector<float> through_qqmm(
 
 } // namespace
 
+TEST_CASE("highway mxfp8 reads an E8M0 scale of 0xFF as NaN") {
+  auto s = Device::cpu;
+  auto w = view(full({8, 64}, 1, uint8, s), uint32, s);
+  auto scales = full({8, 2}, 0xFF, uint8, s);
+  auto d = dequantize(
+      w, scales, std::nullopt, 32, 8, "mxfp8", std::nullopt, std::nullopt, s);
+  CHECK(all(isnan(d, s), s).item<bool>());
+  auto x = ones({1, 64}, float32, s);
+  auto y =
+      quantized_matmul(x, w, scales, std::nullopt, true, 32, 8, "mxfp8", s);
+  CHECK(all(isnan(y, s), s).item<bool>());
+}
+
 TEST_CASE("highway qqmm mxfp4 rounds half to even on the e2m1 grid") {
   // amax 6.0 gives an exact E8M0 scale of 1, so each value is rounded alone.
   // Ties go to the even mantissa, as upstream's to_fp4_e2m1 does.

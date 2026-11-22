@@ -13,6 +13,15 @@
 
 using namespace mlx::core;
 
+// Called by the block sum tests in ops_tests.cpp.
+int highway_float_lanes() {
+  return simd::max_size<float>;
+}
+
+float highway_reduce_sum(const float* lanes) {
+  return simd::sum(simd::load<float, simd::max_size<float>>(lanes));
+}
+
 // Highway's StoreMaskBits and LoadMaskBits may access 8 bytes of the buffer
 // they are given, even when the lanes need fewer (g3doc/quick_reference.md).
 static_assert(sizeof(simd::Simd<bool, 2>::bits) >= 8, "mask storage");

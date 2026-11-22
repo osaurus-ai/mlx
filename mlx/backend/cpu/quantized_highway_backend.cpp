@@ -2,6 +2,7 @@
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 // #3019's quantized.cpp: builds without Highway compile quantized.cpp instead.
 
+#include <cstring>
 #include <array>
 #include <memory>
 #include <vector>
@@ -172,7 +173,8 @@ static inline T dequantize_scale(uint8_t s) {
       uint16_t i;
     };
     FOrI out;
-    out.i = (s == 0 ? 0x40 : (static_cast<uint16_t>(s) << 7));
+    out.i = (s == 0) ? 0x40
+                     : (s == 0xFF ? 0x7FC0 : (static_cast<uint16_t>(s) << 7));
     return static_cast<T>(out.f);
   }
 }
@@ -224,24 +226,26 @@ void _qmm(
   constexpr int bytes_per_pack = get_bytes_per_pack(bits);
   constexpr int packs_in_group = group_size / pack_factor;
 
+  // Accumulate in float32, as quantized.cpp does since ml-explore/mlx#4803.
+  std::vector<float> acc(N);
   for (int m = 0; m < M; m++) {
     const uint8_t* w_local = (const uint8_t*)w;
     const T* scales_local = scales;
     const T* biases_local = biases;
 
-    std::fill(result, result + N, 0);
+    std::fill(acc.begin(), acc.end(), 0.0f);
 
     for (int k = 0; k < K; k++) {
-      T* result_local = result;
-      T xi = *x++;
+      float* result_local = acc.data();
+      float xi = *x++;
 
       for (int n = 0; n < N; n += group_size) {
-        T scale = *scales_local++;
-        T bias = *biases_local++;
+        float scale = *scales_local++;
+        float bias = *biases_local++;
         for (int ng = 0; ng < packs_in_group; ng++) {
           if constexpr (bits == 3 || bits == 5 || bits == 6) {
-            T wl[pack_factor];
-            extract_bits<T, bits>(w_local, wl);
+            float wl[pack_factor];
+            extract_bits<float, bits>(w_local, wl);
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
               (*result_local++) += xi * (scale * wl[p] + bias);
@@ -253,7 +257,7 @@ void _qmm(
 #pragma clang loop unroll(full)
             for (int p = 0; p < pack_factor; p++) {
               (*result_local++) +=
-                  xi * (scale * static_cast<T>(wi & bitmask) + bias);
+                  xi * (scale * static_cast<float>(wi & bitmask) + bias);
               if (bits != 8) {
                 wi >>= bits;
               }
@@ -263,6 +267,7 @@ void _qmm(
       }
     }
 
+    std::copy(acc.begin(), acc.end(), result);
     result += N;
   }
 }
@@ -298,19 +303,19 @@ void _qmm_t_cols(
     const T* scales_local = scales_base;
     const T* biases_local = biases_base;
     const T* x_local = x;
-    T sum = 0;
+    float sum = 0; // float32, as quantized.cpp since ml-explore/mlx#4803
 
     for (int k = 0; k < K; k += group_size) {
-      T scale = *scales_local++;
-      T bias = *biases_local++;
+      float scale = *scales_local++;
+      float bias = *biases_local++;
 
       for (int kw = 0; kw < packs_in_group; kw++) {
         if constexpr (bits == 3 || bits == 5 || bits == 6) {
-          T wl[pack_factor];
-          extract_bits<T, bits>(w_local, wl);
+          float wl[pack_factor];
+          extract_bits<float, bits>(w_local, wl);
 #pragma clang loop unroll(full)
           for (int p = 0; p < pack_factor; p++) {
-            sum += x_local[p] * (scale * wl[p] + bias);
+            sum += static_cast<float>(x_local[p]) * (scale * wl[p] + bias);
           }
           w_local += bytes_per_pack;
           x_local += pack_factor;
@@ -318,7 +323,7 @@ void _qmm_t_cols(
           uint8_t wi = *w_local++;
 #pragma clang loop unroll(full)
           for (int p = 0; p < pack_factor; p++) {
-            sum += (*x_local++) * (scale * static_cast<T>(wi & bitmask) + bias);
+            sum += static_cast<float>(*x_local++) * (scale * static_cast<float>(wi & bitmask) + bias);
             if (bits != 8) {
               wi >>= bits;
             }
@@ -397,18 +402,18 @@ void _qmm_t(
 
       for (int n = 0; n < N; n++) {
         const T* x_local = x;
-        T sum = 0;
+        float sum = 0; // float32, as quantized.cpp since ml-explore/mlx#4803
         for (int k = 0; k < K; k += group_size) {
-          T scale = *scales_local++;
-          T bias = *biases_local++;
+          float scale = *scales_local++;
+          float bias = *biases_local++;
 
           for (int kw = 0; kw < packs_in_group; kw++) {
             if constexpr (bits == 3 || bits == 5 || bits == 6) {
-              T wl[pack_factor];
-              extract_bits<T, bits>(w_local, wl);
+              float wl[pack_factor];
+              extract_bits<float, bits>(w_local, wl);
 #pragma clang loop unroll(full)
               for (int p = 0; p < pack_factor; p++) {
-                sum += x_local[p] * (scale * wl[p] + bias);
+                sum += static_cast<float>(x_local[p]) * (scale * wl[p] + bias);
               }
               w_local += bytes_per_pack;
               x_local += pack_factor;
@@ -416,8 +421,8 @@ void _qmm_t(
               uint8_t wi = *w_local++;
 #pragma clang loop unroll(full)
               for (int p = 0; p < pack_factor; p++) {
-                sum += (*x_local++) *
-                    (scale * static_cast<T>(wi & bitmask) + bias);
+                sum += static_cast<float>(*x_local++) *
+                    (scale * static_cast<float>(wi & bitmask) + bias);
                 if (bits != 8) {
                   wi >>= bits;
                 }
@@ -2387,9 +2392,31 @@ void quantize_dequantize_fp_dispatch(
   }
 }
 
+// An empty output has no work, and K = 0 gives an empty sum, which is 0.
+// Return true when this has set out.
+bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return true;
+  }
+  if (x.shape(-1) != 0) {
+    return false;
+  }
+  out.set_data(allocator::malloc(out.nbytes()));
+  auto& encoder = cpu::get_command_encoder(stream);
+  encoder.set_output_array(out);
+  encoder.dispatch([out_ptr = out.data<void>(), nbytes = out.nbytes()]() {
+    std::memset(out_ptr, 0, nbytes);
+  });
+  return true;
+}
+
 } // namespace
 
 void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -2443,6 +2470,9 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
@@ -2711,6 +2741,9 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (empty_qmm_cpu(inputs[0], out, stream())) {
+    return;
+  }
   // No path here quantizes w; quantized.cpp raises the same error.
   if (inputs[1].dtype() != uint32) {
     throw std::runtime_error("[QQMatmul] NYI for the general case");

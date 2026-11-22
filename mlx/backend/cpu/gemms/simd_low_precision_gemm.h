@@ -397,6 +397,8 @@ void matmul_lowp(
             M,
             N,
             K,
+            lda,
+            ldb,
             alpha,
             beta);
       }

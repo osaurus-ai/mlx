@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <sstream>
 #include <type_traits>
@@ -35,6 +36,14 @@ static std::pair<array, bool> compute_dynamic_offset(
     const Strides& strides,
     const std::vector<int>& axes,
     Stream stream) {
+  auto& encoder = cpu::get_command_encoder(stream);
+  // The kernel reads the indices contiguously
+  if (!indices.flags().row_contiguous) {
+    auto copy = contiguous_copy_cpu(indices, stream);
+    encoder.add_temporary(copy);
+    return compute_dynamic_offset(copy, strides, axes, stream);
+  }
+
   array offset({1}, int64, nullptr, {});
   bool donate = indices.is_donatable() &&
       (indices.data_size() * indices.itemsize()) >= offset.itemsize();
@@ -44,7 +53,6 @@ static std::pair<array, bool> compute_dynamic_offset(
     offset.set_data(allocator::malloc(offset.itemsize()));
   }
 
-  auto& encoder = cpu::get_command_encoder(stream);
   encoder.set_input_array(indices);
   encoder.set_output_array(offset);
   auto compute_offset =
@@ -79,7 +87,14 @@ static std::pair<array, bool> compute_dynamic_offset(
 }
 
 void AsStrided::eval_cpu(const std::vector<array>& inputs, array& out) {
-  eval(inputs, out);
+  assert(inputs.size() == 1);
+  if (inputs[0].flags().row_contiguous) {
+    eval(inputs[0], out);
+  } else {
+    auto copy = contiguous_copy_cpu(inputs[0], stream());
+    cpu::get_command_encoder(stream()).add_temporary(copy);
+    eval(copy, out);
+  }
 }
 void Broadcast::eval_cpu(const std::vector<array>& inputs, array& out) {
   eval(inputs, out);
@@ -132,7 +147,12 @@ void Arange::eval_cpu(const std::vector<array>& inputs, array& out) {
     if constexpr (std::is_same_v<T, bool>) {
       throw std::runtime_error("Bool type unsupported for arange.");
     } else {
-      arange<T>(start_, start_ + step_, out, out.size(), stream());
+      arange<T>(
+          arange_cast<T>(start_),
+          arange_cast<T>(start_ + step_),
+          out,
+          out.size(),
+          stream());
     }
   });
 }
@@ -257,9 +277,15 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
                     num_keys,
                     kshape = keys.shape(),
                     kstrides = keys.strides()]() mutable {
+    // The bits of key i start at i * bytes_per_key, which need not be 4-byte
+    // aligned for 1 and 2 byte outputs, so words are written with memcpy: it is
+    // defined at any alignment and compiles to a single store on arm64 and x86.
+    auto store = [](char* cptr, size_t loc, uint32_t v) {
+      std::memcpy(cptr + 4 * loc, &v, sizeof(v));
+    };
     auto copy_remaining = [&](char* cptr, size_t loc, uint32_t v) {
       if (4 * loc + 4 <= bytes_per_key) {
-        reinterpret_cast<uint32_t*>(cptr)[loc] = v;
+        store(cptr, loc, v);
       } else {
         std::copy(
             reinterpret_cast<char*>(&v),
@@ -272,7 +298,6 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto half_size = out_skip / 2;
     bool even = out_skip % 2 == 0;
     for (int i = 0; i < num_keys; ++i, cptr += bytes_per_key) {
-      auto ptr = reinterpret_cast<uint32_t*>(cptr);
       // Get ith key
       auto kidx = 2 * i;
       auto k1_elem = elem_to_loc(kidx, kshape, kstrides);
@@ -281,12 +306,13 @@ void RandomBits::eval_cpu(const std::vector<array>& inputs, array& out) {
 
       std::pair<uintptr_t, uintptr_t> count{0, half_size + !even};
       for (; count.first + 1 < half_size; count.first++, count.second++) {
-        std::tie(ptr[count.first], ptr[count.second]) =
-            random::threefry2x32_hash(key, count);
+        auto rb = random::threefry2x32_hash(key, count);
+        store(cptr, count.first, rb.first);
+        store(cptr, count.second, rb.second);
       }
       if (count.first < half_size) {
         auto rb = random::threefry2x32_hash(key, count);
-        ptr[count.first++] = rb.first;
+        store(cptr, count.first++, rb.first);
         copy_remaining(cptr, count.second, rb.second);
       }
       if (!even) {
@@ -380,8 +406,20 @@ void View::eval_cpu(const std::vector<array>& inputs, array& out) {
       strides[i] *= ibytes;
       strides[i] /= obytes;
     }
+    // Last axis can have any stride
+    if (obytes < ibytes) {
+      strides.back() = 1;
+    }
+    auto flags = in.flags();
+    if (ibytes != obytes) {
+      // Last axis size can change contiguity
+      auto [_, row_contiguous, col_contiguous] =
+          check_contiguity(out.shape(), strides);
+      flags.row_contiguous = row_contiguous;
+      flags.col_contiguous = col_contiguous;
+    }
     out.copy_shared_buffer(
-        in, strides, in.flags(), in.data_size() * ibytes / obytes);
+        in, strides, flags, in.data_size() * ibytes / obytes);
   } else {
     auto tmp = array(
         in.shape(), in.dtype() == bool_ ? uint8 : in.dtype(), nullptr, {});

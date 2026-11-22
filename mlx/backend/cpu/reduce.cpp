@@ -90,8 +90,18 @@ struct ReductionAccumulator {
   using type = std::conditional_t<widen_to_float, float, U>;
 };
 
+// Float sums are made in blocks of sum_block elements, and the block sums are
+// added. Rows up to sum_block elements keep their results.
+constexpr int sum_block = 4096;
+
+struct SumReduce;
+
+template <typename U, typename Op>
+constexpr bool cascade_sum =
+    std::is_same_v<Op, SumReduce> && !std::is_integral_v<U>;
+
 template <typename T, typename U, typename Op>
-void strided_reduce(
+void strided_reduce_block(
     const T* x,
     U* accumulator,
     int size,
@@ -117,6 +127,33 @@ void strided_reduce(
   }
 };
 
+template <typename T, typename U, typename Op>
+void strided_reduce(
+    const T* x,
+    U* accumulator,
+    int size,
+    size_t stride,
+    Op op) {
+  if constexpr (cascade_sum<U, Op>) {
+    if (size > sum_block) {
+      // The first block goes into the accumulator, each later block into
+      // partial from zero.
+      strided_reduce_block(x, accumulator, sum_block, stride, op);
+      std::vector<U> partial(stride);
+      for (int i = sum_block; i < size; i += sum_block) {
+        int n = std::min(size - i, sum_block);
+        std::fill(partial.begin(), partial.end(), U(0));
+        strided_reduce_block(x + i * stride, partial.data(), n, stride, op);
+        for (size_t j = 0; j < stride; j++) {
+          accumulator[j] = op(accumulator[j], partial[j]);
+        }
+      }
+      return;
+    }
+  }
+  strided_reduce_block(x, accumulator, size, stride, op);
+}
+
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 // Accumulator type: use float for half-precision types to avoid precision loss
 template <typename U>
@@ -135,7 +172,7 @@ struct AccumType<float16_t> {
 #endif // MLX_USE_HIGHWAY_KERNELS
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 template <typename T, typename A, typename Op>
-A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
+A contiguous_accumulate_block(const T* x, int size, Op op, A acc, A init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<A>);
   simd::Simd<A, N> accumulator_v(init);
   while (size >= N) {
@@ -151,6 +188,16 @@ A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
   return result;
 }
 
+template <typename T, typename A, typename Op>
+A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
+  if constexpr (cascade_sum<A, Op>) {
+    for (; size > sum_block; size -= sum_block, x += sum_block) {
+      acc = contiguous_accumulate_block(x, sum_block, op, acc, init);
+    }
+  }
+  return contiguous_accumulate_block(x, size, op, acc, init);
+}
+
 template <typename T, typename U, typename Op>
 void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
   using A = typename AccumType<U>::type;
@@ -159,7 +206,12 @@ void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
 }
 #else
 template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+void contiguous_reduce_block(
+    const T* x,
+    U* accumulator,
+    int64_t size,
+    Op op,
+    U init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<U>);
   simd::Simd<U, N> accumulator_v(init);
   while (size >= N) {
@@ -172,6 +224,22 @@ void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
     *accumulator = op(*accumulator, *x);
     x++;
   }
+}
+
+template <typename T, typename U, typename Op>
+void contiguous_reduce(
+    const T* x,
+    U* accumulator,
+    int64_t size,
+    Op op,
+    U init) {
+  if constexpr (cascade_sum<U, Op>) {
+    // Each block sums from init in the lanes, then adds into the accumulator.
+    for (; size > sum_block; size -= sum_block, x += sum_block) {
+      contiguous_reduce_block(x, accumulator, sum_block, op, init);
+    }
+  }
+  contiguous_reduce_block(x, accumulator, size, op, init);
 }
 #endif // MLX_USE_HIGHWAY_KERNELS
 
@@ -226,11 +294,11 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
 #endif // MLX_USE_HIGHWAY_KERNELS
 // Helper for the ndimensional strided loop
 void nd_loop(
-    std::function<void(int)> callback,
+    std::function<void(int64_t)> callback,
     const Shape& shape,
     const Strides& strides) {
-  std::function<void(int, int)> loop_inner;
-  loop_inner = [&](int dim, int offset) {
+  std::function<void(int, int64_t)> loop_inner;
+  loop_inner = [&](int dim, int64_t offset) {
     if (dim < shape.size() - 1) {
       auto size = shape[dim];
       auto stride = strides[dim];
@@ -324,16 +392,16 @@ void reduction_op(
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
     if (plan.shape.size() == 0) {
       for (int i = 0; i < out.size(); i++, out_ptr++) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         contiguous_reduce(in_ptr + offset, out_ptr, reduction_size, Op{}, init);
       }
     } else {
       for (int i = 0; i < out.size(); i++, out_ptr++) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         nd_loop(
-            [&](int extra_offset) {
+            [&](int64_t extra_offset) {
               contiguous_reduce(
                   in_ptr + offset + extra_offset,
                   out_ptr,
@@ -372,7 +440,7 @@ void reduction_op(
 
     if (plan.shape.size() == 0) {
       for (int i = 0; i < out.size(); i += reduction_stride) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         strided_reduce(
             in_ptr + offset, out_ptr, reduction_size, reduction_stride, Op{});
@@ -380,10 +448,10 @@ void reduction_op(
       }
     } else {
       for (int i = 0; i < out.size(); i += reduction_stride) {
-        int offset = elem_to_loc(i, shape, strides);
+        int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         nd_loop(
-            [&](int extra_offset) {
+            [&](int64_t extra_offset) {
               strided_reduce(
                   in_ptr + offset + extra_offset,
                   out_ptr,
@@ -402,11 +470,43 @@ void reduction_op(
   if (plan.type == GeneralReduce) {
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
 
+    if constexpr (cascade_sum<U, Op>) {
+      int64_t size = 1;
+      for (auto d : plan.shape) {
+        size *= d;
+      }
+      if (size > sum_block) {
+        for (int i = 0; i < out.size(); i++, out_ptr++) {
+          int64_t offset = elem_to_loc(i, shape, strides);
+          // The first block goes into val, each later block into block from 0.
+          U val = init;
+          U block = U(0);
+          int64_t count = 0;
+          nd_loop(
+              [&](int64_t extra_offset) {
+                U& acc = count < sum_block ? val : block;
+                acc = Op{}(acc, *(in_ptr + offset + extra_offset));
+                if (++count > sum_block && count % sum_block == 0) {
+                  val = Op{}(val, block);
+                  block = U(0);
+                }
+              },
+              plan.shape,
+              plan.strides);
+          if (count % sum_block != 0) {
+            val = Op{}(val, block);
+          }
+          *out_ptr = val;
+        }
+        return;
+      }
+    }
+
     for (int i = 0; i < out.size(); i++, out_ptr++) {
-      int offset = elem_to_loc(i, shape, strides);
+      int64_t offset = elem_to_loc(i, shape, strides);
       U val = init;
       nd_loop(
-          [&](int extra_offset) {
+          [&](int64_t extra_offset) {
             val = Op{}(val, *(in_ptr + offset + extra_offset));
           },
           plan.shape,
@@ -422,7 +522,7 @@ void float_reduction(
     array& out,
     const std::vector<int>& axes,
     U init) {
-  using AccT = ReductionAccumulator<T, U, Op>::type;
+  using AccT = typename ReductionAccumulator<T, U, Op>::type;
   if constexpr (std::is_same_v<AccT, U>) {
     reduction_op<T, U, Op>(x, out, axes, init);
   } else {
@@ -436,7 +536,7 @@ void float_reduction(
 struct AndReduce {
   template <typename T>
   bool operator()(bool x, T y) {
-    return x & (y != 0);
+    return x & static_cast<bool>(y);
   }
 
   bool operator()(bool x, bool y) {
@@ -462,7 +562,7 @@ struct AndReduce {
 struct OrReduce {
   template <typename T>
   bool operator()(bool x, T y) {
-    return x | (y != 0);
+    return x | static_cast<bool>(y);
   }
 
   bool operator()(bool x, bool y) {
@@ -535,10 +635,14 @@ struct MinReduce {
   };
 };
 
+// The scalar operators of SumReduce and ProdReduce take the elements after the
+// last full vector, add up the totals of separate contiguous segments, and do
+// the general (for example broadcast) reductions. Integer sums and products
+// wrap around there too (see simd::wrapping).
 struct SumReduce {
   template <typename T, typename U>
   U operator()(U y, T x) {
-    return x + y;
+    return simd::wrapping(std::plus<>(), x, y);
   };
 
   template <int N, typename T, typename U>
@@ -555,7 +659,7 @@ struct SumReduce {
 struct ProdReduce {
   template <typename T, typename U>
   U operator()(U y, T x) {
-    return x * y;
+    return simd::wrapping(std::multiplies<>(), x, y);
   };
 
   template <int N, typename T, typename U>
@@ -660,11 +764,10 @@ void Reduce::eval_cpu(const std::vector<array>& inputs, array& out) {
             break;
           case uint64:
           case int64:
-          // complex64 stays on the integer path. Testing it as a complex
-          // would go through complex64_t's conversion to float and only look
-          // at the real part, which would miss 1j.
-          case complex64:
             reduce_dispatch_and_or<int64_t>(in, out, reduce_type_, axes_);
+            break;
+          case complex64:
+            reduce_dispatch_and_or<complex64_t>(in, out, reduce_type_, axes_);
             break;
           case float64:
             reduce_dispatch_and_or<double>(in, out, reduce_type_, axes_);

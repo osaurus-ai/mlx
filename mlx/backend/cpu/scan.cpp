@@ -212,15 +212,18 @@ void scan_dispatch(
     int axis,
     bool reverse,
     bool inclusive) {
+  // Integer sums and products wrap around (see simd::wrapping).
   switch (rtype) {
     case Scan::Sum: {
-      auto op = [](U y, T x) { return y + x; };
+      auto op = [](U y, T x) { return simd::wrapping(std::plus<>(), y, x); };
       auto init = static_cast<U>(0);
       scan_op<T, U>(in, out, axis, reverse, inclusive, op, init);
       break;
     }
     case Scan::Prod: {
-      auto op = [](U y, T x) { return y * x; };
+      auto op = [](U y, T x) {
+        return simd::wrapping(std::multiplies<>(), y, x);
+      };
       auto init = static_cast<U>(1);
       scan_op<T, U>(in, out, axis, reverse, inclusive, op, init);
       break;

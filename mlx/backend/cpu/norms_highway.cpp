@@ -6,6 +6,7 @@
 // MLX_HIGHWAY_MANUAL_TARGET and MLX_HIGHWAY_TARGET_SUFFIX so the same kernels
 // are emitted as one manually suffixed specialization.
 
+#include <algorithm>
 #include <cmath>
 
 #include "mlx/backend/cpu/highway_info.h"
@@ -30,6 +31,9 @@ namespace hu = mlx::core::highway::HWY_NAMESPACE;
 using hu::load_typed_as_f32;
 using hu::store_f32_as_typed;
 
+// Float sums are made in blocks of sum_block elements, as in reduce.cpp.
+constexpr int sum_block = 4096;
+
 void rms_norm_row_f32(
     const float* HWY_RESTRICT x,
     const float* HWY_RESTRICT weight,
@@ -43,30 +47,34 @@ void rms_norm_row_f32(
   const int lanes = static_cast<int>(hn::Lanes(d));
   float total = 0.0f;
   int i = 0;
-  V sum_sq0 = hn::Zero(d);
-  V sum_sq1 = hn::Zero(d);
-  V sum_sq2 = hn::Zero(d);
-  V sum_sq3 = hn::Zero(d);
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V sum_sq0 = hn::Zero(d);
+    V sum_sq1 = hn::Zero(d);
+    V sum_sq2 = hn::Zero(d);
+    V sum_sq3 = hn::Zero(d);
 
-  for (; i + 4 * lanes <= width; i += 4 * lanes) {
-    const V vals0 = hn::LoadU(d, x + i);
-    const V vals1 = hn::LoadU(d, x + i + lanes);
-    const V vals2 = hn::LoadU(d, x + i + 2 * lanes);
-    const V vals3 = hn::LoadU(d, x + i + 3 * lanes);
-    sum_sq0 = hn::MulAdd(vals0, vals0, sum_sq0);
-    sum_sq1 = hn::MulAdd(vals1, vals1, sum_sq1);
-    sum_sq2 = hn::MulAdd(vals2, vals2, sum_sq2);
-    sum_sq3 = hn::MulAdd(vals3, vals3, sum_sq3);
-  }
-  V sum_sq = hn::Add(hn::Add(sum_sq0, sum_sq1), hn::Add(sum_sq2, sum_sq3));
-  for (; i + lanes <= width; i += lanes) {
-    const V vals = hn::LoadU(d, x + i);
-    sum_sq = hn::MulAdd(vals, vals, sum_sq);
-  }
+    for (; i + 4 * lanes <= end; i += 4 * lanes) {
+      const V vals0 = hn::LoadU(d, x + i);
+      const V vals1 = hn::LoadU(d, x + i + lanes);
+      const V vals2 = hn::LoadU(d, x + i + 2 * lanes);
+      const V vals3 = hn::LoadU(d, x + i + 3 * lanes);
+      sum_sq0 = hn::MulAdd(vals0, vals0, sum_sq0);
+      sum_sq1 = hn::MulAdd(vals1, vals1, sum_sq1);
+      sum_sq2 = hn::MulAdd(vals2, vals2, sum_sq2);
+      sum_sq3 = hn::MulAdd(vals3, vals3, sum_sq3);
+    }
+    V sum_sq = hn::Add(hn::Add(sum_sq0, sum_sq1), hn::Add(sum_sq2, sum_sq3));
+    for (; i + lanes <= end; i += lanes) {
+      const V vals = hn::LoadU(d, x + i);
+      sum_sq = hn::MulAdd(vals, vals, sum_sq);
+    }
 
-  total = hn::ReduceSum(d, sum_sq);
-  for (; i < width; ++i) {
-    total += x[i] * x[i];
+    float block = hn::ReduceSum(d, sum_sq);
+    for (; i < end; ++i) {
+      block += x[i] * x[i];
+    }
+    total += block;
   }
 
   const float scale = 1.0f / std::sqrt(total / width + eps);
@@ -107,31 +115,35 @@ void rms_norm_row_half(
   const int lanes = static_cast<int>(hn::Lanes(d));
   float total = 0.0f;
   int i = 0;
-  V sum_sq0 = hn::Zero(d);
-  V sum_sq1 = hn::Zero(d);
-  V sum_sq2 = hn::Zero(d);
-  V sum_sq3 = hn::Zero(d);
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V sum_sq0 = hn::Zero(d);
+    V sum_sq1 = hn::Zero(d);
+    V sum_sq2 = hn::Zero(d);
+    V sum_sq3 = hn::Zero(d);
 
-  for (; i + 4 * lanes <= width; i += 4 * lanes) {
-    const V vals0 = load_typed_as_f32(d, x, i);
-    const V vals1 = load_typed_as_f32(d, x, i + lanes);
-    const V vals2 = load_typed_as_f32(d, x, i + 2 * lanes);
-    const V vals3 = load_typed_as_f32(d, x, i + 3 * lanes);
-    sum_sq0 = hn::MulAdd(vals0, vals0, sum_sq0);
-    sum_sq1 = hn::MulAdd(vals1, vals1, sum_sq1);
-    sum_sq2 = hn::MulAdd(vals2, vals2, sum_sq2);
-    sum_sq3 = hn::MulAdd(vals3, vals3, sum_sq3);
-  }
-  V sum_sq = hn::Add(hn::Add(sum_sq0, sum_sq1), hn::Add(sum_sq2, sum_sq3));
-  for (; i + lanes <= width; i += lanes) {
-    const V vals = load_typed_as_f32(d, x, i);
-    sum_sq = hn::MulAdd(vals, vals, sum_sq);
-  }
+    for (; i + 4 * lanes <= end; i += 4 * lanes) {
+      const V vals0 = load_typed_as_f32(d, x, i);
+      const V vals1 = load_typed_as_f32(d, x, i + lanes);
+      const V vals2 = load_typed_as_f32(d, x, i + 2 * lanes);
+      const V vals3 = load_typed_as_f32(d, x, i + 3 * lanes);
+      sum_sq0 = hn::MulAdd(vals0, vals0, sum_sq0);
+      sum_sq1 = hn::MulAdd(vals1, vals1, sum_sq1);
+      sum_sq2 = hn::MulAdd(vals2, vals2, sum_sq2);
+      sum_sq3 = hn::MulAdd(vals3, vals3, sum_sq3);
+    }
+    V sum_sq = hn::Add(hn::Add(sum_sq0, sum_sq1), hn::Add(sum_sq2, sum_sq3));
+    for (; i + lanes <= end; i += lanes) {
+      const V vals = load_typed_as_f32(d, x, i);
+      sum_sq = hn::MulAdd(vals, vals, sum_sq);
+    }
 
-  total = hn::ReduceSum(d, sum_sq);
-  for (; i < width; ++i) {
-    const float val = static_cast<float>(x[i]);
-    total += val * val;
+    float block = hn::ReduceSum(d, sum_sq);
+    for (; i < end; ++i) {
+      const float val = static_cast<float>(x[i]);
+      block += val * val;
+    }
+    total += block;
   }
 
   const float scale = 1.0f / std::sqrt(total / width + eps);
@@ -172,46 +184,54 @@ void layer_norm_row_f32(
   using V = hn::Vec<decltype(d)>;
 
   const int lanes = static_cast<int>(hn::Lanes(d));
-  V sum0 = hn::Zero(d);
-  V sum1 = hn::Zero(d);
-
+  float total = 0.0f;
   int i = 0;
-  for (; i + 2 * lanes <= width; i += 2 * lanes) {
-    sum0 = hn::Add(sum0, hn::LoadU(d, x + i));
-    sum1 = hn::Add(sum1, hn::LoadU(d, x + i + lanes));
-  }
-  V sum = hn::Add(sum0, sum1);
-  for (; i + lanes <= width; i += lanes) {
-    sum = hn::Add(sum, hn::LoadU(d, x + i));
-  }
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V sum0 = hn::Zero(d);
+    V sum1 = hn::Zero(d);
+    for (; i + 2 * lanes <= end; i += 2 * lanes) {
+      sum0 = hn::Add(sum0, hn::LoadU(d, x + i));
+      sum1 = hn::Add(sum1, hn::LoadU(d, x + i + lanes));
+    }
+    V sum = hn::Add(sum0, sum1);
+    for (; i + lanes <= end; i += lanes) {
+      sum = hn::Add(sum, hn::LoadU(d, x + i));
+    }
 
-  float total = hn::ReduceSum(d, sum);
-  for (; i < width; ++i) {
-    total += x[i];
+    float block = hn::ReduceSum(d, sum);
+    for (; i < end; ++i) {
+      block += x[i];
+    }
+    total += block;
   }
   const float mean = total / width;
 
   const V vmean = hn::Set(d, mean);
-  V variance_sum0 = hn::Zero(d);
-  V variance_sum1 = hn::Zero(d);
-
+  float variance = 0.0f;
   i = 0;
-  for (; i + 2 * lanes <= width; i += 2 * lanes) {
-    const V diff0 = hn::Sub(hn::LoadU(d, x + i), vmean);
-    const V diff1 = hn::Sub(hn::LoadU(d, x + i + lanes), vmean);
-    variance_sum0 = hn::MulAdd(diff0, diff0, variance_sum0);
-    variance_sum1 = hn::MulAdd(diff1, diff1, variance_sum1);
-  }
-  V variance_sum = hn::Add(variance_sum0, variance_sum1);
-  for (; i + lanes <= width; i += lanes) {
-    const V diff = hn::Sub(hn::LoadU(d, x + i), vmean);
-    variance_sum = hn::MulAdd(diff, diff, variance_sum);
-  }
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V variance_sum0 = hn::Zero(d);
+    V variance_sum1 = hn::Zero(d);
+    for (; i + 2 * lanes <= end; i += 2 * lanes) {
+      const V diff0 = hn::Sub(hn::LoadU(d, x + i), vmean);
+      const V diff1 = hn::Sub(hn::LoadU(d, x + i + lanes), vmean);
+      variance_sum0 = hn::MulAdd(diff0, diff0, variance_sum0);
+      variance_sum1 = hn::MulAdd(diff1, diff1, variance_sum1);
+    }
+    V variance_sum = hn::Add(variance_sum0, variance_sum1);
+    for (; i + lanes <= end; i += lanes) {
+      const V diff = hn::Sub(hn::LoadU(d, x + i), vmean);
+      variance_sum = hn::MulAdd(diff, diff, variance_sum);
+    }
 
-  float variance = hn::ReduceSum(d, variance_sum);
-  for (; i < width; ++i) {
-    const float diff = x[i] - mean;
-    variance += diff * diff;
+    float block = hn::ReduceSum(d, variance_sum);
+    for (; i < end; ++i) {
+      const float diff = x[i] - mean;
+      block += diff * diff;
+    }
+    variance += block;
   }
   variance /= width;
 
@@ -256,46 +276,54 @@ void layer_norm_row_half(
   using V = hn::Vec<decltype(d)>;
 
   const int lanes = static_cast<int>(hn::Lanes(d));
-  V sum0 = hn::Zero(d);
-  V sum1 = hn::Zero(d);
-
+  float total = 0.0f;
   int i = 0;
-  for (; i + 2 * lanes <= width; i += 2 * lanes) {
-    sum0 = hn::Add(sum0, load_typed_as_f32(d, x, i));
-    sum1 = hn::Add(sum1, load_typed_as_f32(d, x, i + lanes));
-  }
-  V sum = hn::Add(sum0, sum1);
-  for (; i + lanes <= width; i += lanes) {
-    sum = hn::Add(sum, load_typed_as_f32(d, x, i));
-  }
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V sum0 = hn::Zero(d);
+    V sum1 = hn::Zero(d);
+    for (; i + 2 * lanes <= end; i += 2 * lanes) {
+      sum0 = hn::Add(sum0, load_typed_as_f32(d, x, i));
+      sum1 = hn::Add(sum1, load_typed_as_f32(d, x, i + lanes));
+    }
+    V sum = hn::Add(sum0, sum1);
+    for (; i + lanes <= end; i += lanes) {
+      sum = hn::Add(sum, load_typed_as_f32(d, x, i));
+    }
 
-  float total = hn::ReduceSum(d, sum);
-  for (; i < width; ++i) {
-    total += static_cast<float>(x[i]);
+    float block = hn::ReduceSum(d, sum);
+    for (; i < end; ++i) {
+      block += static_cast<float>(x[i]);
+    }
+    total += block;
   }
   const float mean = total / width;
 
   const V vmean = hn::Set(d, mean);
-  V variance_sum0 = hn::Zero(d);
-  V variance_sum1 = hn::Zero(d);
-
+  float variance = 0.0f;
   i = 0;
-  for (; i + 2 * lanes <= width; i += 2 * lanes) {
-    const V diff0 = hn::Sub(load_typed_as_f32(d, x, i), vmean);
-    const V diff1 = hn::Sub(load_typed_as_f32(d, x, i + lanes), vmean);
-    variance_sum0 = hn::MulAdd(diff0, diff0, variance_sum0);
-    variance_sum1 = hn::MulAdd(diff1, diff1, variance_sum1);
-  }
-  V variance_sum = hn::Add(variance_sum0, variance_sum1);
-  for (; i + lanes <= width; i += lanes) {
-    const V diff = hn::Sub(load_typed_as_f32(d, x, i), vmean);
-    variance_sum = hn::MulAdd(diff, diff, variance_sum);
-  }
+  while (i < width) {
+    const int end = std::min(width, i + sum_block);
+    V variance_sum0 = hn::Zero(d);
+    V variance_sum1 = hn::Zero(d);
+    for (; i + 2 * lanes <= end; i += 2 * lanes) {
+      const V diff0 = hn::Sub(load_typed_as_f32(d, x, i), vmean);
+      const V diff1 = hn::Sub(load_typed_as_f32(d, x, i + lanes), vmean);
+      variance_sum0 = hn::MulAdd(diff0, diff0, variance_sum0);
+      variance_sum1 = hn::MulAdd(diff1, diff1, variance_sum1);
+    }
+    V variance_sum = hn::Add(variance_sum0, variance_sum1);
+    for (; i + lanes <= end; i += lanes) {
+      const V diff = hn::Sub(load_typed_as_f32(d, x, i), vmean);
+      variance_sum = hn::MulAdd(diff, diff, variance_sum);
+    }
 
-  float variance = hn::ReduceSum(d, variance_sum);
-  for (; i < width; ++i) {
-    const float diff = static_cast<float>(x[i]) - mean;
-    variance += diff * diff;
+    float block = hn::ReduceSum(d, variance_sum);
+    for (; i < end; ++i) {
+      const float diff = static_cast<float>(x[i]) - mean;
+      block += diff * diff;
+    }
+    variance += block;
   }
   variance /= width;
 

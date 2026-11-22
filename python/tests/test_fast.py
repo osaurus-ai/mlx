@@ -589,6 +589,22 @@ class TestFast(mlx_tests.MLXTestCase):
         self.assertEqual(g2.shape, logits.shape)
         self.assertLess(mx.abs(g1 - g2).max().item(), 1e-6)
 
+    @unittest.skipIf(not mx.is_available(mx.gpu), "No GPU available")
+    def test_cross_entropy_grad_non_contiguous(self):
+        B, L, V = 32, 129, 8192
+        logits = mx.random.normal(shape=(B, L, V)).astype(mx.bfloat16)
+        targets = mx.random.randint(0, V, shape=(B, L))
+
+        def f_sliced(x):
+            return mx.fast.cross_entropy(x[:, :-1], targets[:, 1:]).sum()
+
+        def f_contiguous(x):
+            return mx.fast.cross_entropy(mx.contiguous(x[:, :-1]), targets[:, 1:]).sum()
+
+        expected = mx.grad(f_contiguous)(logits)
+        g = mx.grad(f_sliced)(logits)
+        self.assertTrue(mx.array_equal(g, expected))
+
     def test_layer_norm_dim_check(self):
         with self.assertRaises(ValueError):
             weight = mx.ones((129,))
@@ -1241,6 +1257,75 @@ class TestFast(mlx_tests.MLXTestCase):
         b = mx.full((32,), 2.5, dtype=mx.float32)
         out = call_kernel(a).astype(mx.float32) + call_kernel(b)
         self.assertTrue(mx.allclose(out, mx.full((32,), 8.0)))
+
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_custom_function_metal_kernel_vmap_jvp(self):
+        kernel = mx.fast.metal_kernel(
+            name="double_it",
+            input_names=["inp"],
+            output_names=["out"],
+            source="out[thread_position_in_grid.x] = "
+            + "inp[thread_position_in_grid.x] * 2.0f;",
+        )
+
+        def body(a):
+            (o,) = kernel(
+                inputs=[a],
+                grid=(a.size, 1, 1),
+                threadgroup=(a.size, 1, 1),
+                output_shapes=[a.shape],
+                output_dtypes=[a.dtype],
+            )
+            return o
+
+        @mx.custom_function
+        def f(a):
+            return body(a)
+
+        @f.vjp
+        def f_vjp(primals, cotangent, output):
+            return body(cotangent)
+
+        @f.jvp
+        def f_jvp(primals, tangents):
+            return body(tangents)
+
+        @f.vmap
+        def f_vmap(inputs, axes):
+            return body(inputs), axes
+
+        x = mx.ones((8,))
+        grad_out = mx.grad(lambda a: mx.sum(f(a)))(x)
+        self.assertTrue(mx.allclose(grad_out, mx.full((8,), 2.0)))
+
+        _, jvp_out = mx.jvp(f, [x], [x])
+        self.assertTrue(mx.allclose(jvp_out[0], mx.full((8,), 2.0)))
+
+        vmap_out = mx.vmap(f)(mx.ones((4, 8)))
+        self.assertEqual(vmap_out.shape, (4, 8))
+        self.assertTrue(mx.allclose(vmap_out, mx.full((4, 8), 2.0)))
+
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_custom_metal_kernel_negative_template_int(self):
+        # Negative int template values used to produce a '-' in the generated
+        # kernel name (via make_template_hash), which fails Metal compilation
+        # (#4579).
+        kernel = mx.fast.metal_kernel(
+            name="negtmpl",
+            input_names=["inp"],
+            output_names=["out"],
+            source="out[thread_position_in_grid.x] = T(V);",
+        )
+        (out,) = kernel(
+            inputs=[mx.zeros((4,), dtype=mx.int32)],
+            template=[("T", mx.int32), ("V", -1)],
+            grid=(4, 1, 1),
+            threadgroup=(4, 1, 1),
+            output_shapes=[(4,)],
+            output_dtypes=[mx.int32],
+        )
+        mx.eval(out)
+        self.assertEqual(out.tolist(), [-1, -1, -1, -1])
 
 
 if __name__ == "__main__":
