@@ -4799,12 +4799,6 @@ namespace {
 // biases. CUDA's qmv reads them as the output type, so CUDA promotes. The
 // CPU shares Metal's shape conditions so the output dtype matches.
 bool reads_mixed_bf16_f16(const Stream& s) {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
-  // The Highway CPU kernels read the scales as the type of x.
-  if (s.device == Device::cpu) {
-    return false;
-  }
-#endif
   return s.device == Device::cpu ||
       (s.device == Device::gpu && metal::is_available());
 }

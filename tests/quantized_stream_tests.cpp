@@ -7,18 +7,6 @@
 
 using namespace mlx::core;
 
-namespace {
-
-// The Highway CPU kernels do not read bf16 x with f16 scales, so the op
-// promotes there.
-#if defined(MLX_USE_HIGHWAY_KERNELS)
-constexpr bool cpu_reads_mixed = false;
-#else
-constexpr bool cpu_reads_mixed = true;
-#endif
-
-} // namespace
-
 TEST_CASE("test empty gather output constructs without dividing by zero") {
   for (auto device : {Device::cpu, Device::gpu}) {
     if (!is_available(device)) {
@@ -96,9 +84,7 @@ TEST_CASE("test mixed affine gather storage follows the selected consumer") {
                 stream);
             const bool matrix = sorted && rows >= 16 && rows / experts >= 4;
             const bool mixed_vector =
-                (device == Device::cpu ? cpu_reads_mixed
-                                       : metal::is_available()) &&
-                !matrix;
+                (device == Device::cpu || metal::is_available()) && !matrix;
             CHECK(output.dtype() == (mixed_vector ? bfloat16 : float32));
             CHECK(output.primitive().stream() == stream);
             auto expected = broadcast_to(
@@ -282,8 +268,7 @@ TEST_CASE("test mixed bf16 and f16 quantized_matmul") {
   // sums, rounded once. The inputs and references are built on the CPU.
   auto cpu = new_stream(Device::cpu);
   for (auto device : {Device::cpu, Device::gpu}) {
-    if (!is_available(device) ||
-        (device == Device::cpu && !cpu_reads_mixed)) {
+    if (!is_available(device)) {
       continue;
     }
     auto s = new_stream(device);
@@ -324,8 +309,7 @@ TEST_CASE("test mixed bf16 and f16 gather_qmm") {
   auto expert = array({0}, uint32);
   auto one = [&](const array& a) { return expand_dims(a, 0, cpu); };
   for (auto device : {Device::cpu, Device::gpu}) {
-    if (!is_available(device) ||
-        (device == Device::cpu && !cpu_reads_mixed)) {
+    if (!is_available(device)) {
       continue;
     }
     auto s = new_stream(device);

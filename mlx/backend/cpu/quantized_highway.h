@@ -19,6 +19,36 @@
 
 namespace mlx::core {
 
+enum class QuantizationMode;
+
+namespace cpu {
+
+bool empty_qmm_cpu(const array& x, array& out, Stream stream);
+void quantized_matmul_highway(
+    const std::vector<array>& inputs,
+    array& out,
+    Stream stream,
+    QuantizationMode mode,
+    int group_size,
+    int bits,
+    bool transpose);
+void gather_qmm_highway(
+    const std::vector<array>& inputs,
+    array& out,
+    Stream stream,
+    QuantizationMode mode,
+    int group_size,
+    int bits,
+    bool transpose);
+void quantize_affine_highway(
+    const std::vector<array>& inputs,
+    std::vector<array>& outputs,
+    Stream stream,
+    int group_size,
+    int bits);
+
+} // namespace cpu
+
 enum class QuantizedHighwayDType : uint8_t {
   Float32,
   Float16,
