@@ -161,8 +161,7 @@ target_sources(
           ${CMAKE_CURRENT_BINARY_DIR}/compiled_preamble.cpp)
 
 if(MLX_USE_HIGHWAY)
-  # quantized.cpp's Highway counterpart (quantized.cpp compiles to nothing
-  # here), and the Highway kernels' dispatch counters.
+  # Highway quantization dispatch and kernel counters.
   target_sources(
     mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized_highway_backend.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/highway_info.cpp)

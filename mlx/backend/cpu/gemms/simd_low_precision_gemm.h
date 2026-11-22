@@ -235,13 +235,17 @@ void matmul_lowp(
   size_t N = b_shape[ndim - 1];
   size_t K = a_shape[ndim - 1];
 
-  if (batch_size > 1) {
-    size_t a_rows = a_transposed ? K : M;
-    size_t b_rows = b_transposed ? N : K;
-    size_t a_elems = a_rows * lda;
-    size_t b_elems = b_rows * ldb;
-    size_t out_elems = M * ldc;
+  // A segmented operand can start inside a physical row. The last row
+  // ends at its last element, without the source row stride's trailing gap.
+  const size_t a_rows = a_transposed ? K : M;
+  const size_t a_columns = a_transposed ? M : K;
+  const size_t b_rows = b_transposed ? N : K;
+  const size_t b_columns = b_transposed ? K : N;
+  const size_t a_elems = (a_rows - 1) * lda + a_columns;
+  const size_t b_elems = (b_rows - 1) * ldb + b_columns;
+  const size_t out_elems = M * ldc;
 
+  if (batch_size > 1) {
     auto run_batches = [&](size_t start,
                            size_t end,
                            float* a_f32,
@@ -315,16 +319,10 @@ void matmul_lowp(
       const auto* b_ptr = b + elem_to_loc(K * N * i, b_shape, b_strides);
       auto* out_ptr = out + M * N * i;
 
-      if (M == 1 && N * K >= 65536) {
+      if (M == 1 && (!a_transposed || lda == 1) && N * K >= 65536) {
         lowp_gemv_threaded(
             a_ptr, b_ptr, out_ptr, b_transposed, N, K, ldb, alpha, beta);
       } else if (M * N * K >= 65536) {
-        size_t a_rows = a_transposed ? K : M;
-        size_t b_rows = b_transposed ? N : K;
-        size_t a_elems = a_rows * lda;
-        size_t b_elems = b_rows * ldb;
-        size_t out_elems = M * ldc;
-
         cpu::ScratchLease gemm_scratch(
             lowp_gemm_buffer(), a_elems + b_elems + out_elems);
         float* a_f32 = gemm_scratch.data();

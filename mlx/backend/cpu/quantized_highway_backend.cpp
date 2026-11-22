@@ -2392,37 +2392,23 @@ void quantize_dequantize_fp_dispatch(
   }
 }
 
-// An empty output has no work, and K = 0 gives an empty sum, which is 0.
-// Return true when this has set out.
-bool empty_qmm_cpu(const array& x, array& out, Stream stream) {
-  if (out.size() == 0) {
-    out.set_data(allocator::malloc(0));
-    return true;
-  }
-  if (x.shape(-1) != 0) {
-    return false;
-  }
-  out.set_data(allocator::malloc(out.nbytes()));
-  auto& encoder = cpu::get_command_encoder(stream);
-  encoder.set_output_array(out);
-  encoder.dispatch([out_ptr = out.data<void>(), nbytes = out.nbytes()]() {
-    std::memset(out_ptr, 0, nbytes);
-  });
-  return true;
-}
 
 } // namespace
 
-void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
-    return;
-  }
+void cpu::quantized_matmul_highway(
+    const std::vector<array>& inputs,
+    array& out,
+    Stream stream,
+    QuantizationMode mode_,
+    int group_size_,
+    int bits_,
+    bool transpose_) {
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
 
-  auto& encoder = cpu::get_command_encoder(stream());
-  auto ensure_row_contiguous = [s = stream(), &encoder](const array& arr) {
+  auto& encoder = cpu::get_command_encoder(stream);
+  auto ensure_row_contiguous = [s = stream, &encoder](const array& arr) {
     if (arr.flags().row_contiguous) {
       return arr;
     } else {
@@ -2469,18 +2455,22 @@ void QuantizedMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
   }
 }
 
-void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
-    return;
-  }
+void cpu::gather_qmm_highway(
+    const std::vector<array>& inputs,
+    array& out,
+    Stream stream,
+    QuantizationMode mode_,
+    int group_size_,
+    int bits_,
+    bool transpose_) {
   auto& x_pre = inputs[0];
   auto& w_pre = inputs[1];
   auto& scales_pre = inputs[2];
   auto& lhs_indices = inputs[inputs.size() - 2];
   auto& rhs_indices = inputs[inputs.size() - 1];
 
-  auto& encoder = cpu::get_command_encoder(stream());
-  auto ensure_row_contiguous_last_dims = [s = stream(),
+  auto& encoder = cpu::get_command_encoder(stream);
+  auto ensure_row_contiguous_last_dims = [s = stream,
                                           &encoder](const array& arr) {
     auto stride_0 = arr.strides()[arr.ndim() - 2];
     auto stride_1 = arr.strides()[arr.ndim() - 1];
@@ -2636,10 +2626,13 @@ void dispatch_quantize(
       w_ptr, out_ptr, scales_ptr, biases_ptr, bits, group_size, w.size());
 }
 
-void fast::Quantize::eval_cpu(
+void cpu::quantize_affine_highway(
     const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  auto ensure_row_contiguous = [s = stream()](const array& arr) {
+    std::vector<array>& outputs,
+    Stream stream,
+    int group_size_,
+    int bits_) {
+  auto ensure_row_contiguous = [s = stream](const array& arr) {
     if (arr.flags().row_contiguous) {
       return std::make_pair(arr, false);
     } else {
@@ -2655,7 +2648,7 @@ void fast::Quantize::eval_cpu(
   auto& biases = outputs[2];
   scales.set_data(allocator::malloc(scales.nbytes()));
   biases.set_data(allocator::malloc(biases.nbytes()));
-  auto& encoder = cpu::get_command_encoder(stream());
+  auto& encoder = cpu::get_command_encoder(stream);
   if (copied) {
     encoder.add_temporary(w);
   }
@@ -2741,7 +2734,7 @@ void fast::ConvertFP8::eval_cpu(
 }
 
 void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
-  if (empty_qmm_cpu(inputs[0], out, stream())) {
+  if (cpu::empty_qmm_cpu(inputs[0], out, stream())) {
     return;
   }
   // No path here quantizes w; quantized.cpp raises the same error.
