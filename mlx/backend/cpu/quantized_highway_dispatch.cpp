@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/quantized_highway.h"
 
@@ -329,3 +330,4 @@ void fp_qmm_t_highway(
 }
 
 } // namespace mlx::core
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)
