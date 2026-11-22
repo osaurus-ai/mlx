@@ -51,6 +51,12 @@ auto arange_wrapping(Op op, T a, S b) {
   }
 }
 
+// GCC can contract a multiply and add across statements on AArch64.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
+
 template <typename T>
 void arange(T start, T next, array& out, size_t size, Stream stream) {
   auto ptr = out.data<T>();
@@ -79,6 +85,10 @@ void arange(T start, T next, array& out, size_t size, Stream stream) {
     }
   });
 }
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
 
 } // namespace
 
