@@ -65,6 +65,22 @@ if(MLX_USE_HIGHWAY)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     # No SVE until the dispatched kernels are vector-length agnostic.
     set(MLX_HIGHWAY_PUBLIC_DEFINITIONS HWY_DISABLED_TARGETS=HWY_ALL_SVE)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      # GCC emits an Armv8-A architecture directive for Highway's NEON_BF16
+      # target. Older assemblers reject DOTPROD on that architecture baseline.
+      include(CheckCXXSourceCompiles)
+      check_cxx_source_compiles([=[
+        #include <arm_neon.h>
+        __attribute__((target("+fp16+dotprod+aes+bf16"), used, noinline))
+        uint32x4_t dot(uint32x4_t sum, uint8x16_t a, uint8x16_t b) {
+          return vdotq_u32(sum, a, b);
+        }
+        int main() { return 0; }
+      ]=] MLX_HAS_ARMV8A_DOTPROD_ASSEMBLER)
+      if(NOT MLX_HAS_ARMV8A_DOTPROD_ASSEMBLER)
+        list(APPEND MLX_HIGHWAY_TARGET_DEFINITIONS MLX_HIGHWAY_WIDEN_NEON_DOT)
+      endif()
+    endif()
   elseif(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Highway marks its AVX3-family targets broken for MSVC. Mirror that policy
     # here by using Highway's target-filtering define.

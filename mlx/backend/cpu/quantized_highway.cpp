@@ -152,8 +152,19 @@ void qmm_t_int8_cols(
           const auto* w_bytes = reinterpret_cast<const uint8_t*>(w_group[c]);
           w_group[c] += words_per_vec;
           w_vec = hn::LoadU(du8, w_bytes);
+#if HWY_TARGET == HWY_NEON_BF16 && defined(MLX_HIGHWAY_WIDEN_NEON_DOT)
+          // Accumulate directly into int32. A pair of 8-bit products can
+          // exceed int16 even though each individual product fits in int16.
+          dot_acc[c] = hn::ReorderWidenMulAccumulate(
+              di32, hn::PromoteLowerTo(di16, w_vec),
+              hn::PromoteLowerTo(di16, x_vec), dot_acc[c], dot_acc1[c]);
+          dot_acc[c] = hn::ReorderWidenMulAccumulate(
+              di32, hn::PromoteUpperTo(di16, w_vec),
+              hn::PromoteUpperTo(di16, x_vec), dot_acc[c], dot_acc1[c]);
+#else
           dot_acc[c] =
               hn::SumOfMulQuadAccumulate(di32, w_vec, x_vec, dot_acc[c]);
+#endif
         }
       }
     }

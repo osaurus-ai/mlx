@@ -161,6 +161,41 @@ TEST_CASE("highway int8 family records only when the int8 path ran") {
   CHECK(hi::stats(hi::Family::QmmAffineInt8).highway_calls > 0);
 }
 
+TEST_CASE("highway 8-bit affine dot keeps full-range signed products") {
+  UnpinTargets unpin;
+  hi::set_targets_for_test(0);
+  auto runnable = hi::compiled_targets() & hi::supported_targets();
+  constexpr int k = 256;
+  constexpr int n = 64;
+  constexpr int group_size = 64;
+  // The activations have a quantization scale of 1. Pairs of products
+  // reach both positive and negative values outside the signed 16-bit range.
+  const float pattern[] = {127, 127, -127, -127, 1, -1, 64, -64};
+  std::vector<float> activation(k);
+  std::vector<float> weights(n * k);
+  for (int i = 0; i < k; ++i) {
+    activation[i] = pattern[i % 8];
+  }
+  for (int i = 0; i < n * k; ++i) {
+    weights[i] = i % 3 == 0 ? 0.0f : 255.0f;
+  }
+  auto x = array(activation.data(), {1, k}, float32);
+  auto w = array(weights.data(), {n, k}, float32);
+  auto q = quantize(w, group_size, 8);
+  auto expected = matmul(x, transpose(w));
+  eval(expected);
+
+  cpu::detail::QuantizedInt8Scope on(true);
+  for (auto target : bits_of(runnable)) {
+    CAPTURE(std::string(hi::target_name(target)));
+    hi::set_targets_for_test(target);
+    hi::reset_stats();
+    auto actual = quantized_matmul(x, q[0], q[1], q[2], true, group_size, 8);
+    CHECK(array_equal(actual, expected).item<bool>());
+    CHECK(hi::stats(hi::Family::QmmAffineInt8).executed == target);
+  }
+}
+
 TEST_CASE("highway norms and rope compose float64 through the fallback") {
   // #3019's kernels implement float32, float16 and bfloat16; float64 threw.
   auto x = random::normal({2, 4, 3, 64}, float32, 0.0f, 1.0f, random::key(32));
