@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/rope_highway.h"
 
@@ -118,3 +119,4 @@ int rope_non_traditional_highway_reverse(
 }
 
 } // namespace mlx::core::fast
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)

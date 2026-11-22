@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/norms_highway.h"
 
@@ -228,3 +229,4 @@ void layer_norm_highway_bfloat16(
 }
 
 } // namespace mlx::core::fast
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)

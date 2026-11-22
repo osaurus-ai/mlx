@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+#if defined(MLX_USE_HIGHWAY_KERNELS)
 
 #include "mlx/backend/cpu/sdpa_highway.h"
 
@@ -128,3 +129,4 @@ void sdpa_highway(
 }
 
 } // namespace mlx::core::fast
+#endif // defined(MLX_USE_HIGHWAY_KERNELS)
