@@ -241,6 +241,48 @@ TEST_CASE("test random bits") {
   }
 }
 
+TEST_CASE("test random bits unaligned rows") {
+  // With a batch of keys, the bits of key i start at i * bytes_per_key. For 1
+  // and 2 byte outputs that is often not a multiple of 4, but the bits are
+  // produced in 4 byte words, so they must be stored at any alignment.
+  // Scope switch to the cpu: this tests the CPU kernel.
+  StreamContext sc(Device::cpu);
+  auto keys = array({0u, 0u, 1u, 1u, 2u, 2u}, {3, 2});
+
+  // Expected bits were produced one key at a time (always aligned) and match
+  // what the batched kernel produced before the stores were fixed
+  auto fn7 = [](array k) { return random::bits({7}, 2, k); };
+  auto expected = array(
+      {20137, 63263, 1497,  14756, 16513, 41486, 44591,
+       14930, 56841, 8565,  8934,  51795, 20593, 33108,
+       61363, 14335, 44872, 4104,  44134, 11043, 17760},
+      {3, 7},
+      uint16);
+  CHECK(array_equal(vmap(fn7)(keys), expected).item<bool>());
+
+  auto fn13 = [](array k) { return random::bits({13}, 1, k); };
+  expected = array(
+      {169, 78,  31,  247, 217, 5,   164, 57, 129, 64,  14,  162, 47,
+       82,  58,  9,   222, 117, 33,  230, 34, 83,  202, 113, 80,  84,
+       179, 239, 255, 55,  72,  175, 8,   16, 102, 172, 35,  43,  96},
+      {3, 13},
+      uint8);
+  CHECK(array_equal(vmap(fn13)(keys), expected).item<bool>());
+
+  // Rows of different lengths: odd and even number of words, with and
+  // without a partial last word, short and long
+  for (int width : {1, 2}) {
+    for (int n : {1, 3, 5, 6, 9, 13, 14, 15, 27, 50, 101}) {
+      auto fn = [&](array k) { return random::bits({n}, width, k); };
+      auto out = vmap(fn)(keys);
+      for (int i = 0; i < 3; ++i) {
+        auto x = random::bits({n}, width, take(keys, array(i), 0));
+        CHECK(array_equal(take(out, array(i), 0), x).item<bool>());
+      }
+    }
+  }
+}
+
 TEST_CASE("test random uniform") {
   // Test shapes, types, and sizes
   {

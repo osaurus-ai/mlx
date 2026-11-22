@@ -108,3 +108,49 @@ TEST_CASE("test matmul") {
   out = matmul(transpose(a, {0, 2, 1}), transpose(b, {0, 2, 1}));
   CHECK(array_equal(out, full({2, 4, 4}, 2.0f)).item<bool>());
 }
+
+TEST_CASE("test segmented_mm in bfloat16 and float16 on the cpu") {
+  // Each segment must match the matmul of its slices. The reference runs in
+  // float32, through cblas rather than simd_gemm or BNNS. |a·b| <= 6 and
+  // K <= 39 keep every sum an integer of magnitude <= 234, exact in bfloat16
+  // and float16, so the results can be compared with array_equal.
+  StreamOrDevice cpu = Device::cpu;
+  int M = 18, N = 17, K = 39;
+  std::vector<std::pair<int, int>> segs = {{0, 16}, {16, 39}, {5, 13}};
+  auto segments = array({0, 16, 16, 39, 5, 13}, Shape{3, 2});
+  auto av =
+      subtract(remainder(arange(M * K, cpu), array(7), cpu), array(3), cpu);
+  auto bv =
+      subtract(remainder(arange(K * N, cpu), array(5), cpu), array(2), cpu);
+  auto reference = [&](const array& x, const array& y, Dtype dtype) {
+    auto p = matmul(astype(x, float32, cpu), astype(y, float32, cpu), cpu);
+    return astype(p, dtype, cpu);
+  };
+  for (auto dtype : {bfloat16, float16}) {
+    for (bool a_t : {false, true}) {
+      for (bool b_t : {false, true}) {
+        CAPTURE(dtype);
+        CAPTURE(a_t);
+        CAPTURE(b_t);
+        auto x = a_t
+            ? transpose(astype(reshape(av, {K, M}, cpu), dtype, cpu), cpu)
+            : astype(reshape(av, {M, K}, cpu), dtype, cpu);
+        auto y = b_t
+            ? transpose(astype(reshape(bv, {N, K}, cpu), dtype, cpu), cpu)
+            : astype(reshape(bv, {K, N}, cpu), dtype, cpu);
+        std::vector<array> parts;
+        for (auto [k0, k1] : segs) {
+          parts.push_back(reference(
+              slice(x, {0, k0}, {M, k1}, cpu),
+              slice(y, {k0, 0}, {k1, N}, cpu),
+              dtype));
+        }
+        CHECK(array_equal(matmul(x, y, cpu), reference(x, y, dtype), cpu)
+                  .item<bool>());
+        CHECK(array_equal(
+                  segmented_mm(x, y, segments, cpu), stack(parts, cpu), cpu)
+                  .item<bool>());
+      }
+    }
+  }
+}

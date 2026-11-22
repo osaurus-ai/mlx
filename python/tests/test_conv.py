@@ -3,7 +3,7 @@
 import math
 import os
 import unittest
-from itertools import permutations
+from itertools import permutations, product
 
 import mlx.core as mx
 import mlx_tests
@@ -352,6 +352,8 @@ class TestConv(mlx_tests.MLXTestCase):
                 (1, 6, 1),
                 (1, 1, 6),
                 (4, 32, 64),
+                (1, 128, 48),
+                (1, 128, 96),
             ):
                 for idim, kdim, stride, padding in (
                     ((1, 1), (1, 1), (1, 1), (0, 0)),
@@ -359,6 +361,8 @@ class TestConv(mlx_tests.MLXTestCase):
                     ((31, 31), (5, 5), (5, 5), (2, 2)),
                 ):
                     run_conv2D(N, C, O, idim, kdim, stride, padding, dtype=dtype)
+
+            run_conv2D(1, 128, 32, (1, 9601), (1, 7), (1, 1), (0, 3), dtype=dtype)
 
             # Groups tests
             N, C, O = (4, 32, 64)
@@ -1168,6 +1172,91 @@ class TestConv(mlx_tests.MLXTestCase):
             )
             self.assertEqual(grads.shape, k_shape)
 
+    def test_padding_input_grad(self):
+        def conv_loss(x, w, stride, padding):
+            out = mx.conv_general(x, w, stride=stride, padding=padding)
+            return mx.sum(out * out)
+
+        def padded_loss(x, w, stride, padding):
+            lo, hi = padding
+            pad_width = [(0, 0)] + list(zip(lo, hi)) + [(0, 0)]
+            out = mx.conv_general(mx.pad(x, pad_width), w, stride=stride)
+            return mx.sum(out * out)
+
+        for in_shape, w_shape, stride, padding in [
+            ((1, 4, 1), (1, 3, 1), (1,), ([0], [1])),
+            ((1, 4, 1), (1, 3, 1), (2,), ([0], [1])),
+            ((1, 4, 1), (1, 3, 1), (1,), ([1], [0])),
+            ((2, 6, 6, 3), (4, 3, 3, 3), (2, 2), ([0, 1], [1, 2])),
+            ((2, 5, 5, 5, 2), (3, 2, 2, 2, 2), (2, 1, 2), ([0, 0, 1], [1, 1, 0])),
+            ((1, 4, 1), (1, 2, 1), (1,), ([3], [3])),
+            ((1, 4, 1), (1, 2, 1), (1,), ([0], [3])),
+            ((1, 4, 1), (1, 2, 1), (2,), ([3], [0])),
+            ((2, 5, 6, 3), (4, 2, 3, 3), (1, 2), ([4, 0], [1, 5])),
+        ]:
+            x = mx.random.normal(in_shape)
+            w = mx.random.normal(w_shape)
+            expected = mx.grad(padded_loss)(x, w, stride, padding)
+            grad = mx.grad(conv_loss)(x, w, stride, padding)
+            self.assertEqual(grad.shape, x.shape)
+            self.assertTrue(mx.allclose(grad, expected, atol=1e-4, rtol=1e-4))
+
+    @unittest.skipIf(
+        mx.metal.is_available() and "CI" in os.environ,
+        "FIXME Failure under Release build in CI",
+    )
+    def test_input_dilation_grad(self):
+        def dilate(x, dilation):
+            shape = [(n - 1) * d + 1 for n, d in zip(x.shape[1:-1], dilation)]
+            idx = (slice(None),) + tuple(slice(None, None, d) for d in dilation)
+            return mx.zeros([x.shape[0], *shape, x.shape[-1]]).at[idx].add(x)
+
+        def conv_loss(x, w, stride, padding, dilation):
+            out = mx.conv_general(
+                x, w, stride=stride, padding=padding, input_dilation=dilation
+            )
+            return mx.sum(out * out)
+
+        def dilated_loss(x, w, stride, padding, dilation):
+            out = mx.conv_general(
+                dilate(x, dilation), w, stride=stride, padding=padding
+            )
+            return mx.sum(out * out)
+
+        for in_shape, w_shape, stride, padding, dilation in [
+            ((1, 5, 1), (1, 1, 1), (1,), ([0], [1]), (2,)),
+            ((1, 5, 1), (1, 1, 1), (1,), ([1], [0]), (2,)),
+            ((1, 5, 1), (1, 2, 1), (2,), ([0], [0]), (2,)),
+            ((1, 5, 1), (1, 3, 1), (2,), ([1], [0]), (3,)),
+            ((1, 6, 2), (3, 2, 2), (1,), ([4], [3]), (3,)),
+            ((1, 3, 1), (1, 1, 1), (2,), ([2], [1]), (2,)),
+            ((1, 3, 1), (1, 3, 1), (3,), ([0], [0]), (2,)),
+            ((2, 5, 4, 3), (4, 2, 3, 3), (2, 1), ([1, 0], [0, 2]), (2, 3)),
+            (
+                (1, 3, 4, 3, 2),
+                (2, 2, 2, 2, 2),
+                (1, 2, 1),
+                ([0, 1, 0], [1, 0, 2]),
+                (2, 2, 3),
+            ),
+        ]:
+            x = mx.random.normal(in_shape)
+            w = mx.random.normal(w_shape)
+            args = (stride, padding, dilation)
+            out = mx.conv_general(
+                x, w, stride=stride, padding=padding, input_dilation=dilation
+            )
+            expected = mx.conv_general(
+                dilate(x, dilation), w, stride=stride, padding=padding
+            )
+            self.assertEqual(out.shape, expected.shape)
+            self.assertTrue(mx.allclose(out, expected, atol=1e-4, rtol=1e-4))
+            expected = mx.grad(dilated_loss, argnums=(0, 1))(x, w, *args)
+            grads = mx.grad(conv_loss, argnums=(0, 1))(x, w, *args)
+            for grad, exp in zip(grads, expected):
+                self.assertEqual(grad.shape, exp.shape)
+                self.assertTrue(mx.allclose(grad, exp, atol=1e-4, rtol=1e-4))
+
     @unittest.skipIf(mx.cuda.is_available() and "CI" in os.environ, "flaky in CI")
     def test_conv_1d_with_2d(self):
         x = mx.random.uniform(shape=(2, 10, 16))
@@ -1325,6 +1414,113 @@ class TestConv(mlx_tests.MLXTestCase):
                     f"3D small-kd mismatch T{T} H{H} W{W} "
                     f"C{Cin}->{Cout} k{kd}{kh}{kw} flip={flip}",
                 )
+
+    def test_grouped_conv_padding_stays_in_output(self):
+        # groups takes the direct CPU kernel. Padding taller than the output
+        # used to run the border loop past the buffer.
+        mx.random.seed(0)
+        x = mx.random.normal((1, 1, 8, 2))
+        w = mx.random.normal((2, 5, 1, 1))
+        y = mx.conv2d(x, w, stride=(1, 1), padding=(2, 0), groups=2, stream=mx.cpu)
+        parts = [
+            mx.conv2d(
+                x[..., g : g + 1],
+                w[g : g + 1],
+                stride=(1, 1),
+                padding=(2, 0),
+                stream=mx.cpu,
+            )
+            for g in range(2)
+        ]
+        expected = mx.concatenate(parts, axis=-1)
+        self.assertEqual(tuple(y.shape), (1, 1, 8, 2))
+        self.assertTrue(mx.allclose(y, expected, atol=1e-4))
+
+        # A 1-wide kernel makes weight dilation a no-op, but any dilation
+        # other than 1 sends 3D conv to the direct kernel. Depth padding is
+        # the same overhang as the 2D case.
+        x3 = mx.random.normal((1, 1, 4, 2, 1))
+        w3 = mx.random.normal((1, 5, 1, 1, 1))
+        y3 = mx.conv3d(
+            x3,
+            w3,
+            padding=(2, 0, 0),
+            dilation=(1, 2, 1),
+            stream=mx.cpu,
+        )
+        expected3 = mx.conv3d(
+            x3,
+            w3,
+            padding=(2, 0, 0),
+            stream=mx.cpu,
+        )
+        self.assertEqual(tuple(y3.shape), tuple(expected3.shape))
+        self.assertTrue(mx.allclose(y3, expected3, atol=1e-4))
+
+        wide = mx.random.normal((1, 1, 500000, 2))
+        wide_w = mx.random.normal((2, 5, 1, 1))
+        wide_y = mx.conv2d(
+            wide,
+            wide_w,
+            stride=(1, 1),
+            padding=(2, 0),
+            groups=2,
+            stream=mx.cpu,
+        )
+        mx.eval(wide_y)
+        self.assertEqual(tuple(wide_y.shape), (1, 1, 500000, 2))
+
+    @unittest.skipIf(not mx.metal.is_available(), "requires Metal")
+    def test_grouped_depthwise_conv_padding_bounds(self):
+        x = mx.random.normal((1, 16, 64))
+        w = mx.random.normal((64, 3, 1))
+        y = mx.conv1d(x, w, padding=1, groups=64)
+        mx.eval(y)
+        self.assertEqual(tuple(y.shape), (1, 16, 64))
+
+    @unittest.skipIf(not mx.metal.is_available(), "requires Metal")
+    def test_conv2d_large_output_channels(self):
+        x = mx.random.normal((1, 33, 33, 5))
+        w = mx.random.normal((32800, 1, 1, 5))
+        yg = mx.conv2d(x, w, stride=(2, 2), stream=mx.gpu)
+        yc = mx.conv2d(x, w, stride=(2, 2), stream=mx.cpu)
+        mx.eval(yg, yc)
+        self.assertTrue(mx.allclose(yg, yc, atol=1e-3))
+
+    @unittest.skipIf(not mx.metal.is_available(), "requires Metal")
+    def test_large_filter_input_grad_bounds(self):
+        length, channels = 65, 16
+        for dtype, batch, size in product(
+            (mx.float32, mx.float16, mx.bfloat16), (1, 2, 3), (16, 17, 32, 64)
+        ):
+            with self.subTest(dtype=dtype, batch=batch, size=size):
+                padding = size // 2
+                out_length = length + 2 * padding - size + 1
+                x = mx.ones((batch, length, channels), dtype=dtype)
+                w = mx.ones((channels, size, channels), dtype=dtype)
+                count = batch * out_length * channels
+                storage = mx.concatenate(
+                    [
+                        mx.ones(count, dtype=dtype),
+                        mx.full((size * channels * 2,), float("nan"), dtype),
+                    ]
+                )
+                mx.eval(storage)
+                cotangent = storage[:count].reshape(batch, out_length, channels)
+                _, (dx,) = mx.vjp(
+                    lambda a: mx.conv1d(a, w, padding=padding),
+                    (x,),
+                    (cotangent,),
+                )
+                counts = [
+                    min(out_length - 1, i + padding)
+                    - max(0, i + padding - size + 1)
+                    + 1
+                    for i in range(length)
+                ]
+                expected = mx.array(counts, dtype=dtype)[None, :, None]
+                expected = mx.broadcast_to(expected * channels, x.shape)
+                self.assertEqualArray(dx, expected, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

@@ -146,6 +146,7 @@ bool env_truthy(const char* key) {
 
 bool mmap_debug_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP_DEBUG") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS_DEBUG") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS_DEBUG");
 }
 
@@ -188,12 +189,19 @@ int32_t env_int_clamped(
 
 bool mmap_start_cold_enabled() {
   return env_truthy("MLX_SAFETENSORS_MMAP_START_COLD") ||
+      env_truthy("VMLX_MMAP_SAFETENSORS_START_COLD") ||
       env_truthy("VMLINUX_MMAP_SAFETENSORS_START_COLD");
 }
 
 int32_t mmap_start_cold_pct() {
   if (std::getenv("MLX_SAFETENSORS_MMAP_COLD_PCT")) {
     return env_int_clamped("MLX_SAFETENSORS_MMAP_COLD_PCT", 70, 0, 100);
+  }
+  // Unlike the booleans above, this one RETURNS a value, so precedence is
+  // observable: the current spelling has to be consulted first or setting both
+  // would silently yield the legacy value.
+  if (std::getenv("VMLX_MMAP_SAFETENSORS_COLD_PCT")) {
+    return env_int_clamped("VMLX_MMAP_SAFETENSORS_COLD_PCT", 70, 0, 100);
   }
   return env_int_clamped("VMLINUX_MMAP_SAFETENSORS_COLD_PCT", 70, 0, 100);
 }
@@ -206,6 +214,9 @@ enum class MmapColdAdvice {
 
 MmapColdAdvice mmap_cold_advice() {
   auto value = env_lower("MLX_SAFETENSORS_MMAP_COLD_ADVICE");
+  if (!value) {
+    value = env_lower("VMLX_MMAP_SAFETENSORS_COLD_ADVICE");
+  }
   if (!value) {
     value = env_lower("VMLINUX_MMAP_SAFETENSORS_COLD_ADVICE");
   }
@@ -1357,25 +1368,41 @@ void save_safetensors(
   }
   parent["__metadata__"] = _metadata;
 
-  size_t offset = 0;
+  // Widest element first, as the reference writer does: each size is a multiple
+  // of a power-of-two width, so every tensor lands aligned and without a hole.
+  std::vector<std::pair<const std::string*, const array*>> order;
+  order.reserve(a.size());
   for (auto& [key, arr] : a) {
+    order.emplace_back(&key, &arr);
+  }
+  std::sort(order.begin(), order.end(), [](const auto& l, const auto& r) {
+    auto lw = size_of(l.second->dtype());
+    auto rw = size_of(r.second->dtype());
+    return lw != rw ? lw > rw : *l.first < *r.first;
+  });
+
+  size_t offset = 0;
+  for (auto& [key, arr] : order) {
     json child;
-    child["dtype"] = dtype_to_safetensor_str(arr.dtype());
-    child["shape"] = arr.shape();
-    child["data_offsets"] = std::vector<size_t>{offset, offset + arr.nbytes()};
-    parent[key] = child;
-    offset += arr.nbytes();
+    child["dtype"] = dtype_to_safetensor_str(arr->dtype());
+    child["shape"] = arr->shape();
+    child["data_offsets"] = std::vector<size_t>{offset, offset + arr->nbytes()};
+    parent[*key] = child;
+    offset += arr->nbytes();
   }
 
+  // Pad the header with spaces, which the format allows, so that the data
+  // section starts at a multiple of 8, the widest element size.
   auto header = parent.dump();
+  header.append((8 - (8 + header.length()) % 8) % 8, ' ');
   uint64_t header_len = header.length();
   out_stream->write(reinterpret_cast<char*>(&header_len), 8);
   out_stream->write(header.c_str(), header_len);
-  for (auto& [key, arr] : a) {
+  for (auto& [key, arr] : order) {
     // An empty tensor contributes a zero length span and has no data pointer
     // worth asking for.
-    if (arr.nbytes() > 0) {
-      out_stream->write(arr.data<char>(), arr.nbytes());
+    if (arr->nbytes() > 0) {
+      out_stream->write(arr->data<char>(), arr->nbytes());
     }
   }
 }
@@ -1390,8 +1417,9 @@ void save_safetensors(
     file += ".safetensors";
 
   // Serialize array
-  save_safetensors(
-      std::make_shared<io::FileWriter>(std::move(file)), a, metadata);
+  io::write_and_replace(file, [&a, &metadata](const std::string& path) {
+    save_safetensors(std::make_shared<io::FileWriter>(path), a, metadata);
+  });
 }
 
 } // namespace mlx::core

@@ -59,8 +59,19 @@ struct Simd {
 
   Simd<T, N>() {}
 
+  // Same result as saturating_cast. convert_sat clamps with fmax and fmin,
+  // which turn NaN into the lower bound, so NaN lanes are zeroed first.
+  template <typename U, typename V>
+  static auto convert_lanes(V v) {
+    if constexpr (is_float_to_int_cast_v<T, U>) {
+      return asd::convert_sat<scalar_t>(asd::bitselect(v, V{}, v != v));
+    } else {
+      return asd::convert<scalar_t>(v);
+    }
+  }
+
   template <typename U>
-  Simd<T, N>(Simd<U, N> other) : value(asd::convert<scalar_t>(other.value)) {}
+  Simd<T, N>(Simd<U, N> other) : value(convert_lanes<U>(other.value)) {}
 
   template <typename U>
   Simd<T, N>(U v) : value(v){};
@@ -103,6 +114,12 @@ template <>
 inline constexpr int max_size<float> = 8;
 template <>
 inline constexpr int max_size<double> = 4;
+
+// Conversion of a value that is known to fit in To, without a range test.
+template <typename To, typename T, int N>
+Simd<To, N> convert_in_range(Simd<T, N> v) {
+  return asd::convert<typename Simd<To, N>::scalar_t>(v.value);
+}
 
 #define SIMD_DEFAULT_UNARY(name, op) \
   template <typename T, int N>       \

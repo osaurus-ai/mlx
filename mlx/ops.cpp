@@ -97,7 +97,7 @@ array indices_or_default(
           << " Got indices with invalid dtype. Indices must be integral.";
       throw std::invalid_argument(msg.str());
     }
-    return astype(indices.value(), uint32);
+    return astype(indices.value(), uint32, s);
   }
 
   Shape shape(x.shape().begin(), x.shape().end() - 2);
@@ -334,8 +334,7 @@ array as_strided(
       dtype,
       std::make_shared<AsStrided>(
           to_stream(s), std::move(shape), std::move(strides), offset),
-      // Force the input array to be contiguous.
-      {flatten(std::move(a), s)});
+      {std::move(a)});
 }
 
 array copy(array a, StreamOrDevice s /* = {} */) {
@@ -727,7 +726,7 @@ array flip(const array& a, StreamOrDevice s /* = {} */) {
 namespace {
 
 inline auto
-normalize_slice(const Shape& shape, Shape& start, Shape stop, Shape& strides) {
+normalize_slice(const Shape& shape, Shape& start, Shape& stop, Shape& strides) {
   // - Start indices are normalized
   // - End indices are unchanged as -1 means something different
   //   pre-normalization (the end of the axis) versus post normalization (the
@@ -775,7 +774,13 @@ normalize_slice(const Shape& shape, Shape& start, Shape stop, Shape& strides) {
     }
     // Simplify the stride if it's unused
     if (out_shape[i] == 1) {
-      strides[i] = 1;
+      if (strides[i] < 0 && start[i] > 0) {
+        strides[i] = -1;
+        stop[i] = start[i] - 1;
+      } else {
+        strides[i] = 1;
+        stop[i] = start[i] + 1;
+      }
     }
   }
 
@@ -3172,7 +3177,8 @@ array floor_divide(
   auto zero = array(0, dtype);
   auto step = logical_and(
       not_equal(rem, zero, s),
-      not_equal(less(a, zero, s), less(b, zero, s), s));
+      not_equal(less(a, zero, s), less(b, zero, s), s),
+      s);
   return subtract(quotient, astype(step, dtype, s), s);
 }
 
@@ -3611,7 +3617,7 @@ array gather(
   }
 
   // Broadcast and cast indices if necessary
-  auto inputs = broadcast_arrays(indices);
+  auto inputs = broadcast_arrays(indices, s);
   for (auto& idx : inputs) {
     idx = astype(idx, dtype, s);
   }
@@ -3749,8 +3755,9 @@ array take(const array& a, int index, int axis, StreamOrDevice s /* = {} */) {
         "[take] Cannot do a non-empty take from an array with zero elements.");
   }
 
-  // Handle negative axis
+  // Handle negative axis and index
   axis = axis < 0 ? a.ndim() + axis : axis;
+  index = index < 0 ? a.shape(axis) + index : index;
 
   Shape starts(a.ndim(), 0);
   Shape stops = a.shape();
@@ -3889,7 +3896,7 @@ array scatter(
   }
 
   // Broadcast and cast indices if necessary
-  auto inputs = broadcast_arrays(indices);
+  auto inputs = broadcast_arrays(indices, s);
 
   Shape idx_shape;
   if (!inputs.empty()) {
@@ -4293,12 +4300,13 @@ array logcumsumexp(
     bool inclusive /* = true*/,
     StreamOrDevice s /* = {}*/) {
   axis = normalize_axis_index(axis, a.ndim(), "[logcumsumexp] ");
+  auto out_type = at_least_float(a.dtype());
   return array(
       a.shape(),
-      a.dtype(),
+      out_type,
       std::make_shared<Scan>(
           to_stream(s), Scan::ReduceType::LogAddExp, axis, reverse, inclusive),
-      {a});
+      {astype(a, out_type, s)});
 }
 
 array logcumsumexp(
@@ -4613,22 +4621,35 @@ array conv_general(
     has_neg_padding |= (pd < 0);
   }
 
-  // Handle negative padding
+  // Negative padding counts positions of the dilated input. Keep the input
+  // elements inside the window and pad the gap left before or after them.
+  bool only_padding = false;
   if (has_neg_padding) {
     Shape starts(in.ndim(), 0);
     auto stops = in.shape();
 
     for (int i = 0; i < spatial_dims; i++) {
-      if (padding_lo[i] < 0) {
-        starts[i + 1] = safe_cast(
-            starts[i + 1] - static_cast<int64_t>(padding_lo[i]), "conv");
-        padding_lo[i] = 0;
+      int64_t dil = input_dilation[i];
+      int64_t len = (in.shape(i + 1) - 1) * dil + 1;
+      int64_t lo = padding_lo[i];
+      int64_t hi = padding_hi[i];
+      int64_t start = lo < 0 ? (safe_cast(-lo, "conv") + dil - 1) / dil : 0;
+      int64_t stop = hi < 0 ? std::max<int64_t>(len + hi + dil - 1, 0) / dil
+                            : in.shape(i + 1);
+      if (stop <= start) {
+        // Only zeros are left, keep the padded size for the output shape
+        only_padding = true;
+        start = stop = 0;
+        lo = 0;
+        hi = len + padding_lo[i] + hi + dil - 1;
+      } else {
+        lo += start * dil;
+        hi += len - (stop - 1) * dil - 1;
       }
-
-      if (padding_hi[i] < 0) {
-        stops[i + 1] += padding_hi[i];
-        padding_hi[i] = 0;
-      }
+      starts[i + 1] = safe_cast(start, "conv");
+      stops[i + 1] = safe_cast(stop, "conv");
+      padding_lo[i] = safe_cast(lo, "conv");
+      padding_hi[i] = safe_cast(hi, "conv");
     }
 
     in = slice(in, std::move(starts), std::move(stops), s);
@@ -4643,6 +4664,10 @@ array conv_general(
       padding_hi,
       kernel_dilation,
       input_dilation);
+
+  if (only_padding) {
+    return zeros(std::move(out_shape), in.dtype(), s);
+  }
 
   return array(
       std::move(out_shape),
@@ -4768,6 +4793,18 @@ void validate_global_scale(
   }
 }
 
+namespace {
+
+// The CPU kernels and Metal's qmv kernels read bf16 x with f16 scales and
+// biases. CUDA's qmv reads them as the output type, so CUDA promotes. The
+// CPU shares Metal's shape conditions so the output dtype matches.
+bool reads_mixed_bf16_f16(const Stream& s) {
+  return s.device == Device::cpu ||
+      (s.device == Device::gpu && metal::is_available());
+}
+
+} // namespace
+
 array quantized_matmul(
     const array& x,
     const array& w,
@@ -4786,6 +4823,17 @@ array quantized_matmul(
   // Check and extract the quantized matrix shape against x
   auto [w_inner_dims, w_outer_dims] = extract_quantized_matmul_dims(
       "quantized_matmul", x, w, scales, biases, transpose, group_size, bits);
+  // With no batch dimensions in x, the output does not broadcast with the
+  // batch of w. Then an empty batch leaves no matrix to multiply with.
+  if (x.ndim() <= 2 &&
+      std::find(w.shape().begin(), w.shape().end() - 2, 0) !=
+          w.shape().end() - 2) {
+    std::ostringstream msg;
+    msg << "[quantized_matmul] The batch of w with shape " << w.shape()
+        << " is empty, so it has no matrix to multiply x with shape "
+        << x.shape() << ".";
+    throw std::invalid_argument(msg.str());
+  }
 
   // Process-level diagnostic control for matched old/new execution in one
   // binary. Normal eligibility still comes from the tensor layout below.
@@ -4794,13 +4842,13 @@ array quantized_matmul(
     return !(value && value[0] == '1' && value[1] == '\0');
   }();
   const bool mixed_bf16_f16_qmv = qmode == QuantizationMode::Affine &&
-      transpose && x.dtype() == bfloat16 && dtype == float16 && biases &&
-      biases->dtype() == float16 && group_size == 64 &&
-      (bits == 4 || bits == 8 ||
+      transpose && x.dtype() == bfloat16 && scales.dtype() == float16 &&
+      biases && biases->dtype() == float16 && group_size == 64 &&
+      (((bits == 4 || bits == 8) && reads_mixed_bf16_f16(to_stream(s))) ||
        (bits == 6 && mixed_q6_enabled && to_stream(s).device == Device::gpu &&
         metal::is_available())) &&
-      x.size() / x.shape(-1) == 1 && w_inner_dims % 512 == 0 &&
-      w_outer_dims % 8 == 0;
+      x.shape(-1) > 0 && x.size() / x.shape(-1) == 1 &&
+      w_inner_dims % 512 == 0 && w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
     // q6 preserves the original promoted output dtype. Consumers may use
     // the F32 projection in residual arithmetic before rounding to BF16.
@@ -5087,7 +5135,7 @@ affine_quantize(const array& w, int group_size, int bits, StreamOrDevice s_) {
       scales = where(mask, scales, negative(scales, s), s);
       array edge = where(mask, w_min, w_max, s);
       array q0 = round(divide(edge, scales, s), s);
-      scales = where(not_equal(q0, zero, s), divide(edge, q0, s), scales);
+      scales = where(not_equal(q0, zero, s), divide(edge, q0, s), scales, s);
       biases = where(equal(q0, zero, s), zero, edge, s);
     }
 
@@ -5465,8 +5513,10 @@ array fp_dequantize(
           : array(1.0f, out_type);
       scales = multiply(from_fp8(scales, out_type, s), inv_scale_enc, s);
     } else {
+      auto nan_mask = equal(scales, array(uint8_t(0xFF), scales.dtype()), s);
       scales = subtract(astype(scales, out_type, s), array(127, out_type), s);
       scales = power(array(2.0f, out_type), scales, s);
+      scales = where(nan_mask, array(NAN, out_type), scales, s);
     }
     return {reshape(multiply(out, scales, s), wshape, s)};
   };
@@ -5633,8 +5683,9 @@ array gather_qmm(
   std::tie(lhs_indices, rhs_indices) =
       broadcast_arrays(lhs_indices, rhs_indices, s);
 
-  // Match GatherQMM::eval_gpu: only Metal's vector consumer supports mixed
-  // BF16/F16 storage. Sorted matrix rows need normal dtype promotion.
+  // The CPU kernels and Metal's vector kernels read bf16 x with f16 scales
+  // and biases. Metal's matrix kernel for sorted rows does not, so sorted rows
+  // promote on every device and the output dtype does not depend on it.
   const auto experts = std::accumulate(
       w.shape().begin(),
       w.shape().end() - 2,
@@ -5643,12 +5694,12 @@ array gather_qmm(
   const bool sorted_rhs_matrix = sorted_indices && !lhs_indices_ &&
       x.shape(-2) == 1 && rhs_indices.size() >= 16 && experts > 0 &&
       rhs_indices.size() / experts >= 4;
-  const bool mixed_bf16_f16_qmv = to_stream(s).device == Device::gpu &&
-      metal::is_available() && !sorted_rhs_matrix &&
-      qmode == QuantizationMode::Affine && transpose && x.dtype() == bfloat16 &&
-      out_type == float16 && biases && biases->dtype() == float16 &&
-      group_size == 64 && (bits == 4 || bits == 8) && x.shape(-2) == 1 &&
-      w_inner_dims % 512 == 0 && w_outer_dims % 8 == 0;
+  const bool mixed_bf16_f16_qmv = reads_mixed_bf16_f16(to_stream(s)) &&
+      !sorted_rhs_matrix && qmode == QuantizationMode::Affine && transpose &&
+      x.dtype() == bfloat16 && scales.dtype() == float16 && biases &&
+      biases->dtype() == float16 && group_size == 64 &&
+      (bits == 4 || bits == 8) && x.shape(-2) == 1 && w_inner_dims % 512 == 0 &&
+      w_outer_dims % 8 == 0;
   if (qmode == QuantizationMode::Affine) {
     out_type =
         mixed_bf16_f16_qmv ? x.dtype() : promote_types(x.dtype(), out_type);
@@ -6482,10 +6533,15 @@ std::vector<array> depends(
   std::vector<array> all_inputs = inputs;
   all_inputs.insert(all_inputs.end(), dependencies.begin(), dependencies.end());
 
-  // Compute the stream. Maybe do it in a smarter way at some point in the
-  // future.
-  Stream s = (inputs[0].has_primitive()) ? inputs[0].primitive().stream()
-                                         : to_stream({});
+  // Use the stream of the first input or dependency that has one.
+  std::optional<Stream> found;
+  for (auto& in : all_inputs) {
+    if (in.has_primitive()) {
+      found = in.primitive().stream();
+      break;
+    }
+  }
+  Stream s = found ? *found : to_stream({});
   // Make the output info
   std::vector<Shape> shapes;
   std::vector<Dtype> dtypes;
@@ -6589,12 +6645,14 @@ array number_of_elements(
     }
     return array(inverted ? 1.0 / numel : numel, dtype);
   }
-  return stop_gradient(array(
-      Shape{},
-      dtype,
-      std::make_shared<NumberOfElements>(
-          to_stream(s), std::move(axes), inverted, dtype),
-      {a}));
+  return stop_gradient(
+      array(
+          Shape{},
+          dtype,
+          std::make_shared<NumberOfElements>(
+              to_stream(s), std::move(axes), inverted, dtype),
+          {a}),
+      s);
 }
 
 array conjugate(const array& a, StreamOrDevice s /* = {} */) {
@@ -6822,7 +6880,7 @@ array real(const array& a, StreamOrDevice s /* = {} */) {
 
 array imag(const array& a, StreamOrDevice s /* = {} */) {
   if (!issubdtype(a.dtype(), complexfloating)) {
-    return zeros_like(a);
+    return zeros_like(a, s);
   }
   return array(a.shape(), float32, std::make_shared<Imag>(to_stream(s)), {a});
 }

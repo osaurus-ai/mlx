@@ -47,12 +47,14 @@ void DivMod::eval_cpu(
                     out_b = array::unsafe_weak_copy(out_b),
                     bopt]() mutable {
     auto integral_op = [](auto x, auto y) {
-      auto q = x / y;
-      auto r = x % y;
-      if constexpr (std::is_signed_v<decltype(x)>) {
-        if (r != 0 && (r < 0) != (y < 0)) {
+      using T = decltype(x);
+      // As floor_divide: divide's quotient, less 1 when the remainder is not
+      // 0 and x and y have different signs.
+      T q = detail::Divide{}(x, y);
+      T r = detail::Remainder{}(x, y);
+      if constexpr (std::is_signed_v<T>) {
+        if (r != 0 && (x < 0) != (y < 0)) {
           q -= 1;
-          r += y;
         }
       }
       return std::make_pair(q, r);
