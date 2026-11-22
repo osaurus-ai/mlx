@@ -21,7 +21,7 @@
 namespace mlx::core::fast {
 
 // ISA-specific SIMD implementations for RoPE. Highway kernels are compiled as
-// runtime-dispatched translation units when x86 CPU SIMD is enabled.
+// runtime-dispatched translation units when MLX_USE_HIGHWAY_KERNELS is defined.
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
 constexpr bool has_simd_rope = false;
 constexpr int simd_rope_min_size = 1;
