@@ -16,7 +16,7 @@ if(MLX_BUILD_CUDA)
 endif()
 
 if(MLX_BUILD_METAL)
-  list(APPEND GPU_TEST_SOURCES residency_tests.cpp)
+  list(APPEND GPU_TEST_SOURCES residency_tests.cpp metal_command_buffer_tests.cpp metal_batched_splitk_tests.cpp)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
@@ -41,6 +41,7 @@ target_sources(
           metal_buffer_lifetime_tests.cpp
           ops_tests.cpp
           quantized_stream_tests.cpp
+          upstream_metal_kernel_tests.cpp
           random_tests.cpp
           scheduler_tests.cpp
           utils_tests.cpp

@@ -208,6 +208,10 @@ bool JitCompiler::available() {
 #else
 #ifdef _WIN32
   static int result = std::system("g++ --version > NUL 2>&1");
+#elif defined(MLX_CPU_JIT_COMPILER)
+  // Set by CMake on Linux, which preprocesses the prebuilt preamble with it.
+  static int result =
+      std::system(MLX_CPU_JIT_COMPILER " --version > /dev/null 2>&1");
 #else
   static int result = std::system("g++ --version > /dev/null 2>&1");
 #endif
@@ -271,7 +275,12 @@ std::string JitCompiler::build_command(
   }
 #endif
   return fmt::format(
+#ifdef MLX_CPU_JIT_COMPILER
+      MLX_CPU_JIT_COMPILER
+      " -std=c++17 -O3 -Wall -fPIC -shared {} \"{}\" -o \"{}\" 2>&1",
+#else
       "g++ -std=c++17 -O3 -Wall -fPIC -shared {} \"{}\" -o \"{}\" 2>&1",
+#endif
       extra_flags,
       (dir / source_file_name).string(),
       (dir / shared_lib_name).string());

@@ -136,7 +136,7 @@ void binary_op_dispatch_dims(
     const T* b,
     U* out,
     int dim,
-    int size,
+    size_t size,
     const Shape& shape,
     const Strides& a_strides,
     const Strides& b_strides,
@@ -162,7 +162,7 @@ void binary_op_dispatch_dims(
 #endif // MLX_USE_HIGHWAY_KERNELS
   auto stride = out_strides[dim - 4];
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
-  for (int64_t elem = 0; elem < size; elem += stride) {
+  for (size_t elem = 0; elem < size; elem += stride) {
     binary_op_dims<T, U, Op, 3, Strided>(
         a + a_it.loc,
         b + b_it.loc,
@@ -532,6 +532,7 @@ void binary_int_op_cpu(
     switch (out.dtype()) {
       case bool_:
         binary_op<bool, Op>(a, b, out, bopt);
+        break;
       case uint8:
         binary_op<uint8_t, Op>(a, b, out, bopt);
         break;

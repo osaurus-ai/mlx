@@ -79,6 +79,7 @@ set(COMPILE_DEPS
     ${PROJECT_SOURCE_DIR}/mlx/types/complex.h
     simd/simd.h
     simd/base_simd.h
+    simd/saturating_cast.h
     simd/math.h
     simd/type.h
     unary_ops.h
@@ -90,6 +91,23 @@ if(WIN32)
 else()
   set(SHELL_EXT sh)
   set(SHELL_CMD bash)
+endif()
+
+# On Linux the CPU JIT compiles its kernels with MLX_CPU_JIT_COMPILER. Use the
+# same compiler to preprocess their preamble.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+  set(MLX_CPU_JIT_COMPILER
+      g++
+      CACHE STRING "GCC C++ compiler that the CPU JIT runs on Linux")
+  find_program(MLX_CPU_JIT_COMPILER_PATH "${MLX_CPU_JIT_COMPILER}" NO_CACHE)
+  if(MLX_CPU_JIT_COMPILER_PATH)
+    set(COMPILER ${MLX_CPU_JIT_COMPILER_PATH})
+    target_compile_definitions(
+      mlx PRIVATE MLX_CPU_JIT_COMPILER="${MLX_CPU_JIT_COMPILER}")
+  else()
+    message(WARNING "MLX_CPU_JIT_COMPILER (${MLX_CPU_JIT_COMPILER}) not found. "
+                    "The CPU JIT runs g++ on a preamble from ${COMPILER}.")
+  endif()
 endif()
 
 add_custom_command(

@@ -113,7 +113,8 @@ set(STEEL_NAX_HEADERS
     steel/gemm/kernels/steel_gemm_fused_nax.h
     steel/gemm/kernels/steel_gemm_gather_nax.h
     steel/gemm/kernels/steel_gemm_splitk_nax.h
-    steel/gemm/kernels/steel_gemm_segmented_nax.h)
+    steel/gemm/kernels/steel_gemm_segmented_nax.h
+    steel/gemm/kernels/steel_gemm_thin_nax.h)
 
 set(STEEL_NAX_ATTN_HEADERS
     steel/defines.h
@@ -157,7 +158,7 @@ if(NOT MLX_METAL_JIT)
   build_kernel(steel/gemm/kernels/steel_gemm_masked ${STEEL_HEADERS})
   build_kernel(steel/gemm/kernels/steel_gemm_splitk ${STEEL_HEADERS})
   build_kernel(steel/gemm/kernels/steel_gemm_segmented ${STEEL_HEADERS})
-  build_kernel(gemv steel/utils.h)
+  build_kernel(gemv gemv.h steel/utils.h)
   build_kernel(gemv_masked steel/utils.h)
   build_kernel(steel/attn/kernels/steel_attention ${STEEL_ATTN_HEADERS})
 
@@ -170,6 +171,7 @@ if(NOT MLX_METAL_JIT)
     build_kernel(steel/gemm/kernels/steel_gemm_splitk_nax ${STEEL_NAX_HEADERS})
     build_kernel(steel/gemm/kernels/steel_gemm_segmented_nax
                  ${STEEL_NAX_HEADERS})
+    build_kernel(steel/gemm/kernels/steel_gemm_thin_nax ${STEEL_NAX_HEADERS})
 
     build_kernel(quantized_nax quantized_nax.h ${STEEL_NAX_HEADERS})
     build_kernel(gated_delta_update_nax gated_delta_update_nax.h

@@ -44,6 +44,8 @@ void matmul<bfloat16_t>(
         M,
         N,
         K,
+        lda,
+        ldb,
         alpha,
         beta);
   }
