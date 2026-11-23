@@ -772,14 +772,18 @@ inline bool use_qmv_mma(
     if (exact_q6_f32_rows(true, bits, x.dtype(), group_size, K, N)) {
       return false;
     }
-    // M3 Ultra and newer keep the vector kernels.
-    if (ultra && d.get_architecture_gen() >= 15) {
+    // qmv_mma reads 2 to 8 bits (not 7).
+    if (bits < 2 || bits == 7) {
       return false;
     }
-    // qmv_mma reads 2 to 8 bits (not 7). Affine pays off from a smaller
-    // N * K than fp, and from 2^20 on gen 15+ (M4).
+    // On M3 Ultra and newer, as for fp, only for large layers.
+    if (ultra && d.get_architecture_gen() >= 15) {
+      return (N >= 4096) && (K >= 4096) && (N % 16 == 0);
+    }
+    // Affine pays off from a smaller N * K than fp, and from 2^20 on gen 15+
+    // (M4).
     int nk_log2 = d.get_architecture_gen() >= 15 ? 20 : 21;
-    return (bits >= 2 && bits != 7) && (N >= 512) && (K >= 512) &&
+    return (N >= 512) && (K >= 512) &&
         (int64_t(N) * K >= (int64_t(1) << nk_log2)) && (N % 16 == 0);
   }
   if (nax) {
