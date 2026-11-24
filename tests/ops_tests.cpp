@@ -8066,3 +8066,17 @@ TEST_CASE("test ops and their gradients keep the caller's stream") {
     check_stream(outs[1], s);
   }
 }
+
+TEST_CASE("test complex64 remainder of a large or nan quotient") {
+  // Each part is the floor modulo of that part, as for real floats. The
+  // quotient of a part may not fit in an integer, or may be nan.
+  auto r = complex64_t{1e30f, 7.0f} % complex64_t{3.0f, -2.0f};
+  CHECK_EQ(r.real(), std::fmod(1e30f, 3.0f));
+  CHECK(r.real() >= 0.0f);
+  CHECK(r.real() < 3.0f);
+  CHECK_EQ(r.imag(), -1.0f);
+
+  auto n = complex64_t{std::nanf(""), 1.0f} % complex64_t{3.0f, 2.0f};
+  CHECK(std::isnan(n.real()));
+  CHECK_EQ(n.imag(), 1.0f);
+}
