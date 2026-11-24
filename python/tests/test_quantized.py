@@ -414,10 +414,7 @@ class TestQuantized(mlx_tests.MLXTestCase):
                 self.assertLess((y_q - y_hat).abs().max(), 1e-3)
 
     def test_qqmm(self):
-        if mx.default_device() == mx.cpu:
-            self.skipTest("Not implemented for CPU")
-            return
-
+        tol = 5e-2 if mx.cuda.is_available() else 1e-3
         key = mx.random.key(0)
         k1, k2 = mx.random.split(key)
         tests = product(
@@ -462,9 +459,6 @@ class TestQuantized(mlx_tests.MLXTestCase):
                 self.assertEqual(y_q.shape, y_hat.shape)
                 self.assertLess((y_q - y_hat).abs().max(), 1e-3)
 
-    @unittest.skipIf(
-        not mx.metal.is_available(), "Global scale is only supported on Metal backend"
-    )
     def test_qqmm_global_scale_matrix_kernels(self):
         mx.random.seed(0)
         dtype = mx.bfloat16
@@ -506,7 +500,8 @@ class TestQuantized(mlx_tests.MLXTestCase):
                 relative_error = delta.max() / mx.maximum(
                     mx.abs(expected.astype(mx.float32)).max(), 1e-20
                 )
-                self.assertLess(relative_error, 3e-2)
+                tol = 3e-2 if mx.default_device() != mx.cpu else 1e-1
+                self.assertLess(relative_error, tol)
 
     def test_qqmv_nvfp4_global_scale(self):
         if mx.default_device() == mx.gpu:
@@ -2500,10 +2495,10 @@ class TestQuantized(mlx_tests.MLXTestCase):
 
                 ds = mx.grad(gmm)(s, x, wq)
 
-    @unittest.skipIf(
-        not mx.is_available(mx.gpu), "Global scale is only supported on the GPU"
-    )
     def test_gather_qmm_global_scale(self):
+        if mx.default_device() == mx.cpu:
+            self.skipTest("Not implemented for CPU")
+
         mx.random.seed(0)
         N, K = 128, 256
 

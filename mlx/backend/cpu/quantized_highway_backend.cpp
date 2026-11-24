@@ -2737,7 +2737,7 @@ void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
   }
   // No path here quantizes w; quantized.cpp raises the same error.
   if (inputs[1].dtype() != uint32) {
-    throw std::runtime_error("[QQMatmul] NYI for the general case");
+    throw std::runtime_error("[QQMatmul] Weights must be quantized.");
   }
   auto& encoder = cpu::get_command_encoder(stream());
   auto ensure_row_contiguous = [s = stream(), &encoder](const array& arr) {

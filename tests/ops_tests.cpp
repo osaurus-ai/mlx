@@ -7624,7 +7624,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(with_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
   auto with_global_scales = qqmm(
       x,
@@ -7638,7 +7638,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(with_global_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
   auto without_scales = qqmm(
       x,
@@ -7652,7 +7652,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(without_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
 }
 
