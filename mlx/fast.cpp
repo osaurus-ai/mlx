@@ -925,7 +925,8 @@ array scaled_dot_product_attention(
   }
 
   bool is_training = detail::in_grad_tracing();
-  bool has_fast_vjp = !ScaledDotProductAttentionVJP::use_fallback(q, stream);
+  bool has_fast_vjp =
+      !ScaledDotProductAttentionVJP::use_fallback(q, has_sinks, stream);
   bool output_logsumexp = is_training && has_fast_vjp;
   if (!ScaledDotProductAttention::use_fallback(
           q,
@@ -980,7 +981,7 @@ std::vector<array> ScaledDotProductAttention::vjp(
   assert(cotangents.size() == outputs.size());
 
   auto s = stream();
-  if (ScaledDotProductAttentionVJP::use_fallback(primals[0], s)) {
+  if (ScaledDotProductAttentionVJP::use_fallback(primals[0], has_sinks_, s)) {
     assert(outputs.size() == 1);
     return Custom::vjp(primals, cotangents, argnums, outputs);
   }

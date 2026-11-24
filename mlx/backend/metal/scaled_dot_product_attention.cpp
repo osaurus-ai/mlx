@@ -1478,8 +1478,15 @@ void ScaledDotProductAttention::eval_gpu(
 // The vjp uses matmuls directly so it should be fine to call it every time as
 // it uses a lot less memory. It can be overriden by setting
 // MLX_SDPA_VJP_FALLBACK=1
-bool ScaledDotProductAttentionVJP::use_fallback(const array& q, Stream s) {
+bool ScaledDotProductAttentionVJP::use_fallback(
+    const array& q,
+    bool has_sinks,
+    Stream s) {
   if (s.device != Device::gpu) {
+    return true;
+  }
+  // The fused backward does not compute attention sinks.
+  if (has_sinks) {
     return true;
   }
   if (env::get_var("MLX_SDPA_VJP_FALLBACK", 0) != 0) {
