@@ -5396,17 +5396,23 @@ array affine_dequantize(
     return {w};
   };
 
+  // Both paths read the scales and the biases as one type, the output type.
+  // The Metal kernel reads both as the output type, and the CPU path would
+  // otherwise scale in the type of the scales and add in the promoted type.
+  auto dtype = result_type(scales, biases);
+  auto scales_ = astype(scales, dtype, s);
+  auto biases_ = astype(biases, dtype, s);
   if (s.device == Device::gpu) {
     auto out_shape = w.shape();
     out_shape.back() = out_size;
     return array(
         std::move(out_shape),
-        scales.dtype(),
+        dtype,
         std::make_shared<fast::Quantize>(
             s, fallback, group_size, bits, QuantizationMode::Affine, true),
-        {w, scales, biases});
+        {w, scales_, biases_});
   }
-  return fallback({w, scales, biases})[0];
+  return fallback({w, scales_, biases_})[0];
 }
 
 array fp_dequantize(
