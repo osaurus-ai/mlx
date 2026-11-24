@@ -7177,6 +7177,27 @@ TEST_CASE("test pad shape overflow") {
       pad(zeros({8}), {0}, Shape{imax}, Shape{imax}), std::overflow_error);
 }
 
+TEST_CASE("test from_fp8 to float64 equals float32 on the cpu") {
+  // Each of the 256 fp8 values gives the same number in float64 and in
+  // float32.
+  StreamOrDevice cpu = Device::cpu;
+  auto codes = astype(arange(256, cpu), uint8, cpu);
+  auto as_f64 = from_fp8(codes, float64, cpu);
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && \
+    __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 150000
+  // Built for a macOS before 15, the CPU has no float64 conversion: it throws.
+  CHECK_THROWS_AS(
+      [&]() {
+        eval(as_f64);
+        synchronize(to_stream(cpu));
+      }(),
+      std::runtime_error);
+#else
+  auto as_f32 = astype(from_fp8(codes, float32, cpu), float64, cpu);
+  CHECK(array_equal(as_f64, as_f32, true, cpu).item<bool>());
+#endif
+}
+
 TEST_CASE("test fp8 conversion") {
   for (auto t : {float32, float16, bfloat16}) {
     array in({-1.125, -1.0, 0.0, 1.0, 1.125, 4.5, 448.0}, t);
