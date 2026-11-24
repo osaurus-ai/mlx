@@ -1441,6 +1441,24 @@ TEST_CASE("test reduction ops") {
   }
 }
 
+TEST_CASE("test reduction with more than 2^31 outputs") {
+  // Empty inputs give outputs that are all true. Each output (2 to 2.5 GiB) is
+  // larger than the one before, so it cannot reuse that buffer.
+  StreamOrDevice s = Device::cpu;
+
+  // Contiguous reduction
+  auto y = all(zeros({2, (1 << 30) + 64, 0}, bool_), 2, false, s);
+  CHECK(all(y, false, s).item<bool>());
+
+  // Strided reduction over one axis
+  y = all(zeros({5, 0, 1 << 29}, bool_), 1, false, s);
+  CHECK(all(y, false, s).item<bool>());
+
+  // Strided reduction over two axes
+  y = all(zeros({2, 5, 0, (1 << 29) + 64}, bool_), {0, 2}, false, s);
+  CHECK(all(y, false, s).item<bool>());
+}
+
 TEST_CASE("test irregular binary ops") {
   // 1D strided
   {
