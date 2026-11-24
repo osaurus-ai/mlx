@@ -1450,6 +1450,38 @@ class TestFastSDPA(mlx_tests.MLXTestCase):
         out = nested(fast_attn)
         self.assertTrue(mx.allclose(ref, out, atol=5e-2, rtol=5e-2))
 
+    def test_sdpa_grad_q_with_sinks(self):
+        # The gradient of q alone, with attention sinks. Training on the GPU
+        # takes the fused forward, so the backward must handle the sinks.
+        D = 64
+        scale = D**-0.5
+        q = mx.random.normal((1, 4, 128, D), mx.float16)
+        k = mx.random.normal((1, 2, 128, D), mx.float16)
+        v = mx.random.normal((1, 2, 128, D), mx.float16)
+        sinks = mx.random.normal((4,), mx.float16)
+
+        def ref_attn(q):
+            with mx.stream(mx.cpu):
+                out = mlx_ref_attn(
+                    q.astype(mx.float32),
+                    k.astype(mx.float32),
+                    v.astype(mx.float32),
+                    scale=scale,
+                    mask="causal",
+                    sinks=sinks.astype(mx.float32),
+                )
+            return out.sum()
+
+        def fast_attn(q):
+            out = mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=scale, mask="causal", sinks=sinks
+            )
+            return out.astype(mx.float32).sum()
+
+        expected = mx.grad(ref_attn)(q).astype(mx.float32)
+        out = mx.grad(fast_attn)(q).astype(mx.float32)
+        self.assertTrue(mx.allclose(out, expected, atol=1e-2, rtol=1e-2))
+
 
 if __name__ == "__main__":
     mlx_tests.MLXTestRunner(failfast=True)
