@@ -3165,8 +3165,13 @@ array floor_divide(
     const array& b,
     StreamOrDevice s /* = {} */) {
   auto dtype = promote_types(a.dtype(), b.dtype());
-  if (issubdtype(dtype, inexact)) {
+  if (issubdtype(dtype, complexfloating)) {
     return floor(divide(a, b, s), s);
+  }
+  if (issubdtype(dtype, inexact)) {
+    // divmod floors the exact quotient; floor(a / b) does not when a / b
+    // rounds up to the next integer.
+    return divmod(a, b, s)[0];
   }
 
   auto inputs = broadcast_arrays({astype(a, dtype, s), astype(b, dtype, s)}, s);
