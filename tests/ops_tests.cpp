@@ -5347,6 +5347,46 @@ std::vector<array> compare_floor_divide_by_minus_one(
 
 } // namespace
 
+TEST_CASE("test float floor_divide and divmod floor the exact quotient") {
+  // x / y rounded to the type can reach the next integer: 1 / 0.1f is
+  // 9.99999985 but rounds to 10 in float32, 73.625 / 1.248046875 is 58.992
+  // but rounds to 59 in float16, and 62.75 / 0.99609375 is 62.996 but rounds
+  // to 63 in bfloat16. The quotient is the floor of the exact one, as in
+  // Python and NumPy, so q * y + r stays x.
+  auto check = [](Dtype t,
+                  std::vector<float> x,
+                  std::vector<float> y,
+                  std::vector<float> q,
+                  std::vector<float> r) {
+    auto a = astype(array(x.data(), {static_cast<int>(x.size())}), t);
+    auto b = astype(array(y.data(), {static_cast<int>(y.size())}), t);
+    auto expected_q = astype(array(q.data(), {static_cast<int>(q.size())}), t);
+    auto expected_r = astype(array(r.data(), {static_cast<int>(r.size())}), t);
+    auto out = divmod(a, b);
+    CHECK(array_equal(out[0], expected_q).item<bool>());
+    CHECK(allclose(out[1], expected_r, 1e-5, 1e-8).item<bool>());
+    CHECK(array_equal(floor_divide(a, b), expected_q).item<bool>());
+  };
+  check(
+      float32,
+      {1.0f, -1.0f, 1.0f},
+      {0.1f, 0.1f, -0.1f},
+      {9.0f, -10.0f, -10.0f},
+      {0.09999999f, 1.4901161e-08f, -1.4901161e-08f});
+  check(
+      float16,
+      {73.625f, -73.625f},
+      {1.248046875f, 1.248046875f},
+      {58.0f, -59.0f},
+      {1.23828125f, 0.009765625f});
+  check(bfloat16, {62.75f}, {0.99609375f}, {62.0f}, {0.9921875f});
+
+  // A zero divisor still gives x / y and fmod(x, y): inf and NaN.
+  auto out = divmod(array(1.0f), array(0.0f));
+  CHECK(std::isinf(out[0].item<float>()));
+  CHECK(std::isnan(out[1].item<float>()));
+}
+
 TEST_CASE("test floor_divide at the minimum and at zero") {
   // floor_divide(MIN, -1) is MIN: the quotient wraps around, as in two's
   // complement. It is undefined in C++ and traps on x86. A zero divisor gives

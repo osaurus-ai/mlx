@@ -3616,6 +3616,23 @@ class TestOps(mlx_tests.MLXTestCase):
             np.outer,
         )
 
+    def test_float_floor_divide_floors_the_exact_quotient(self):
+        # x / y rounded to its type can reach the next integer (1 / 0.1 is 10
+        # in float32). The quotient is the floor of the exact one, as in NumPy.
+        rng = np.random.default_rng(0)
+        for t in (np.float16, np.float32):
+            a = rng.uniform(1, 100, 4096).astype(t)
+            b = rng.uniform(1, 100, 4096).astype(t)
+            q_np, r_np = np.divmod(a, b)
+            q, r = mx.divmod(mx.array(a), mx.array(b))
+            self.assertTrue(np.array_equal(np.array(q), q_np), msg=f"{t}")
+            self.assertTrue(np.allclose(np.array(r), r_np), msg=f"{t}")
+            self.assertTrue(
+                np.array_equal(np.array(mx.array(a) // mx.array(b)), q_np), msg=f"{t}"
+            )
+        x, y = mx.array([1.0, -1.0, 1.0]), mx.array([0.1, 0.1, -0.1])
+        self.assertEqual((x // y).tolist(), [9.0, -10.0, -10.0])
+
     def test_divmod(self):
         # A few sizes for the inputs with and without broadcasting
         sizes = [
