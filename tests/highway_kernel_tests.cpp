@@ -504,3 +504,17 @@ TEST_CASE("highway scratch leases do not nest on one thread") {
   }
   CHECK_NOTHROW(cpu::ScratchLease(buffer, 16));
 }
+
+TEST_CASE("highway all-reduce of more than 2^31 elements") {
+  // Row r holds r % 251, and the array has 2^31 + 2^16 elements. On one CPU
+  // thread the contiguous all-reduce takes the whole array in one call. The
+  // Linux CI also runs this case with MLX_CPU_THREADS=1.
+  int rows = (1 << 15) + 1;
+  int cols = 1 << 16;
+  auto row_max = astype(remainder(arange(rows), array(251)), uint8);
+  auto x =
+      contiguous(broadcast_to(reshape(row_max, {rows, 1}), {rows, cols}));
+  CHECK_EQ(max(x).item<uint8_t>(), 250);
+  CHECK(any(x).item<bool>());
+  CHECK_FALSE(all(x).item<bool>());
+}

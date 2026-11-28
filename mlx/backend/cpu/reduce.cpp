@@ -173,7 +173,12 @@ struct AccumType<float16_t> {
 #endif // MLX_USE_HIGHWAY_KERNELS
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 template <typename T, typename A, typename Op>
-A contiguous_accumulate_block(const T* x, int size, Op op, A acc, A init) {
+A contiguous_accumulate_block(
+    const T* x,
+    int64_t size,
+    Op op,
+    A acc,
+    A init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<A>);
   simd::Simd<A, N> accumulator_v(init);
   while (size >= N) {
@@ -190,7 +195,7 @@ A contiguous_accumulate_block(const T* x, int size, Op op, A acc, A init) {
 }
 
 template <typename T, typename A, typename Op>
-A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
+A contiguous_accumulate(const T* x, int64_t size, Op op, A acc, A init) {
   if constexpr (cascade_sum<A, Op>) {
     for (; size > sum_block; size -= sum_block, x += sum_block) {
       acc = contiguous_accumulate_block(x, sum_block, op, acc, init);
@@ -212,7 +217,12 @@ A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
 }
 
 template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+void contiguous_reduce(
+    const T* x,
+    U* accumulator,
+    int64_t size,
+    Op op,
+    U init) {
   using A = typename AccumType<U>::type;
   *accumulator = static_cast<U>(contiguous_accumulate(
       x, size, op, static_cast<A>(*accumulator), static_cast<A>(init)));
@@ -267,7 +277,7 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
 
   if (n_threads <= 1) {
     U result = init;
-    contiguous_reduce(x, &result, static_cast<int>(size), op, init);
+    contiguous_reduce(x, &result, static_cast<int64_t>(size), op, init);
     return result;
   }
 
@@ -289,7 +299,7 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
     if (start < end) {
       *partial = contiguous_accumulate(
           x + start,
-          static_cast<int>(end - start),
+          static_cast<int64_t>(end - start),
           op,
           static_cast<A>(init),
           static_cast<A>(init));

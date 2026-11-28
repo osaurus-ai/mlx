@@ -51,6 +51,13 @@ runs:
         DEVICE: cpu
       run: ./build/cpp/mlx/tests/tests
 
+    - name: Run CPP tests - CPU, one thread
+      shell: bash
+      env:
+        DEVICE: cpu
+        MLX_CPU_THREADS: 1
+      run: ./build/cpp/mlx/tests/tests --test-case="highway all-reduce of more than 2^31 elements"
+
     - name: Run CPP tests - GPU
       if: steps.gpu-check.outputs.good == 'true'
       shell: bash
