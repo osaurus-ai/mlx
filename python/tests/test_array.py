@@ -604,6 +604,18 @@ class TestArray(mlx_tests.MLXTestCase):
         out = mx.array([x], dtype=mx.float64).item()
         self.assertEqual(out, x)
 
+        # Integer and bool targets
+        v = 2**24 + 1
+        self.assertEqual(mx.array(float(v), dtype=mx.int32).item(), v)
+        self.assertEqual(mx.array([float(v)], dtype=mx.int64).tolist(), [v])
+        # Small non-zero values are still True
+        self.assertTrue(mx.array(1e-50, dtype=mx.bool_).item())
+        self.assertEqual(mx.array([1e-50], dtype=mx.bool_).tolist(), [True])
+
+        # Python ints to float64
+        out = mx.array([v], dtype=mx.float64).tolist()
+        self.assertEqual(out, [float(v)])
+
     def test_construction_from_lists_wide_ints(self):
         # A python int that does not fit in int32 widens to int64, the same
         # rule the scalar path already uses. It used to raise std::bad_cast.
@@ -1119,6 +1131,10 @@ class TestArray(mlx_tests.MLXTestCase):
             state = pickle.dumps(x)
             y = pickle.loads(state)
             self.assertEqualArray(y, x)
+            # F-contiguous
+            x = x.T
+            y = pickle.loads(pickle.dumps(x))
+            self.assertEqualArray(y, x)
 
     def test_array_copy(self):
         dtypes = [
@@ -1371,7 +1387,7 @@ class TestArray(mlx_tests.MLXTestCase):
         a[0:2] = 3
         self.assertEqual(a.tolist(), [3, 3, 1])
 
-        # Assigning through a bare Ellipsis, like a[:] and a[None]
+        # Assigning through a bare Ellipsis, like a[:] and a[(...,)]
         e = mx.zeros((2, 3), mx.int32)
         e[...] = 5
         self.assertEqual(e.tolist(), [[5, 5, 5], [5, 5, 5]])
@@ -1383,15 +1399,43 @@ class TestArray(mlx_tests.MLXTestCase):
         e[...] = mx.zeros((2, 3), mx.int32)
         self.assertEqual(e.tolist(), [[0, 0, 0], [0, 0, 0]])
 
+        # Leading singleton dimensions of the update are squeezed
+        e[...] = mx.array([[[1, 2, 3], [4, 5, 6]]])
+        self.assertEqual(e.tolist(), [[1, 2, 3], [4, 5, 6]])
+
+        # The target keeps its leading dimension of size 1
+        h = mx.zeros((1, 3), mx.int32)
+        h[...] = mx.array([[[1, 2, 3]]])
+        self.assertEqual(h.tolist(), [[1, 2, 3]])
+
+        # a[...] assigns the same values as a[(...,)]
+        f = mx.zeros((3,), mx.int32)
+        g = mx.zeros((3,), mx.int32)
+        f[...] = mx.array([[1, 2, 3]])
+        g[(...,)] = mx.array([[1, 2, 3]])
+        self.assertEqual(f.tolist(), [1, 2, 3])
+        self.assertEqual(f.tolist(), g.tolist())
+
         # Scalar array
         e = mx.array(0)
         e[...] = 7
         self.assertEqual(e.item(), 7)
 
+        e[...] = mx.array([[9]])
+        self.assertEqual(e.tolist(), 9)
+
         # Shapes that cannot broadcast are still rejected
         e = mx.zeros((2, 3), mx.int32)
         with self.assertRaises(ValueError):
             e[...] = mx.array([1, 2])
+
+        # The squeeze stops at the first dimension that is not 1
+        with self.assertRaises(ValueError):
+            e[...] = mx.zeros((2, 1, 3), mx.int32)
+
+        # A squeezed update that still does not broadcast is rejected
+        with self.assertRaises(ValueError):
+            e[...] = mx.zeros((1, 4), mx.int32)
 
         a[0:3] = 4
         self.assertEqual(a.tolist(), [4, 4, 4])
