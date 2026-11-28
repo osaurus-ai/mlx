@@ -59,12 +59,39 @@ void DivMod::eval_cpu(
       }
       return std::make_pair(q, r);
     };
+    // As NumPy's divmod: fmod gives the exact remainder, and the quotient is
+    // (x - r) / y rounded to an integer. The floor of x / y is not exact: x / y
+    // in the type of x can round up to the next integer (1 / 0.1f gives 10).
+    // float16 and bfloat16 are computed in float.
     auto float_op = [](auto x, auto y) {
-      auto r = std::fmod(x, y);
-      if (r != 0 && (r < 0) != (y < 0)) {
-        r += y;
+      using T = decltype(x);
+      using C = std::conditional_t<
+          std::is_same_v<T, float16_t> || std::is_same_v<T, bfloat16_t>,
+          float,
+          T>;
+      C a = static_cast<C>(x);
+      C b = static_cast<C>(y);
+      C r = std::fmod(a, b);
+      if (b == 0) {
+        return std::make_pair(static_cast<T>(a / b), static_cast<T>(r));
       }
-      return std::make_pair(std::floor(x / y), r);
+      C q = (a - r) / b;
+      if (r != 0) {
+        if ((r < 0) != (b < 0)) {
+          r += b;
+          q -= 1;
+        }
+      } else {
+        r = std::copysign(C(0), b);
+      }
+      C fq = std::floor(q);
+      if (q - fq > C(0.5)) {
+        fq += 1;
+      }
+      if (q == 0) {
+        fq = std::copysign(C(0), a / b);
+      }
+      return std::make_pair(static_cast<T>(fq), static_cast<T>(r));
     };
 
     dispatch_all_types(out_a.dtype(), [&](auto type_tag) {

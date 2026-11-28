@@ -304,7 +304,40 @@ struct ArcTan2 {
 struct DivMod {
   template <typename T>
   __device__ cuda::std::array<T, 2> operator()(T x, T y) {
-    return {FloorDivide{}(x, y), Remainder{}(x, y)};
+    if constexpr (cuda::std::is_integral_v<T> || is_complex_v<T>) {
+      return {FloorDivide{}(x, y), Remainder{}(x, y)};
+    } else {
+      // As NumPy's divmod: floor(x / y) is one too high when x / y rounds up
+      // to an integer. __half and __nv_bfloat16 are computed in float.
+      using C = cuda::std::conditional_t<
+          cuda::std::is_same_v<T, __half> ||
+              cuda::std::is_same_v<T, __nv_bfloat16>,
+          float,
+          T>;
+      C a = static_cast<C>(x);
+      C b = static_cast<C>(y);
+      C r = cuda::std::fmod(a, b);
+      if (b == 0) {
+        return {static_cast<T>(a / b), static_cast<T>(r)};
+      }
+      C q = (a - r) / b;
+      if (r != 0) {
+        if ((r < 0) != (b < 0)) {
+          r += b;
+          q -= 1;
+        }
+      } else {
+        r = copysign(C(0), b);
+      }
+      C fq = cuda::std::floor(q);
+      if (q - fq > C(0.5)) {
+        fq += 1;
+      }
+      if (q == 0) {
+        fq = copysign(C(0), a / b);
+      }
+      return {static_cast<T>(fq), static_cast<T>(r)};
+    }
   };
 };
 
