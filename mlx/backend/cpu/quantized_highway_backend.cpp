@@ -1368,35 +1368,33 @@ void fp_qmm(
   constexpr int pack_factor = get_pack_factor(bits, 8);
   constexpr int packs_in_group = group_size / pack_factor;
 
+  // Accumulate in float32, as quantized.cpp does since ml-explore/mlx#4879.
+  std::vector<float> acc(N);
   for (int m = 0; m < M; m++) {
     const uint8_t* w_local = (const uint8_t*)w;
     const uint8_t* scales_local = scales;
 
-    std::fill(result, result + N, 0);
+    std::fill(acc.begin(), acc.end(), 0.0f);
 
     for (int k = 0; k < K; k++) {
-      T* result_local = result;
-      T xi = *x++;
+      float* result_local = acc.data();
+      float xi = *x++;
 
       for (int n = 0; n < N; n += group_size) {
-        T scale = static_cast<T>(
-            static_cast<float>(
-                dequantize_scale<T, group_size>(*scales_local++)) *
-            scale_factor);
+        float scale =
+            dequantize_scale<float, group_size>(*scales_local++) * scale_factor;
         for (int ng = 0; ng < packs_in_group; ng++) {
           if constexpr (bits == 4) {
-            (*result_local++) +=
-                xi * scale * static_cast<T>(FP4_LUT[w_local[0] & 0xf]);
-            (*result_local++) +=
-                xi * scale * static_cast<T>(FP4_LUT[(w_local[0] >> 4) & 0xf]);
+            (*result_local++) += xi * scale * FP4_LUT[w_local[0] & 0xf];
+            (*result_local++) += xi * scale * FP4_LUT[(w_local[0] >> 4) & 0xf];
           } else {
-            (*result_local++) +=
-                xi * scale * static_cast<T>(FP8_LUT[w_local[0]]);
+            (*result_local++) += xi * scale * FP8_LUT[w_local[0]];
           }
           w_local++;
         }
       }
     }
+    std::copy(acc.begin(), acc.end(), result);
     result += N;
   }
 }
@@ -2751,7 +2749,7 @@ void QQMatmul::eval_cpu(const std::vector<array>& inputs, array& out) {
   }
   // No path here quantizes w; quantized.cpp raises the same error.
   if (inputs[1].dtype() != uint32) {
-    throw std::runtime_error("[QQMatmul] NYI for the general case");
+    throw std::runtime_error("[QQMatmul] Weights must be quantized.");
   }
   auto& encoder = cpu::get_command_encoder(stream());
   auto ensure_row_contiguous = [s = stream(), &encoder](const array& arr) {
