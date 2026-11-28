@@ -369,11 +369,12 @@ void reduction_op(
   if (plan.type == ContiguousReduce && plan.shape.size() == 1) {
     int reduction_size = plan.shape[0];
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
-    for (int i = 0; i < out.size(); i++, out_ptr++, in_ptr += reduction_size) {
+    for (int64_t i = 0; i < out.size();
+         i++, out_ptr++, in_ptr += reduction_size) {
       *out_ptr = init;
       contiguous_reduce(in_ptr, out_ptr, reduction_size, Op{}, init);
 #else
-    int num_reductions = out.size();
+    int64_t num_reductions = out.size();
 
     // Parallelize over output elements (each is an independent reduction)
     // Only parallelize if total work is large enough AND each thread gets
@@ -385,24 +386,26 @@ void reduction_op(
 
     // Also ensure each thread handles at least a few reductions to amortize
     // overhead
-    n_threads = std::min(n_threads, std::max(1, num_reductions / 4));
+    n_threads = static_cast<int>(std::min<int64_t>(
+        n_threads, std::max<int64_t>(1, num_reductions / 4)));
 
     if (n_threads <= 1) {
-      for (int i = 0; i < num_reductions;
+      for (int64_t i = 0; i < num_reductions;
            i++, out_ptr++, in_ptr += reduction_size) {
         *out_ptr = init;
         contiguous_reduce(in_ptr, out_ptr, reduction_size, Op{}, init);
       }
     } else {
       pool.parallel_for(n_threads, [&, in_ptr, out_ptr](int tid, int nth) {
-        int chunk = (num_reductions + nth - 1) / nth;
-        int start = chunk * tid;
-        int end = std::min(start + chunk, num_reductions);
+        int64_t chunk = (num_reductions + nth - 1) / nth;
+        int64_t start = chunk * tid;
+        int64_t end = std::min(start + chunk, num_reductions);
 
         const T* my_in = in_ptr + start * reduction_size;
         U* my_out = out_ptr + start;
 
-        for (int i = start; i < end; i++, my_out++, my_in += reduction_size) {
+        for (int64_t i = start; i < end;
+             i++, my_out++, my_in += reduction_size) {
           *my_out = init;
           contiguous_reduce(my_in, my_out, reduction_size, Op{}, init);
         }
@@ -420,13 +423,13 @@ void reduction_op(
     // ContiguousReduce) should hold extra performance boost.
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
     if (plan.shape.size() == 0) {
-      for (int i = 0; i < out.size(); i++, out_ptr++) {
+      for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
         int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         contiguous_reduce(in_ptr + offset, out_ptr, reduction_size, Op{}, init);
       }
     } else {
-      for (int i = 0; i < out.size(); i++, out_ptr++) {
+      for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
         int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         nd_loop(
@@ -450,7 +453,7 @@ void reduction_op(
     size_t reduction_stride = plan.strides.back();
     plan.shape.pop_back();
     plan.strides.pop_back();
-    for (int i = 0; i < out.size(); i += reduction_stride) {
+    for (int64_t i = 0; i < out.size(); i += reduction_stride) {
       std::fill_n(out_ptr, reduction_stride, init);
       strided_reduce(in_ptr, out_ptr, reduction_size, reduction_stride, Op{});
       in_ptr += reduction_stride * reduction_size;
@@ -468,7 +471,7 @@ void reduction_op(
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
 
     if (plan.shape.size() == 0) {
-      for (int i = 0; i < out.size(); i += reduction_stride) {
+      for (int64_t i = 0; i < out.size(); i += reduction_stride) {
         int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         strided_reduce(
@@ -476,7 +479,7 @@ void reduction_op(
         out_ptr += reduction_stride;
       }
     } else {
-      for (int i = 0; i < out.size(); i += reduction_stride) {
+      for (int64_t i = 0; i < out.size(); i += reduction_stride) {
         int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         nd_loop(
@@ -505,7 +508,7 @@ void reduction_op(
         size *= d;
       }
       if (size > sum_block) {
-        for (int i = 0; i < out.size(); i++, out_ptr++) {
+        for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
           int64_t offset = elem_to_loc(i, shape, strides);
           // The first block goes into val, each later block into block from 0.
           U val = init;
@@ -531,7 +534,7 @@ void reduction_op(
       }
     }
 
-    for (int i = 0; i < out.size(); i++, out_ptr++) {
+    for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
       int64_t offset = elem_to_loc(i, shape, strides);
       U val = init;
       nd_loop(
