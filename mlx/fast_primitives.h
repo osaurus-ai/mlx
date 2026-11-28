@@ -368,7 +368,7 @@ class ScaledDotProductAttentionVJP : public Custom {
         do_causal_(do_causal),
         has_sinks_(has_sinks) {}
 
-  static bool use_fallback(const array& q, Stream s);
+  static bool use_fallback(const array& q, bool has_sinks, Stream s);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override {

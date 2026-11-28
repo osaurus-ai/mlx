@@ -925,7 +925,8 @@ array scaled_dot_product_attention(
   }
 
   bool is_training = detail::in_grad_tracing();
-  bool has_fast_vjp = !ScaledDotProductAttentionVJP::use_fallback(q, stream);
+  bool has_fast_vjp =
+      !ScaledDotProductAttentionVJP::use_fallback(q, has_sinks, stream);
   bool output_logsumexp = is_training && has_fast_vjp;
   if (!ScaledDotProductAttention::use_fallback(
           q,
@@ -980,15 +981,23 @@ std::vector<array> ScaledDotProductAttention::vjp(
   assert(cotangents.size() == outputs.size());
 
   auto s = stream();
-  if (ScaledDotProductAttentionVJP::use_fallback(primals[0], s)) {
+  if (ScaledDotProductAttentionVJP::use_fallback(primals[0], has_sinks_, s)) {
     assert(outputs.size() == 1);
     return Custom::vjp(primals, cotangents, argnums, outputs);
   }
 
+  // The fused backward computes only the gradients of q, k and v.
+  bool other_grads = std::any_of(
+      argnums.begin(), argnums.end(), [](int arg) { return arg >= 3; });
+  if (outputs.size() != 2 || other_grads) {
+    return Custom::vjp(primals, cotangents, argnums, outputs);
+  }
+
+  // The inputs are the primals, the output, the logsumexp and the cotangent.
   auto fallback = [sdpa = fallback_, s](const std::vector<array>& inputs) {
-    std::vector<array> primals(inputs.begin(), std::prev(inputs.end()));
+    std::vector<array> primals(inputs.begin(), inputs.end() - 3);
     auto [_, vjps] = mlx::core::vjp(sdpa, primals, {inputs.back()});
-    return vjps;
+    return std::vector<array>(vjps.begin(), vjps.begin() + 3);
   };
 
   std::vector<Shape> shapes;
@@ -1007,11 +1016,6 @@ std::vector<array> ScaledDotProductAttention::vjp(
 
   std::vector<array> returned_vjps;
   for (int arg : argnums) {
-    if (arg >= 3) {
-      throw std::invalid_argument(
-          "[scale_dot_product_attention] Does not support VJP with respect "
-          " to mask or attention sinks.");
-    }
     returned_vjps.push_back(std::move(vjps[arg]));
   }
   return returned_vjps;
