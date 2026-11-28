@@ -111,7 +111,7 @@ void matmul_bnns(
           /* size_t size[BNNS_MAX_TENSOR_DIMENSION] = */
           {N, M, 0, 0, 0, 0, 0, 0},
           /* size_t stride[BNNS_MAX_TENSOR_DIMENSION] = */
-          {1, N, 0, 0, 0, 0, 0, 0},
+          {1, ldc, 0, 0, 0, 0, 0, 0},
 
           /* void * _Nullable data = */ nullptr,
           /* BNNSDataType data_type = */ bnns_dtype,
