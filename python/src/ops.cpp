@@ -257,7 +257,7 @@ void init_ops(nb::module_& m) {
 
         Args:
             a (array): Input array.
-            axes (int or tuple(int)): The index of the inserted dimensions.
+            axis (int or tuple(int)): The index of the inserted dimensions.
 
         Returns:
             array: The array with inserted dimensions.
@@ -1506,7 +1506,7 @@ void init_ops(nb::module_& m) {
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def arange(start : int | float, stop : None | int | float, step : None | int | float, dtype: Dtype | None = None, *, stream: StreamOrDevice = None) -> array"),
+          "def arange(start : int | float, stop : None | int | float, step : None | int | float = None, dtype: Dtype | None = None, *, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
       Generates ranges of numbers.
 
@@ -1835,7 +1835,9 @@ void init_ops(nb::module_& m) {
          const ScalarOrArray& vals,
          std::optional<mx::Dtype> dtype,
          mx::StreamOrDevice s) {
-        return mx::full(to_shape(shape), to_array(vals, dtype), s);
+        auto array_vals = to_array(vals, dtype);
+        auto t = dtype.value_or(array_vals.dtype());
+        return mx::full(to_shape(shape), array_vals, t, s);
       },
       "shape"_a,
       "vals"_a,
@@ -2629,7 +2631,7 @@ void init_ops(nb::module_& m) {
       "keepdims"_a = false,
       "stream"_a = nb::none(),
       nb::sig(
-          "def count_nonzero(a: array, /, *, axis: None | int | Sequence[int] = None, keepdims: bool = False, stream: StreamOrDevice = None) -> array"),
+          "def count_nonzero(a: array, /, axis: None | int | Sequence[int] = None, *, keepdims: bool = False, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Count the number of non-zero elements along the given axis.
 
@@ -2879,7 +2881,7 @@ void init_ops(nb::module_& m) {
       "correction"_a = nb::none(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def var(a: array, /, axis: None | int | Sequence[int] = None, keepdims: bool = False, ddof: int = 0, *, stream: StreamOrDevice = None) -> array"),
+          "def var(a: array, /, axis: None | int | Sequence[int] = None, keepdims: bool = False, ddof: int = 0, *, correction: int | None = None, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Compute the variance(s) over the given axes.
 
@@ -2892,6 +2894,8 @@ void init_ops(nb::module_& m) {
               singleton dimensions, defaults to `False`.
             ddof (int, optional): The divisor to compute the variance
               is ``N - ddof``, defaults to 0.
+            correction (int, optional): If set, overrides ``ddof``.
+              Default: ``None``.
 
         Returns:
             array: The output array of variances.
@@ -2915,7 +2919,7 @@ void init_ops(nb::module_& m) {
       "correction"_a = nb::none(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def std(a: array, /, axis: None | int | Sequence[int] = None, keepdims: bool = False, ddof: int = 0, *, stream: StreamOrDevice = None) -> array"),
+          "def std(a: array, /, axis: None | int | Sequence[int] = None, keepdims: bool = False, ddof: int = 0, *, correction: int | None = None, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Compute the standard deviation(s) over the given axes.
 
@@ -2928,6 +2932,8 @@ void init_ops(nb::module_& m) {
               singleton dimensions, defaults to `False`.
             ddof (int, optional): The divisor to compute the variance
               is ``N - ddof``, defaults to 0.
+            correction (int, optional): If set, overrides ``ddof``.
+              Default: ``None``.
 
         Returns:
             array: The output array of standard deviations.
@@ -3630,7 +3636,7 @@ void init_ops(nb::module_& m) {
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def astype(a: array, dtype: Dtype, /, *, stream: StreamOrDevice = None) -> array"),
+          "def astype(a: array, /, dtype: Dtype, *, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Cast the array to a specified type.
 
@@ -4526,7 +4532,7 @@ void init_ops(nb::module_& m) {
       "arrays"_a,
       "metadata"_a = nb::none(),
       nb::sig(
-          "def save_gguf(file: file | str | pathlib.Path, arrays: dict[str, array], metadata: dict[str, array | str | list[str]])"),
+          "def save_gguf(file: file | str | pathlib.Path, arrays: dict[str, array], metadata: dict[str, array | str | list[str]] | None = None)"),
       R"pbdoc(
         Save array(s) to a binary file in ``.gguf`` format.
 
@@ -4538,9 +4544,10 @@ void init_ops(nb::module_& m) {
             file (file, str, pathlib.Path): File in which the array is saved.
             arrays (dict(str, array)): The dictionary of names to arrays to
               be saved.
-            metadata (dict(str, Union[array, str, list(str)])): The dictionary
+            metadata (dict(str, Union[array, str, list(str)]), optional): The dictionary
                of metadata to be saved. The values can be a scalar or 1D
                obj:`array`, a :obj:`str`, or a :obj:`list` of :obj:`str`.
+               Defaults to ``None``.
       )pbdoc");
   m.def(
       "where",
@@ -4934,7 +4941,6 @@ void init_ops(nb::module_& m) {
 
         Returns:
             array: The result of the multiplication of quantized ``x`` with quantized ``w``.
-            needed).
       )pbdoc");
   m.def(
       "segmented_mm",
@@ -5025,7 +5031,7 @@ void init_ops(nb::module_& m) {
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def vecdot(a: array, b: array, /, *, axis: int = -1, stream: StreamOrDevice = None) -> array"),
+          "def vecdot(a: array, b: array, /, axis: int = -1, *, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
       Compute the vector dot product of two arrays along an axis.
 
@@ -5855,7 +5861,7 @@ void init_ops(nb::module_& m) {
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def roll(a: array, shift: int | tuple[int], axis: None | int | tuple[int] = None, /, *, stream: StreamOrDevice = None) -> array"),
+          "def roll(a: array, /, shift: int | tuple[int], axis: None | int | tuple[int] = None, *, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Roll array elements along a given axis.
 
@@ -6119,7 +6125,7 @@ void init_ops(nb::module_& m) {
         If ``w`` is expected to receive gradients, it must be provided in
         non-quantized form.
 
-        If ``x`` and `w`` are not quantized, their data types must be ``float32``,
+        If ``x`` and ``w`` are not quantized, their data types must be ``float32``,
         ``float16``, or ``bfloat16``.
         If ``w`` is quantized, it must be packed in unsigned integers.
         ``global_scale_x`` and ``global_scale_w`` are only used for ``nvfp4`` quantization.
@@ -6138,13 +6144,12 @@ void init_ops(nb::module_& m) {
         mode (str, optional): The quantization mode. Default: ``"nvfp4"``.
           Supported modes are ``nvfp4``, ``mxfp4`` and ``mxfp8``. See the
           :ref:`table of quantization modes <quantize-modes>` for details.
-        global_scale (array, optional): The per-input float32 scale used for x
+        global_scale_x (array, optional): The per-input float32 scale used for x
             with ``"nvfp4"`` quantization. Default: ``None``.
         global_scale_w (array, optional): The per-input float32 scale used for w
             with ``"nvfp4"`` quantization. Default: ``None``.
       Returns:
         array: The result of the multiplication of quantized ``x`` with quantized ``w``.
-        needed).
   )pbdoc");
   m.def(
       "from_fp8",
