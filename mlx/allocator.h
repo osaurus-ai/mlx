@@ -55,6 +55,9 @@ inline Buffer malloc(size_t size) {
   return allocator().malloc(size);
 }
 
+// Whether the active memory is above the memory limit.
+MLX_API bool over_memory_limit();
+
 inline void free(Buffer buffer) {
   allocator().free(buffer);
 }

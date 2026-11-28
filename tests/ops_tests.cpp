@@ -146,6 +146,21 @@ TEST_CASE("test reshape") {
   eval(y);
   CHECK(!y.flags().row_contiguous);
   CHECK(y.flags().col_contiguous);
+
+  // Dense data with no contiguity flags becomes contiguous after reshape
+  x = arange(32, float32);
+  eval(x);
+  auto dense = array({1, 1, 20}, float32, nullptr, {});
+  dense.copy_shared_buffer(x, {32, 32, 1}, {false, false, false}, 32);
+  dense.set_status(array::Status::available);
+  y = reshape(dense, {4, 5});
+  eval(y);
+  CHECK(y.flags().contiguous);
+  CHECK(y.flags().row_contiguous);
+  CHECK_EQ(y.data_size(), 20);
+  CHECK(
+      array_equal(transpose(y), transpose(reshape(arange(20, float32), {4, 5})))
+          .item<bool>());
 }
 
 TEST_CASE("test flatten") {
@@ -1460,6 +1475,32 @@ TEST_CASE("test irregular binary ops") {
     CHECK(array_equal(add(x, y), full({32, 32}, 8.0f)).item<bool>());
     CHECK(array_equal(subtract(y, x), zeros({32, 32})).item<bool>());
   }
+}
+
+TEST_CASE("test exp of inf, nan and large values on cpu") {
+  auto inf = std::numeric_limits<float>::infinity();
+  auto nan = std::numeric_limits<float>::quiet_NaN();
+  for (auto dt : {float32, float16, bfloat16}) {
+    auto x = array({-inf, -60000.0f, 0.0f, 1.0f, 60000.0f, inf, nan}, {7});
+    auto y = astype(exp(astype(x, dt), Device::cpu), float32);
+    eval(y);
+    auto* p = y.data<float>();
+    CHECK_EQ(p[0], 0.0f);
+    CHECK_EQ(p[1], 0.0f);
+    CHECK_EQ(p[2], 1.0f);
+    CHECK_LT(std::abs(p[3] / std::exp(1.0f) - 1.0f), 1e-2f);
+    CHECK_EQ(p[4], inf);
+    CHECK_EQ(p[5], inf);
+    CHECK(std::isnan(p[6]));
+  }
+  auto x = array({-1e30f, -88.0f, 88.0f, 1e30f}, {4});
+  auto y = exp(x, Device::cpu);
+  eval(y);
+  auto* p = y.data<float>();
+  CHECK_EQ(p[0], 0.0f);
+  CHECK_LE(p[1], 1e-37f);
+  CHECK_LT(std::abs(p[2] / std::exp(88.0f) - 1.0f), 1e-4f);
+  CHECK_EQ(p[3], inf);
 }
 
 TEST_CASE("test arithmetic unary ops") {
@@ -6083,6 +6124,36 @@ TEST_CASE("test conv2d") {
   }
 }
 
+TEST_CASE("test conv empty batch weight gradients") {
+  SUBCASE("conv1d") {
+    for (int groups : {1, 2}) {
+      auto in = zeros({0, 5, 2});
+      auto wt = ones({4, 3, 2 / groups});
+      auto conv_w = [&](const std::vector<array>& primals) {
+        return std::vector<array>{conv1d(in, primals[0], 1, 0, 1, groups)};
+      };
+      auto cotan = ones_like(conv_w({wt})[0]);
+      auto grad = vjp(conv_w, {wt}, {cotan}).second[0];
+      CHECK_EQ(grad.shape(), wt.shape());
+      CHECK_EQ(grad.dtype(), wt.dtype());
+      CHECK(array_equal(grad, zeros_like(wt)).item<bool>());
+    }
+  }
+
+  SUBCASE("conv2d") {
+    auto in = zeros({0, 5, 5, 2}, float16);
+    auto wt = ones({4, 3, 3, 2}, float16);
+    auto conv_w = [&](const std::vector<array>& primals) {
+      return std::vector<array>{conv2d(in, primals[0])};
+    };
+    auto cotan = ones_like(conv_w({wt})[0]);
+    auto grad = vjp(conv_w, {wt}, {cotan}).second[0];
+    CHECK_EQ(grad.shape(), wt.shape());
+    CHECK_EQ(grad.dtype(), wt.dtype());
+    CHECK(array_equal(grad, zeros_like(wt)).item<bool>());
+  }
+}
+
 TEST_CASE("test trace") {
   auto in = eye(3);
   auto out = trace(in).item<float>();
@@ -6110,6 +6181,19 @@ TEST_CASE("test view") {
   in = array({1, 2, 3, 4}, int64);
   auto out = view(in, int32);
   CHECK(array_equal(out, array({1, 0, 2, 0, 3, 0, 4, 0})).item<bool>());
+
+  // Dense data with no contiguity flags becomes contiguous after a view
+  auto x = arange(8, int64);
+  eval(x);
+  in = array({2, 4}, int64, nullptr, {});
+  in.copy_shared_buffer(x, {4, 1}, {false, false, false}, 8);
+  in.set_status(array::Status::available);
+  out = view(in, int32);
+  eval(out);
+  CHECK(out.flags().contiguous);
+  CHECK(out.flags().row_contiguous);
+  CHECK(array_equal(transpose(out), transpose(view(reshape(x, {2, 4}), int32)))
+            .item<bool>());
 }
 
 TEST_CASE("test roll") {
@@ -7140,6 +7224,27 @@ TEST_CASE("test pad shape overflow") {
   const int imax = 2147483647;
   CHECK_THROWS_AS(
       pad(zeros({8}), {0}, Shape{imax}, Shape{imax}), std::overflow_error);
+}
+
+TEST_CASE("test from_fp8 to float64 equals float32 on the cpu") {
+  // Each of the 256 fp8 values gives the same number in float64 and in
+  // float32.
+  StreamOrDevice cpu = Device::cpu;
+  auto codes = astype(arange(256, cpu), uint8, cpu);
+  auto as_f64 = from_fp8(codes, float64, cpu);
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && \
+    __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 150000
+  // Built for a macOS before 15, the CPU has no float64 conversion: it throws.
+  CHECK_THROWS_AS(
+      [&]() {
+        eval(as_f64);
+        synchronize(to_stream(cpu));
+      }(),
+      std::runtime_error);
+#else
+  auto as_f32 = astype(from_fp8(codes, float32, cpu), float64, cpu);
+  CHECK(array_equal(as_f64, as_f32, true, cpu).item<bool>());
+#endif
 }
 
 TEST_CASE("test fp8 conversion") {

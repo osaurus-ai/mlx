@@ -4923,7 +4923,7 @@ void init_ops(nb::module_& m) {
               ``x`` and ``w``. See supported values and defaults in the
               :ref:`table of quantization modes <quantize-modes>`. Default: ``None``.
             mode (str, optional): The quantization mode. Default: ``"nvfp4"``.
-              Supported modes are ``nvfp4`` and ``mxfp8``. See the
+              Supported modes are ``nvfp4``, ``mxfp4`` and ``mxfp8``. See the
               :ref:`table of quantization modes <quantize-modes>` for details.
             global_scale_x (array, optional): The per-input float32 scale used for x
                 with ``"nvfp4"`` quantization. Default: ``None``.
@@ -6136,7 +6136,7 @@ void init_ops(nb::module_& m) {
           ``x`` and ``w``. See supported values and defaults in the
           :ref:`table of quantization modes <quantize-modes>`. Default: ``None``.
         mode (str, optional): The quantization mode. Default: ``"nvfp4"``.
-          Supported modes are ``nvfp4`` and ``mxfp8``. See the
+          Supported modes are ``nvfp4``, ``mxfp4`` and ``mxfp8``. See the
           :ref:`table of quantization modes <quantize-modes>` for details.
         global_scale (array, optional): The per-input float32 scale used for x
             with ``"nvfp4"`` quantization. Default: ``None``.

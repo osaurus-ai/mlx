@@ -10,6 +10,18 @@
 
 namespace mlx::core::simd {
 
+template <typename To, typename From>
+inline To bit_cast(const From& from) {
+  static_assert(sizeof(To) == sizeof(From));
+#if defined(_MSC_VER) && !defined(__clang__)
+  return __builtin_bit_cast(To, from);
+#else
+  To to;
+  __builtin_memcpy(&to, &from, sizeof(To));
+  return to;
+#endif
+}
+
 constexpr float inf = std::numeric_limits<float>::infinity();
 
 /**
@@ -61,10 +73,11 @@ Simd<T, N> exp(Simd<T, N> in) {
     // |ipart| < 2**22, other lanes are replaced below. Nothing converts a
     // float to an integer.
     Simd<float, N> magic = ipart + 12583039.0f;
-    auto epart = (*(Simd<uint32_t, N>*)&magic) << 23;
+    auto epart = bit_cast<Simd<uint32_t, N>>(magic) << 23;
 
     // Deal with NaN and Inf
-    auto result = select(isnan(x_init), x_init, (*(Simd<float, N>*)&epart) * x);
+    auto result =
+        select(isnan(x_init), x_init, bit_cast<Simd<float, N>>(epart) * x);
     result = select(x_init > 88.0f, Simd<float, N>(inf), result);
     result = select(x_init < -88.0f, Simd<float, N>(0), result);
     return Simd<T, N>(result);

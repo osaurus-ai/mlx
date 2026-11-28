@@ -38,6 +38,10 @@ class MetalAllocator : public allocator::Allocator {
     std::unique_lock lk(mutex_);
     return buffer_cache_.cache_size();
   };
+  bool over_memory_limit() {
+    return active_memory_.load(std::memory_order_relaxed) >
+        block_limit_.load(std::memory_order_relaxed);
+  }
   size_t set_cache_limit(size_t limit);
   size_t set_memory_limit(size_t limit);
   size_t get_memory_limit();

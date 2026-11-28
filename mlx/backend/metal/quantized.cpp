@@ -245,7 +245,9 @@ void quantize_impl(
     Stream s) {
   auto& w_pre = inputs[0];
   auto& out = outputs[0];
-  out.set_data(allocator::malloc(out.nbytes()));
+  if (w_pre.size() == 0) {
+    return;
+  }
 
   auto& d = metal::device(s.device);
   auto& compute_encoder = metal::get_command_encoder(s);
@@ -267,10 +269,8 @@ void quantize_impl(
     compute_encoder.set_output_array(out, 3);
   } else {
     auto& scales = outputs[1];
-    scales.set_data(allocator::malloc(scales.nbytes()));
     if (has_biases) {
       auto& biases = outputs[2];
-      biases.set_data(allocator::malloc(biases.nbytes()));
       compute_encoder.set_output_array(biases, 3);
     } else if (has_global_scale) {
       compute_encoder.set_input_array(inputs[1], 3);
@@ -333,8 +333,10 @@ auto quantize_input(
       array(wq_shape, uint32, nullptr, {}),
       array(scales_shape, uint8, nullptr, {})};
   auto& compute_encoder = metal::get_command_encoder(s);
-  compute_encoder.add_temporary(outputs[0]);
-  compute_encoder.add_temporary(outputs[1]);
+  for (auto& out : outputs) {
+    out.set_data(allocator::malloc(out.nbytes()));
+    compute_encoder.add_temporary(out);
+  }
   quantize_impl(inputs, outputs, mode, group_size, bits, false, s);
   return std::make_tuple(outputs[0], outputs[1]);
 }
@@ -2297,7 +2299,18 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  // Return 0s if x is empty
+  if (inputs[0].size() == 0) {
+    array zero = array(0, out.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
+
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // Make sure the last two dims of x and w, s, b are contiguous. This should
   // be relaxed for x.
@@ -2410,7 +2423,18 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  // Return 0s if x is empty
+  if (inputs[0].size() == 0) {
+    array zero = array(0, out.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
+
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   array x = ensure_row_contiguous_matrix(inputs[0], d, s);
   array w = ensure_row_contiguous_matrix(inputs[1], d, s);
@@ -2531,6 +2555,9 @@ void QQMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto mode = quantization_mode_to_string(mode_);
 
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // - 2 inputs: x, w (non-quantized w)
   // - 3 inputs: x, w, scales_w (quantized w)
@@ -2612,6 +2639,9 @@ void GatherQQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto mode = quantization_mode_to_string(mode_);
 
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // - 4 inputs: x, w (non-quantized w)
   // - 5 inputs: x, w, scales_w (quantized w)
@@ -2727,6 +2757,9 @@ void GatherQQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 void fast::Quantize::eval_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+  for (auto& out : outputs) {
+    out.set_data(allocator::malloc(out.nbytes()));
+  }
   quantize_impl(
       inputs, outputs, mode_, group_size_, bits_, dequantize_, stream());
 }
