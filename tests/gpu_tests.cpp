@@ -465,6 +465,28 @@ TEST_CASE("test gpu matmul") {
   }
 }
 
+TEST_CASE("test affine dequantize with scales and biases of different types") {
+  // The GPU kernel reads the scales and the biases as one type.
+  if (!metal::is_available()) {
+    return;
+  }
+  auto w = random::normal({64, 256}, float32, 0.0f, 1.0f, random::key(3));
+  auto q = quantize(w, 64, 4);
+  for (auto [st, bt] : std::vector<std::pair<Dtype, Dtype>>{
+           {float16, bfloat16}, {bfloat16, float16}, {float32, float16}}) {
+    CAPTURE(st);
+    CAPTURE(bt);
+    auto scales = astype(q[1], st);
+    auto biases = astype(q[2], bt);
+    auto gpu = dequantize(
+        q[0], scales, biases, 64, 4, "affine", {}, std::nullopt, Device::gpu);
+    auto cpu = dequantize(
+        q[0], scales, biases, 64, 4, "affine", {}, std::nullopt, Device::cpu);
+    CHECK_EQ(gpu.dtype(), cpu.dtype());
+    CHECK(allclose(gpu, cpu, 1e-3, 1e-3).item<bool>());
+  }
+}
+
 TEST_CASE("test gpu gather/scatter indices") {
   // Run with METAL_DEVICE_WRAPPER_TYPE=1 to validate the metadata bindings.
 
