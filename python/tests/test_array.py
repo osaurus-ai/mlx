@@ -177,6 +177,7 @@ class TestDtypes(mlx_tests.MLXTestCase):
             float(np.finfo(np.float32).smallest_normal),
         )
         self.assertEqual(mx.finfo(mx.float32).dtype, mx.float32)
+        self.assertEqual(mx.finfo(mx.array(1.0, dtype=mx.float16)).dtype, mx.float16)
 
         self.assertEqual(mx.finfo(mx.float16).min, np.finfo(np.float16).min)
         self.assertEqual(mx.finfo(mx.float16).max, np.finfo(np.float16).max)
@@ -209,6 +210,10 @@ class TestDtypes(mlx_tests.MLXTestCase):
         self.assertEqual(mx.iinfo(mx.uint32).min, np.iinfo(np.uint32).min)
         self.assertEqual(mx.iinfo(mx.uint32).max, np.iinfo(np.uint32).max)
         self.assertEqual(mx.iinfo(mx.int8).dtype, mx.int8)
+
+        for t in [mx.int8, mx.uint16, mx.int32, mx.uint64]:
+            self.assertEqual(mx.iinfo(t).bits, t.size * 8)
+        self.assertEqual(mx.iinfo(mx.array(1, dtype=mx.int16)).dtype, mx.int16)
 
     def test_result_type(self):
         self.assertEqual(mx.result_type(mx.int8, mx.int16), mx.int16)
@@ -1909,6 +1914,33 @@ class TestArray(mlx_tests.MLXTestCase):
         b_np = a_np[::-1, ::-3, ::-2]
         b_mx = a_mx[::-1, ::-3, ::-2]
         self.assertTrue(np.array_equal(b_np, b_mx))
+
+    def test_slice_bounds_with_array_index(self):
+        # Out-of-range slice bounds must be clamped the same way NumPy clamps
+        # them when the slice is combined with an array index.
+        a_np = np.arange(20, dtype=np.int32).reshape(4, 5)
+        a_mx = mx.array(a_np)
+        idx_np = np.array([0, 1])
+        idx_mx = mx.array([0, 1], dtype=mx.uint32)
+
+        bounds = [None, -100, -6, -4, -1, 0, 1, 3, 4, 6, 100]
+        steps = [None, 1, 2, 3, -1, -2, -3]
+
+        for start in bounds:
+            for stop in bounds:
+                for step in steps:
+                    s = slice(start, stop, step)
+                    with self.subTest(start=start, stop=stop, step=step):
+                        self.assertTrue(
+                            np.array_equal(a_np[s, idx_np], a_mx[s, idx_mx])
+                        )
+
+                        # Same clamping applies when assigning through the slice
+                        u_np = a_np.copy()
+                        u_mx = mx.array(a_np)
+                        u_np[s, idx_np] = 0
+                        u_mx[s, idx_mx] = 0
+                        self.assertTrue(np.array_equal(u_np, u_mx))
 
     def test_api(self):
         x = mx.array(np.random.rand(10, 10, 10))

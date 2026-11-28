@@ -465,6 +465,28 @@ TEST_CASE("test gpu matmul") {
   }
 }
 
+TEST_CASE("test affine dequantize with scales and biases of different types") {
+  // The GPU kernel reads the scales and the biases as one type.
+  if (!metal::is_available()) {
+    return;
+  }
+  auto w = random::normal({64, 256}, float32, 0.0f, 1.0f, random::key(3));
+  auto q = quantize(w, 64, 4);
+  for (auto [st, bt] : std::vector<std::pair<Dtype, Dtype>>{
+           {float16, bfloat16}, {bfloat16, float16}, {float32, float16}}) {
+    CAPTURE(st);
+    CAPTURE(bt);
+    auto scales = astype(q[1], st);
+    auto biases = astype(q[2], bt);
+    auto gpu = dequantize(
+        q[0], scales, biases, 64, 4, "affine", {}, std::nullopt, Device::gpu);
+    auto cpu = dequantize(
+        q[0], scales, biases, 64, 4, "affine", {}, std::nullopt, Device::cpu);
+    CHECK_EQ(gpu.dtype(), cpu.dtype());
+    CHECK(allclose(gpu, cpu, 1e-3, 1e-3).item<bool>());
+  }
+}
+
 TEST_CASE("test gpu gather/scatter indices") {
   // Run with METAL_DEVICE_WRAPPER_TYPE=1 to validate the metadata bindings.
 
@@ -782,4 +804,37 @@ TEST_CASE("test layer norm vjp bias grad race") {
     }
   }
   CHECK(worst <= 1e-5);
+}
+
+TEST_CASE("test gated delta update on the gpu with a gate per channel") {
+  // A gate of shape [B, T, Hv, Dk] decays each channel of the state on its own.
+  // From T = 16 the GPU picks a chunked kernel for a gate per head, but only
+  // the sequential kernel reads a gate per channel.
+  if (!metal::is_available()) {
+    return;
+  }
+  int B = 1, H = 16, Dk = 128, Dv = 128;
+  auto keys = random::split(random::key(7), 6);
+  for (int T : {5, 32}) {
+    auto normal = [&](Shape shape, int i) {
+      auto key = reshape(slice(keys, {i, 0}, {i + 1, 2}), {2});
+      return random::normal(shape, float32, 0.0f, 1.0f, key);
+    };
+    auto q = normal({B, T, H, Dk}, 0);
+    auto k = normal({B, T, H, Dk}, 1);
+    k = k / sqrt(sum(square(k), -1, true));
+    auto v = normal({B, T, H, Dv}, 2);
+    auto beta = sigmoid(normal({B, T, H}, 3));
+    for (auto g :
+         {sigmoid(normal({B, T, H}, 4)), sigmoid(normal({B, T, H, Dk}, 5))}) {
+      CAPTURE(T);
+      CAPTURE(g.ndim());
+      auto gpu = fast::gated_delta_update(
+          q, k, v, g, beta, std::nullopt, std::nullopt, Device::gpu);
+      auto cpu = fast::gated_delta_update(
+          q, k, v, g, beta, std::nullopt, std::nullopt, Device::cpu);
+      CHECK(allclose(gpu[0], cpu[0], 1e-4, 1e-4).item<bool>());
+      CHECK(allclose(gpu[1], cpu[1], 1e-4, 1e-4).item<bool>());
+    }
+  }
 }

@@ -59,15 +59,22 @@ void GatedDeltaUpdate::eval_gpu(
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  auto& out = outputs[0];
+  auto& hf = outputs[1];
+
+  // With no steps the final state is the initial state
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    copy_gpu(inputs[5], hf, CopyType::General, s);
+    return;
+  }
+
   auto q = ensure_row_contiguous(inputs[0], d, s);
   auto k = ensure_row_contiguous(inputs[1], d, s);
   auto v = ensure_row_contiguous(inputs[2], d, s);
   auto g = ensure_row_contiguous(inputs[3], d, s);
   auto beta = ensure_row_contiguous(inputs[4], d, s);
   auto h0 = ensure_row_contiguous(inputs[5], d, s);
-
-  auto& out = outputs[0];
-  auto& hf = outputs[1];
 
   int B = q.shape(0);
   int T = q.shape(1);
@@ -76,15 +83,26 @@ void GatedDeltaUpdate::eval_gpu(
   int Hv = v.shape(2);
   int Dv = v.shape(3);
 
+  // The NAX kernel computes float32 inputs in TF32, so it needs TF32 enabled
+  // or a 16-bit input.
+  const bool nax = metal::is_nax_available() &&
+      (env::enable_tf32() || q.dtype() != float32);
   int C = 1;
   int threshold = env::get_var("GATED_DELTA_THRESH", 16);
   if (T >= threshold)
-    C = metal::is_nax_available() ? 16 : 8;
+    C = nax ? 16 : 8;
 
   C = env::get_var("GATED_DELTA_CHUNK", C);
 
-  if (!metal::is_nax_available())
+  if (!nax)
     C = std::min(C, 8); // override in case nax is not available.
+
+  // A gate per channel ([B, T, Hv, Dk]) is read only by the sequential
+  // kernel. The chunked kernels read one gate per head.
+  bool vectorized_g = (g.ndim() == 4);
+  if (vectorized_g) {
+    C = 1;
+  }
 
   std::string suffix;
   concatenate(
@@ -135,8 +153,10 @@ void GatedDeltaUpdate::eval_gpu(
       std::string kernel_name = "seq_gated_delta_";
       std::string base_name;
       concatenate(base_name, kernel_name, suffix);
-      std::string hash_name = base_name;
-      metal::MTLFCList func_consts = {};
+      std::string hash_name = vectorized_g ? base_name + "_vecg" : base_name;
+      metal::MTLFCList func_consts = {
+          {&vectorized_g, MTL::DataType::DataTypeBool, 201},
+      };
 
       auto delta_kernel =
           get_gated_delta_kernel(d, base_name, hash_name, func_consts);

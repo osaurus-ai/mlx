@@ -856,6 +856,12 @@ MTL::Library* Device::get_library(
     return it->second.get();
   }
 
+  if (!env::get_var("MLX_METAL_RUNTIME_COMPILE", 1)) {
+    throw std::runtime_error(
+        "[metal::Device] Library " + name +
+        " is not loaded and runtime compilation is disabled.");
+  }
+
   auto mtl_lib = build_library_(builder(), compile_options);
   library_map_.insert({name, mtl_lib});
   return mtl_lib.get();

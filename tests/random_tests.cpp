@@ -1,6 +1,7 @@
 // Copyright © 2023 Apple Inc.
 
 #include <numeric>
+#include <thread>
 
 #include "doctest/doctest.h"
 
@@ -36,6 +37,27 @@ TEST_CASE("test global rng") {
   CHECK_EQ(y.item<uint32_t>(), b.item<uint32_t>());
 }
 
+TEST_CASE("test default key per thread") {
+  // Threads that do not call seed() must not get the same bits.
+  constexpr int n_threads = 4;
+  std::vector<uint32_t> results(n_threads);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < n_threads; ++i) {
+    threads.emplace_back([&results, i]() {
+      results[i] =
+          random::bits({}, 4, std::nullopt, Device::cpu).item<uint32_t>();
+    });
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+  for (int i = 0; i < n_threads; ++i) {
+    for (int j = i + 1; j < n_threads; ++j) {
+      CHECK_NE(results[i], results[j]);
+    }
+  }
+}
+
 TEST_CASE("test random split") {
   auto [key, subkey] = random::split(random::key(0));
   CHECK(array_equal(key, array({4146024105u, 967050713u})).item<bool>());
@@ -51,6 +73,22 @@ TEST_CASE("test random split") {
        1946702221u},
       {3, 2});
   CHECK(array_equal(keys, expected).item<bool>());
+}
+
+TEST_CASE("test random bits with keys at unaligned offsets") {
+  auto keys = random::split(random::key(0), 4);
+  for (int width : {1, 2}) {
+    CAPTURE(width);
+    auto fn = [width](array k) {
+      return random::bits({3}, width, k, Device::cpu);
+    };
+    auto out = vmap(fn)(keys);
+    for (int i = 0; i < keys.shape(0); ++i) {
+      CAPTURE(i);
+      auto expected = random::bits({3}, width, take(keys, i, 0), Device::cpu);
+      CHECK(array_equal(take(out, i, 0), expected).item<bool>());
+    }
+  }
 }
 
 TEST_CASE("test random bits") {
@@ -397,7 +435,7 @@ TEST_CASE("test random uniform") {
     CHECK(all(less(out, array(1.0f))).item<bool>());
     CHECK(all(greater_equal(out, array(0.0f))).item<bool>());
     CHECK(!all(equal(out, array(0.0f))).item<bool>());
-    CHECK(abs(mean(astype(out, float32)).item<float>() - 0.5f) < 0.02);
+    CHECK(std::abs(mean(astype(out, float32)).item<float>() - 0.5f) < 0.02);
   }
 
   {
@@ -407,7 +445,7 @@ TEST_CASE("test random uniform") {
     CHECK(all(less(out, array(1.0f))).item<bool>());
     CHECK(all(greater_equal(out, array(0.0f))).item<bool>());
     CHECK(!all(equal(out, array(0.0f))).item<bool>());
-    CHECK(abs(mean(astype(out, float32)).item<float>() - 0.5f) < 0.02);
+    CHECK(std::abs(mean(astype(out, float32)).item<float>() - 0.5f) < 0.02);
   }
 }
 
@@ -440,7 +478,7 @@ TEST_CASE("test random normal") {
     auto key = random::key(128291);
     auto out = random::normal({100}, key);
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(mean(out).item<float>()) < 0.1);
+    CHECK(std::abs(mean(out).item<float>()) < 0.1);
   }
 
   {
@@ -449,7 +487,7 @@ TEST_CASE("test random normal") {
     auto out = random::normal({200}, float16, key);
     CHECK_EQ(out.dtype(), float16);
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(float(mean(out).item<float16_t>())) < 0.1);
+    CHECK(std::abs(float(mean(out).item<float16_t>())) < 0.1);
   }
 
   {
@@ -458,7 +496,7 @@ TEST_CASE("test random normal") {
     auto out = random::normal({200}, bfloat16, key);
     CHECK_EQ(out.dtype(), bfloat16);
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(float(mean(out).item<bfloat16_t>())) < 0.1);
+    CHECK(std::abs(float(mean(out).item<bfloat16_t>())) < 0.1);
   }
 }
 
@@ -728,7 +766,7 @@ TEST_CASE("test laplace") {
     float sample_variance = var(out).item<float>();
 
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(sample_mean) < 0.1);
+    CHECK(std::abs(sample_mean) < 0.1);
 
     // Chebyshev's inequality.
     for (int k = 1; k <= 5; ++k) {
@@ -757,7 +795,7 @@ TEST_CASE("test laplace") {
     auto out = random::laplace({10000}, float16, key);
     CHECK_EQ(out.dtype(), float16);
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(float(mean(out).item<float16_t>())) < 0.1);
+    CHECK(std::abs(float(mean(out).item<float16_t>())) < 0.1);
   }
 
   {
@@ -766,6 +804,6 @@ TEST_CASE("test laplace") {
     auto out = random::laplace({10000}, bfloat16, key);
     CHECK_EQ(out.dtype(), bfloat16);
     CHECK(all(less(abs(out), array(inf))).item<bool>());
-    CHECK(abs(float(mean(out).item<bfloat16_t>())) < 0.1);
+    CHECK(std::abs(float(mean(out).item<bfloat16_t>())) < 0.1);
   }
 }

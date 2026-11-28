@@ -55,6 +55,10 @@ class CommonAllocator : public Allocator {
   size_t get_memory_limit() {
     return memory_limit_.load(std::memory_order_relaxed);
   }
+  bool over_memory_limit() const {
+    return active_memory_.load(std::memory_order_relaxed) >
+        memory_limit_.load(std::memory_order_relaxed);
+  }
   size_t set_memory_limit(size_t limit) {
     std::unique_lock lk(mutex_);
     return memory_limit_.exchange(limit, std::memory_order_relaxed);
@@ -186,6 +190,10 @@ CommonAllocator& common_allocator() {
 
 Allocator& allocator() {
   return common_allocator();
+}
+
+bool over_memory_limit() {
+  return common_allocator().over_memory_limit();
 }
 
 void* Buffer::raw_ptr() {

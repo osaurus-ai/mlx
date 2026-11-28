@@ -95,6 +95,7 @@ struct ReductionAccumulator {
 constexpr int sum_block = 4096;
 
 struct SumReduce;
+struct ProdReduce;
 
 template <typename U, typename Op>
 constexpr bool cascade_sum =
@@ -172,7 +173,12 @@ struct AccumType<float16_t> {
 #endif // MLX_USE_HIGHWAY_KERNELS
 #if defined(MLX_USE_HIGHWAY_KERNELS)
 template <typename T, typename A, typename Op>
-A contiguous_accumulate_block(const T* x, int size, Op op, A acc, A init) {
+A contiguous_accumulate_block(
+    const T* x,
+    int64_t size,
+    Op op,
+    A acc,
+    A init) {
   constexpr int N = std::min(simd::max_size<T>, simd::max_size<A>);
   simd::Simd<A, N> accumulator_v(init);
   while (size >= N) {
@@ -189,17 +195,34 @@ A contiguous_accumulate_block(const T* x, int size, Op op, A acc, A init) {
 }
 
 template <typename T, typename A, typename Op>
-A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
+A contiguous_accumulate(const T* x, int64_t size, Op op, A acc, A init) {
   if constexpr (cascade_sum<A, Op>) {
     for (; size > sum_block; size -= sum_block, x += sum_block) {
       acc = contiguous_accumulate_block(x, sum_block, op, acc, init);
     }
   }
+  if constexpr (
+      std::is_same_v<Op, ProdReduce> &&
+      (std::is_same_v<T, bfloat16_t> || std::is_same_v<T, float16_t>)) {
+    // Multiply half precision values one at a time, in order, in float. The
+    // CPU backend without Highway does the same, because it has no bfloat16
+    // vectors. A lane that takes each Nth value can overflow or underflow
+    // when the product in order does not.
+    for (; size > 0; size--, x++) {
+      acc = op(acc, static_cast<A>(*x));
+    }
+    return acc;
+  }
   return contiguous_accumulate_block(x, size, op, acc, init);
 }
 
 template <typename T, typename U, typename Op>
-void contiguous_reduce(const T* x, U* accumulator, int size, Op op, U init) {
+void contiguous_reduce(
+    const T* x,
+    U* accumulator,
+    int64_t size,
+    Op op,
+    U init) {
   using A = typename AccumType<U>::type;
   *accumulator = static_cast<U>(contiguous_accumulate(
       x, size, op, static_cast<A>(*accumulator), static_cast<A>(init)));
@@ -254,7 +277,7 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
 
   if (n_threads <= 1) {
     U result = init;
-    contiguous_reduce(x, &result, static_cast<int>(size), op, init);
+    contiguous_reduce(x, &result, static_cast<int64_t>(size), op, init);
     return result;
   }
 
@@ -276,7 +299,7 @@ U parallel_contiguous_reduce(const T* x, size_t size, Op op, U init) {
     if (start < end) {
       *partial = contiguous_accumulate(
           x + start,
-          static_cast<int>(end - start),
+          static_cast<int64_t>(end - start),
           op,
           static_cast<A>(init),
           static_cast<A>(init));
@@ -322,6 +345,12 @@ void reduction_op(
     array& out,
     const std::vector<int>& axes,
     U init) {
+  // Nothing to reduce just initialize the output
+  if (x.size() == 0) {
+    std::fill_n(out.data<U>(), out.size(), init);
+    return;
+  }
+
   ReductionPlan plan = get_reduction_plan(x, axes);
 
   auto in_ptr = x.data<T>();
@@ -340,11 +369,12 @@ void reduction_op(
   if (plan.type == ContiguousReduce && plan.shape.size() == 1) {
     int reduction_size = plan.shape[0];
 #if !defined(MLX_USE_HIGHWAY_KERNELS)
-    for (int i = 0; i < out.size(); i++, out_ptr++, in_ptr += reduction_size) {
+    for (int64_t i = 0; i < out.size();
+         i++, out_ptr++, in_ptr += reduction_size) {
       *out_ptr = init;
       contiguous_reduce(in_ptr, out_ptr, reduction_size, Op{}, init);
 #else
-    int num_reductions = out.size();
+    int64_t num_reductions = out.size();
 
     // Parallelize over output elements (each is an independent reduction)
     // Only parallelize if total work is large enough AND each thread gets
@@ -356,24 +386,26 @@ void reduction_op(
 
     // Also ensure each thread handles at least a few reductions to amortize
     // overhead
-    n_threads = std::min(n_threads, std::max(1, num_reductions / 4));
+    n_threads = static_cast<int>(std::min<int64_t>(
+        n_threads, std::max<int64_t>(1, num_reductions / 4)));
 
     if (n_threads <= 1) {
-      for (int i = 0; i < num_reductions;
+      for (int64_t i = 0; i < num_reductions;
            i++, out_ptr++, in_ptr += reduction_size) {
         *out_ptr = init;
         contiguous_reduce(in_ptr, out_ptr, reduction_size, Op{}, init);
       }
     } else {
       pool.parallel_for(n_threads, [&, in_ptr, out_ptr](int tid, int nth) {
-        int chunk = (num_reductions + nth - 1) / nth;
-        int start = chunk * tid;
-        int end = std::min(start + chunk, num_reductions);
+        int64_t chunk = (num_reductions + nth - 1) / nth;
+        int64_t start = chunk * tid;
+        int64_t end = std::min(start + chunk, num_reductions);
 
         const T* my_in = in_ptr + start * reduction_size;
         U* my_out = out_ptr + start;
 
-        for (int i = start; i < end; i++, my_out++, my_in += reduction_size) {
+        for (int64_t i = start; i < end;
+             i++, my_out++, my_in += reduction_size) {
           *my_out = init;
           contiguous_reduce(my_in, my_out, reduction_size, Op{}, init);
         }
@@ -391,13 +423,13 @@ void reduction_op(
     // ContiguousReduce) should hold extra performance boost.
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
     if (plan.shape.size() == 0) {
-      for (int i = 0; i < out.size(); i++, out_ptr++) {
+      for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
         int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         contiguous_reduce(in_ptr + offset, out_ptr, reduction_size, Op{}, init);
       }
     } else {
-      for (int i = 0; i < out.size(); i++, out_ptr++) {
+      for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
         int64_t offset = elem_to_loc(i, shape, strides);
         *out_ptr = init;
         nd_loop(
@@ -421,7 +453,7 @@ void reduction_op(
     size_t reduction_stride = plan.strides.back();
     plan.shape.pop_back();
     plan.strides.pop_back();
-    for (int i = 0; i < out.size(); i += reduction_stride) {
+    for (int64_t i = 0; i < out.size(); i += reduction_stride) {
       std::fill_n(out_ptr, reduction_stride, init);
       strided_reduce(in_ptr, out_ptr, reduction_size, reduction_stride, Op{});
       in_ptr += reduction_stride * reduction_size;
@@ -439,7 +471,7 @@ void reduction_op(
     auto [shape, strides] = shapes_without_reduction_axes(x, axes);
 
     if (plan.shape.size() == 0) {
-      for (int i = 0; i < out.size(); i += reduction_stride) {
+      for (int64_t i = 0; i < out.size(); i += reduction_stride) {
         int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         strided_reduce(
@@ -447,7 +479,7 @@ void reduction_op(
         out_ptr += reduction_stride;
       }
     } else {
-      for (int i = 0; i < out.size(); i += reduction_stride) {
+      for (int64_t i = 0; i < out.size(); i += reduction_stride) {
         int64_t offset = elem_to_loc(i, shape, strides);
         std::fill_n(out_ptr, reduction_stride, init);
         nd_loop(
@@ -476,7 +508,7 @@ void reduction_op(
         size *= d;
       }
       if (size > sum_block) {
-        for (int i = 0; i < out.size(); i++, out_ptr++) {
+        for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
           int64_t offset = elem_to_loc(i, shape, strides);
           // The first block goes into val, each later block into block from 0.
           U val = init;
@@ -502,7 +534,7 @@ void reduction_op(
       }
     }
 
-    for (int i = 0; i < out.size(); i++, out_ptr++) {
+    for (int64_t i = 0; i < out.size(); i++, out_ptr++) {
       int64_t offset = elem_to_loc(i, shape, strides);
       U val = init;
       nd_loop(

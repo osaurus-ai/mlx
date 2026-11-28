@@ -56,6 +56,7 @@ bool fast::ScaledDotProductAttention::use_fallback(
 
 bool fast::ScaledDotProductAttentionVJP::use_fallback(
     const array& q,
+    bool has_sinks,
     Stream s) {
   return true;
 }

@@ -64,6 +64,9 @@ MLX_API Allocator& allocator();
 
 using Deleter = std::function<void(Buffer)>;
 
+// Whether the active memory is above the memory limit.
+MLX_API bool over_memory_limit();
+
 // The allocator owns data from malloc
 class Data {
  public:

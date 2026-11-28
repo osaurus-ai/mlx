@@ -146,6 +146,21 @@ TEST_CASE("test reshape") {
   eval(y);
   CHECK(!y.flags().row_contiguous);
   CHECK(y.flags().col_contiguous);
+
+  // Dense data with no contiguity flags becomes contiguous after reshape
+  x = arange(32, float32);
+  eval(x);
+  auto dense = array({1, 1, 20}, float32, nullptr, {});
+  dense.copy_shared_buffer(x, {32, 32, 1}, {false, false, false}, 32);
+  dense.set_status(array::Status::available);
+  y = reshape(dense, {4, 5});
+  eval(y);
+  CHECK(y.flags().contiguous);
+  CHECK(y.flags().row_contiguous);
+  CHECK_EQ(y.data_size(), 20);
+  CHECK(
+      array_equal(transpose(y), transpose(reshape(arange(20, float32), {4, 5})))
+          .item<bool>());
 }
 
 TEST_CASE("test flatten") {
@@ -1441,6 +1456,24 @@ TEST_CASE("test reduction ops") {
   }
 }
 
+TEST_CASE("test reduction with more than 2^31 outputs") {
+  // Empty inputs give outputs that are all true. Each output (2 to 2.5 GiB) is
+  // larger than the one before, so it cannot reuse that buffer.
+  StreamOrDevice s = Device::cpu;
+
+  // Contiguous reduction
+  auto y = all(zeros({2, (1 << 30) + 64, 0}, bool_), 2, false, s);
+  CHECK(all(y, false, s).item<bool>());
+
+  // Strided reduction over one axis
+  y = all(zeros({5, 0, 1 << 29}, bool_), 1, false, s);
+  CHECK(all(y, false, s).item<bool>());
+
+  // Strided reduction over two axes
+  y = all(zeros({2, 5, 0, (1 << 29) + 64}, bool_), {0, 2}, false, s);
+  CHECK(all(y, false, s).item<bool>());
+}
+
 TEST_CASE("test irregular binary ops") {
   // 1D strided
   {
@@ -1460,6 +1493,32 @@ TEST_CASE("test irregular binary ops") {
     CHECK(array_equal(add(x, y), full({32, 32}, 8.0f)).item<bool>());
     CHECK(array_equal(subtract(y, x), zeros({32, 32})).item<bool>());
   }
+}
+
+TEST_CASE("test exp of inf, nan and large values on cpu") {
+  auto inf = std::numeric_limits<float>::infinity();
+  auto nan = std::numeric_limits<float>::quiet_NaN();
+  for (auto dt : {float32, float16, bfloat16}) {
+    auto x = array({-inf, -60000.0f, 0.0f, 1.0f, 60000.0f, inf, nan}, {7});
+    auto y = astype(exp(astype(x, dt), Device::cpu), float32);
+    eval(y);
+    auto* p = y.data<float>();
+    CHECK_EQ(p[0], 0.0f);
+    CHECK_EQ(p[1], 0.0f);
+    CHECK_EQ(p[2], 1.0f);
+    CHECK_LT(std::abs(p[3] / std::exp(1.0f) - 1.0f), 1e-2f);
+    CHECK_EQ(p[4], inf);
+    CHECK_EQ(p[5], inf);
+    CHECK(std::isnan(p[6]));
+  }
+  auto x = array({-1e30f, -88.0f, 88.0f, 1e30f}, {4});
+  auto y = exp(x, Device::cpu);
+  eval(y);
+  auto* p = y.data<float>();
+  CHECK_EQ(p[0], 0.0f);
+  CHECK_LE(p[1], 1e-37f);
+  CHECK_LT(std::abs(p[2] / std::exp(88.0f) - 1.0f), 1e-4f);
+  CHECK_EQ(p[3], inf);
 }
 
 TEST_CASE("test arithmetic unary ops") {
@@ -4343,15 +4402,15 @@ TEST_CASE("test power") {
   auto b = complex64_t{0.5, 0.5};
   auto expected = std::pow(a, b);
   auto out = (power(array(a), array(b))).item<complex64_t>();
-  CHECK(abs(out.real() - expected.real()) < 1e-7);
-  CHECK(abs(out.imag() - expected.imag()) < 1e-7);
+  CHECK(std::abs(out.real() - expected.real()) < 1e-7);
+  CHECK(std::abs(out.imag() - expected.imag()) < 1e-7);
 
   a = complex64_t{-1.2, 0.1};
   b = complex64_t{2.2, 0.0};
   expected = std::pow(a, b);
   out = (power(array(a), array(b))).item<complex64_t>();
-  CHECK(abs(out.real() - expected.real()) < 1e-6);
-  CHECK(abs(out.imag() - expected.imag()) < 1e-6);
+  CHECK(std::abs(out.real() - expected.real()) < 1e-6);
+  CHECK(std::abs(out.imag() - expected.imag()) < 1e-6);
 }
 
 TEST_CASE("test where") {
@@ -4689,6 +4748,55 @@ TEST_CASE("test quantize dequantize") {
     auto x_hat = dequantize(x_q, scales, biases, 128, i);
     auto max_diff = max(abs(x - x_hat)).item<float>();
     CHECK(max_diff <= 127.0 / (1 << i));
+  }
+}
+
+TEST_CASE("test affine quantized matmul accumulates in float32 on the cpu") {
+  // As ml-explore/mlx#4803's test: x repeats [1, eps, -1, 0] and each block of
+  // four weights along K is equal, so each block adds eps * w. A sum in the
+  // input type loses eps * w next to w; in float32 every partial sum is exact.
+  auto s = Device::cpu;
+  constexpr int N = 128, K = 256;
+  for (auto dtype : {bfloat16, float16}) {
+    float eps = dtype == bfloat16 ? 1.0f / 256 : 1.0f / 2048;
+    std::vector<float> xv;
+    for (int i = 0; i < K / 4; i++) {
+      xv.insert(xv.end(), {1.0f, eps, -1.0f, 0.0f});
+    }
+    auto x1 = array(xv.begin(), {K}, float32);
+    auto x = astype(stack({x1, negative(x1, s)}, s), dtype, s);
+    for (bool tr : {true, false}) {
+      for (int gs : {32, 64, 128}) {
+        for (int bits : {2, 4, 8}) {
+          CAPTURE(dtype);
+          CAPTURE(tr);
+          CAPTURE(gs);
+          CAPTURE(bits);
+          int rows = tr ? N : K, cols = tr ? K : N, groups = cols / gs;
+          // All bits set give the code 2**bits - 1, and the bias moves w to v.
+          std::vector<int32_t> vv(rows * groups);
+          for (int i = 0; i < rows; i++) {
+            for (int j = 0; j < groups; j++) {
+              vv[i * groups + j] = ((tr ? i : i / 4) + 3 * j) % 8 + 1;
+            }
+          }
+          auto v = array(vv.begin(), {rows, groups}, int32);
+          auto q = full(
+              {rows, cols * bits / 32}, array(uint32_t(0xFFFFFFFF)), uint32, s);
+          auto scales = ones(v.shape(), dtype, s);
+          auto biases = astype(subtract(v, array((1 << bits) - 1), s), dtype, s);
+          auto w = astype(
+              dequantize(
+                  q, scales, biases, gs, bits, "affine", std::nullopt,
+                  std::nullopt, s),
+              float32,
+              s);
+          auto y_ref = matmul(astype(x, float32, s), tr ? transpose(w, s) : w, s);
+          auto y = quantized_matmul(x, q, scales, biases, tr, gs, bits, "affine", s);
+          CHECK(array_equal(y, astype(y_ref, dtype, s), false, s).item<bool>());
+        }
+      }
+    }
   }
 }
 
@@ -5346,6 +5454,46 @@ std::vector<array> compare_floor_divide_by_minus_one(
 }
 
 } // namespace
+
+TEST_CASE("test float floor_divide and divmod floor the exact quotient") {
+  // x / y rounded to the type can reach the next integer: 1 / 0.1f is
+  // 9.99999985 but rounds to 10 in float32, 73.625 / 1.248046875 is 58.992
+  // but rounds to 59 in float16, and 62.75 / 0.99609375 is 62.996 but rounds
+  // to 63 in bfloat16. The quotient is the floor of the exact one, as in
+  // Python and NumPy, so q * y + r stays x.
+  auto check = [](Dtype t,
+                  std::vector<float> x,
+                  std::vector<float> y,
+                  std::vector<float> q,
+                  std::vector<float> r) {
+    auto a = astype(array(x.data(), {static_cast<int>(x.size())}), t);
+    auto b = astype(array(y.data(), {static_cast<int>(y.size())}), t);
+    auto expected_q = astype(array(q.data(), {static_cast<int>(q.size())}), t);
+    auto expected_r = astype(array(r.data(), {static_cast<int>(r.size())}), t);
+    auto out = divmod(a, b);
+    CHECK(array_equal(out[0], expected_q).item<bool>());
+    CHECK(allclose(out[1], expected_r, 1e-5, 1e-8).item<bool>());
+    CHECK(array_equal(floor_divide(a, b), expected_q).item<bool>());
+  };
+  check(
+      float32,
+      {1.0f, -1.0f, 1.0f},
+      {0.1f, 0.1f, -0.1f},
+      {9.0f, -10.0f, -10.0f},
+      {0.09999999f, 1.4901161e-08f, -1.4901161e-08f});
+  check(
+      float16,
+      {73.625f, -73.625f},
+      {1.248046875f, 1.248046875f},
+      {58.0f, -59.0f},
+      {1.23828125f, 0.009765625f});
+  check(bfloat16, {62.75f}, {0.99609375f}, {62.0f}, {0.9921875f});
+
+  // A zero divisor still gives x / y and fmod(x, y): inf and NaN.
+  auto out = divmod(array(1.0f), array(0.0f));
+  CHECK(std::isinf(out[0].item<float>()));
+  CHECK(std::isnan(out[1].item<float>()));
+}
 
 TEST_CASE("test floor_divide at the minimum and at zero") {
   // floor_divide(MIN, -1) is MIN: the quotient wraps around, as in two's
@@ -6034,6 +6182,36 @@ TEST_CASE("test conv2d") {
   }
 }
 
+TEST_CASE("test conv empty batch weight gradients") {
+  SUBCASE("conv1d") {
+    for (int groups : {1, 2}) {
+      auto in = zeros({0, 5, 2});
+      auto wt = ones({4, 3, 2 / groups});
+      auto conv_w = [&](const std::vector<array>& primals) {
+        return std::vector<array>{conv1d(in, primals[0], 1, 0, 1, groups)};
+      };
+      auto cotan = ones_like(conv_w({wt})[0]);
+      auto grad = vjp(conv_w, {wt}, {cotan}).second[0];
+      CHECK_EQ(grad.shape(), wt.shape());
+      CHECK_EQ(grad.dtype(), wt.dtype());
+      CHECK(array_equal(grad, zeros_like(wt)).item<bool>());
+    }
+  }
+
+  SUBCASE("conv2d") {
+    auto in = zeros({0, 5, 5, 2}, float16);
+    auto wt = ones({4, 3, 3, 2}, float16);
+    auto conv_w = [&](const std::vector<array>& primals) {
+      return std::vector<array>{conv2d(in, primals[0])};
+    };
+    auto cotan = ones_like(conv_w({wt})[0]);
+    auto grad = vjp(conv_w, {wt}, {cotan}).second[0];
+    CHECK_EQ(grad.shape(), wt.shape());
+    CHECK_EQ(grad.dtype(), wt.dtype());
+    CHECK(array_equal(grad, zeros_like(wt)).item<bool>());
+  }
+}
+
 TEST_CASE("test trace") {
   auto in = eye(3);
   auto out = trace(in).item<float>();
@@ -6061,6 +6239,19 @@ TEST_CASE("test view") {
   in = array({1, 2, 3, 4}, int64);
   auto out = view(in, int32);
   CHECK(array_equal(out, array({1, 0, 2, 0, 3, 0, 4, 0})).item<bool>());
+
+  // Dense data with no contiguity flags becomes contiguous after a view
+  auto x = arange(8, int64);
+  eval(x);
+  in = array({2, 4}, int64, nullptr, {});
+  in.copy_shared_buffer(x, {4, 1}, {false, false, false}, 8);
+  in.set_status(array::Status::available);
+  out = view(in, int32);
+  eval(out);
+  CHECK(out.flags().contiguous);
+  CHECK(out.flags().row_contiguous);
+  CHECK(array_equal(transpose(out), transpose(view(reshape(x, {2, 4}), int32)))
+            .item<bool>());
 }
 
 TEST_CASE("test roll") {
@@ -7093,6 +7284,27 @@ TEST_CASE("test pad shape overflow") {
       pad(zeros({8}), {0}, Shape{imax}, Shape{imax}), std::overflow_error);
 }
 
+TEST_CASE("test from_fp8 to float64 equals float32 on the cpu") {
+  // Each of the 256 fp8 values gives the same number in float64 and in
+  // float32.
+  StreamOrDevice cpu = Device::cpu;
+  auto codes = astype(arange(256, cpu), uint8, cpu);
+  auto as_f64 = from_fp8(codes, float64, cpu);
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && \
+    __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 150000
+  // Built for a macOS before 15, the CPU has no float64 conversion: it throws.
+  CHECK_THROWS_AS(
+      [&]() {
+        eval(as_f64);
+        synchronize(to_stream(cpu));
+      }(),
+      std::runtime_error);
+#else
+  auto as_f32 = astype(from_fp8(codes, float32, cpu), float64, cpu);
+  CHECK(array_equal(as_f64, as_f32, true, cpu).item<bool>());
+#endif
+}
+
 TEST_CASE("test fp8 conversion") {
   for (auto t : {float32, float16, bfloat16}) {
     array in({-1.125, -1.0, 0.0, 1.0, 1.125, 4.5, 448.0}, t);
@@ -7575,7 +7787,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(with_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
   auto with_global_scales = qqmm(
       x,
@@ -7589,7 +7801,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(with_global_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
   auto without_scales = qqmm(
       x,
@@ -7603,7 +7815,7 @@ TEST_CASE("test qqmm with an unquantized weight") {
       cpu);
   CHECK_THROWS_WITH_AS(
       sum(without_scales, cpu).item<float>(),
-      "[QQMatmul] NYI for the general case",
+      "[QQMatmul] Weights must be quantized.",
       std::runtime_error);
 }
 
@@ -8065,4 +8277,18 @@ TEST_CASE("test ops and their gradients keep the caller's stream") {
     check_stream(outs[0], default_stream(default_device()));
     check_stream(outs[1], s);
   }
+}
+
+TEST_CASE("test complex64 remainder of a large or nan quotient") {
+  // Each part is the floor modulo of that part, as for real floats. The
+  // quotient of a part may not fit in an integer, or may be nan.
+  auto r = complex64_t{1e30f, 7.0f} % complex64_t{3.0f, -2.0f};
+  CHECK_EQ(r.real(), std::fmod(1e30f, 3.0f));
+  CHECK(r.real() >= 0.0f);
+  CHECK(r.real() < 3.0f);
+  CHECK_EQ(r.imag(), -1.0f);
+
+  auto n = complex64_t{std::nanf(""), 1.0f} % complex64_t{3.0f, 2.0f};
+  CHECK(std::isnan(n.real()));
+  CHECK_EQ(n.imag(), 1.0f);
 }

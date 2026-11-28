@@ -782,6 +782,7 @@ void pad_and_slice_conv_3D_gpu(
     array x_copy(xshape, x.dtype(), nullptr, {});
     array zero(0, x.dtype());
     pad_gpu(x, zero, x_copy, {0, -1}, {0, 0}, s);
+    metal::get_command_encoder(s).add_temporary(zero);
     metal::get_command_encoder(s).add_temporary(x_copy);
 
     return x_copy;
@@ -802,8 +803,14 @@ void pad_and_slice_conv_3D_gpu(
   implicit_gemm_conv_3D_gpu(s, d, in, wt, intermediate, new_params);
 
   // Slice out
+  auto [_, row_contiguous, col_contiguous] =
+      check_contiguity(out.shape(), intermediate.strides());
+  bool contiguous = row_contiguous || col_contiguous;
   out.copy_shared_buffer(
-      intermediate, intermediate.strides(), {0}, intermediate.data_size());
+      intermediate,
+      intermediate.strides(),
+      {contiguous, row_contiguous, col_contiguous},
+      contiguous ? out.size() : intermediate.data_size());
 }
 
 void conv_2D_gpu(
@@ -1385,6 +1392,7 @@ void pad_in_channels_conv_2D_gpu(
     array x_copy(xshape, x.dtype(), nullptr, {});
     array zero(0, x.dtype());
     pad_gpu(x, zero, x_copy, {-1}, {0}, s);
+    metal::get_command_encoder(s).add_temporary(zero);
     metal::get_command_encoder(s).add_temporary(x_copy);
 
     return x_copy;
@@ -1742,6 +1750,19 @@ void Convolution::eval_gpu(const std::vector<array>& inputs, array& out) {
   // Some shortcuts for brevity
   const array& in = inputs[0];
   const array& wt = inputs[1];
+
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return;
+  }
+
+  // Return 0s if either input is empty
+  if (in.size() == 0 || wt.size() == 0) {
+    array zero = array(0, out.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
 
   // 3D conv
   if (out.ndim() == 5) {

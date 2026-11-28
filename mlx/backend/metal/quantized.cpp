@@ -245,7 +245,9 @@ void quantize_impl(
     Stream s) {
   auto& w_pre = inputs[0];
   auto& out = outputs[0];
-  out.set_data(allocator::malloc(out.nbytes()));
+  if (w_pre.size() == 0) {
+    return;
+  }
 
   auto& d = metal::device(s.device);
   auto& compute_encoder = metal::get_command_encoder(s);
@@ -267,10 +269,8 @@ void quantize_impl(
     compute_encoder.set_output_array(out, 3);
   } else {
     auto& scales = outputs[1];
-    scales.set_data(allocator::malloc(scales.nbytes()));
     if (has_biases) {
       auto& biases = outputs[2];
-      biases.set_data(allocator::malloc(biases.nbytes()));
       compute_encoder.set_output_array(biases, 3);
     } else if (has_global_scale) {
       compute_encoder.set_input_array(inputs[1], 3);
@@ -333,8 +333,10 @@ auto quantize_input(
       array(wq_shape, uint32, nullptr, {}),
       array(scales_shape, uint8, nullptr, {})};
   auto& compute_encoder = metal::get_command_encoder(s);
-  compute_encoder.add_temporary(outputs[0]);
-  compute_encoder.add_temporary(outputs[1]);
+  for (auto& out : outputs) {
+    out.set_data(allocator::malloc(out.nbytes()));
+    compute_encoder.add_temporary(out);
+  }
   quantize_impl(inputs, outputs, mode, group_size, bits, false, s);
   return std::make_tuple(outputs[0], outputs[1]);
 }
@@ -713,19 +715,42 @@ void qmv_wide(
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
 
+// The fork's mixed q6 AR result is the exact F32 single-row reduction. A
+// multi-row kernel with another reduction order must not take these rows.
+inline bool exact_q6_f32_rows(
+    bool affine,
+    int bits,
+    Dtype dtype,
+    int group_size,
+    int K,
+    int N) {
+  return affine && bits == 6 && dtype == float32 && group_size == 64 &&
+      K % 512 == 0 && N % 8 == 0;
+}
+
 inline bool use_qmv_mma(
     const array& x,
     const array& w,
     const array& scales,
+    const std::optional<array>& biases,
     QuantizationMode mode,
+    int group_size,
+    int bits,
     int M,
     int N,
     int K,
     metal::Device& d) {
-  if (K % 128 != 0) {
-    return false;
+  bool nax = metal::is_nax_available();
+  bool affine = mode == QuantizationMode::Affine;
+  // affine_qmv_mma beats qmv from 3 rows on gen 13 and 14 GPUs (4 on their
+  // Ultras) and qmv_wide from 4 rows on gen 15 and above; the other paths
+  // from 6.
+  bool ultra = d.get_architecture().back() == 'd';
+  int min_rows = 6;
+  if (affine && !nax) {
+    min_rows = (ultra || d.get_architecture_gen() >= 15) ? 4 : 3;
   }
-  if (mode == QuantizationMode::Affine) {
+  if ((M < min_rows) || (K % 128 != 0)) {
     return false;
   }
   // Require aligned vector load.
@@ -734,7 +759,36 @@ inline bool use_qmv_mma(
     return false;
   }
   // Route for large K/N.
-  if (metal::is_nax_available()) {
+  if (affine) {
+    // This fork does not have the affine qmv_nax kernels.
+    if (nax) {
+      return false;
+    }
+    // affine_qmv_mma reads the scales and biases as the type of x, so the
+    // mixed bf16/f16 metadata path stays on qmv.
+    if (!biases || scales.dtype() != x.dtype() ||
+        biases->dtype() != x.dtype()) {
+      return false;
+    }
+    // The exact F32 q6 rows keep their single-row reduction order.
+    if (exact_q6_f32_rows(true, bits, x.dtype(), group_size, K, N)) {
+      return false;
+    }
+    // qmv_mma reads 2 to 8 bits (not 7).
+    if (bits < 2 || bits == 7) {
+      return false;
+    }
+    // On M3 Ultra and newer, as for fp, only for large layers.
+    if (ultra && d.get_architecture_gen() >= 15) {
+      return (N >= 4096) && (K >= 4096) && (N % 16 == 0);
+    }
+    // Affine pays off from a smaller N * K than fp, and from 2^20 on gen 15+
+    // (M4).
+    int nk_log2 = d.get_architecture_gen() >= 15 ? 20 : 21;
+    return (N >= 512) && (K >= 512) &&
+        (int64_t(N) * K >= (int64_t(1) << nk_log2)) && (N % 16 == 0);
+  }
+  if (nax) {
     return (env::enable_tf32() || x.dtype() != float32) && (N >= 2048) &&
         (K >= 2048) && (N % 32 == 0);
   }
@@ -749,6 +803,7 @@ void qmv_mma(
     const array& x,
     const array& w,
     const array& scales,
+    const std::optional<array>& biases,
     array& out,
     int group_size,
     int bits,
@@ -759,8 +814,24 @@ void qmv_mma(
     const Stream& s,
     const std::string& mode) {
   bool nax = metal::is_nax_available();
-  int wk = nax || d.get_architecture_gen() >= 15 ? 8 : 4;
-  int bn = nax ? 32 : 16;
+  bool affine = (mode == "affine");
+  int wk = 4;
+  int bn = 16;
+  int tm = (M > 8) ? 2 : 1;
+  if (nax) {
+    wk = 8;
+    bn = 32;
+  } else { // non-nax
+    // Affine stays at wk 4 on gen-15+ too (wk 8 was no faster on M4).
+    if (!affine && (d.get_architecture_gen() >= 15)) {
+      wk = 8;
+    }
+    // Below gen 15, affine with one row tile is faster at 32 columns (M2 Pro).
+    if (affine && (d.get_architecture_gen() < 15) && (tm == 1) &&
+        (N % 32 == 0)) {
+      bn = 32;
+    }
+  }
   std::string type_string = get_type_string(x.dtype());
   std::string kname;
   kname.reserve(64);
@@ -782,7 +853,6 @@ void qmv_mma(
     kernel = get_qmm_nax_kernel_wrapped(
         d, kname, "qmv_nax", mode, type_string, group_size, bits, wk, bn);
   } else {
-    int tm = M > 8 ? 2 : 1;
     concatenate(kname, "_tm", tm);
     kernel = get_quantized_kernel_wrapped(
         d, kname, "qmv_mma", mode, type_string, group_size, bits, wk, bn, tm);
@@ -790,23 +860,27 @@ void qmv_mma(
 
   auto& compute_encoder = metal::get_command_encoder(s);
   compute_encoder.set_compute_pipeline_state(kernel);
-  compute_encoder.set_input_array(w, 0);
-  compute_encoder.set_input_array(scales, 1);
-  compute_encoder.set_input_array(x, 2);
-  compute_encoder.set_output_array(out, 3);
-  compute_encoder.set_bytes(K, 4);
-  compute_encoder.set_bytes(N, 5);
-  compute_encoder.set_bytes(M, 6);
+  int c = 0;
+  compute_encoder.set_input_array(w, c++);
+  compute_encoder.set_input_array(scales, c++);
+  if (biases) {
+    compute_encoder.set_input_array(*biases, c++);
+  }
+  compute_encoder.set_input_array(x, c++);
+  compute_encoder.set_output_array(out, c++);
+  compute_encoder.set_bytes(K, c++);
+  compute_encoder.set_bytes(N, c++);
+  compute_encoder.set_bytes(M, c++);
   compute_encoder.dispatch_threadgroups(
       MTL::Size(N / bn, 1, 1), MTL::Size(32, wk, 1));
 }
 
 void qvm_split_k(
-    const array& x,
+    array x,
     const array& w,
     const array& scales,
     const std::optional<array>& biases,
-    array& out,
+    array out,
     int group_size,
     int bits,
     int M,
@@ -820,6 +894,16 @@ void qvm_split_k(
   int split_k = K > 8192 ? 32 : 8;
   int split_D = (K + split_k - 1) / split_k;
   int B = out.size() / M / N;
+
+  // When weights are 2D, collapse leading batch dimensions of x and out into M
+  // so the kernel and reduction operate on standard 2D matrices.
+  if (B == 1 && x.ndim() != 2) {
+    x = reshape_in_eval(x, {M, K}, s);
+  }
+  if (B == 1 && out.ndim() != 2) {
+    out = reshape_in_eval(out, {M, N}, s);
+  }
+
   B *= split_k;
 
   constexpr int num_simdgroups = 2;
@@ -1596,15 +1680,11 @@ void qmm_splitk(
   int k_partition_size = K / split_k;
   int split_k_partition_stride = M * N;
 
-  // Allocate intermediate buffer: insert split_k at the front so that
-  // partition_stride = M * N matches the leading stride of the buffer.
+  // Allocate a float32 buffer for the partial sums, so that each partition is
+  // rounded to the output type only once, after they're summed, as in
+  // steel_matmul_splitk.
   auto& compute_encoder = metal::get_command_encoder(s);
-  auto temp_shape = out.shape();
-  if (temp_shape.size() == 1) {
-    temp_shape.insert(temp_shape.begin(), 1);
-  }
-  temp_shape.insert(temp_shape.begin(), split_k);
-  array intermediate(temp_shape, x.dtype(), nullptr, {});
+  array intermediate({split_k, M, N}, float32, nullptr, {});
   intermediate.set_data(allocator::malloc(intermediate.nbytes()));
   compute_encoder.add_temporary(intermediate);
 
@@ -1646,13 +1726,18 @@ void qmm_splitk(
 
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 
-  // Sum across split_k dimension (axis 0)
-  ReductionPlan plan(
-      ReductionOpType::ContiguousStridedReduce,
-      {intermediate.shape(0)},
-      {intermediate.strides(0)});
-  strided_reduce_general_dispatch(
-      intermediate, out, "sum", plan, {0}, compute_encoder, d, s);
+  // Sum the partitions and cast to the output type
+  auto accum_kname = "steel_gemm_splitk_accum_" + type_to_name(out) + "_" +
+      type_to_name(intermediate);
+  auto accum_kernel = get_steel_gemm_splitk_accum_kernel(
+      d, accum_kname, intermediate, out, false);
+  compute_encoder.set_compute_pipeline_state(accum_kernel);
+  compute_encoder.set_input_array(intermediate, 0);
+  compute_encoder.set_output_array(out, 1);
+  compute_encoder.set_bytes(split_k, 2);
+  compute_encoder.set_bytes(split_k_partition_stride, 3);
+  compute_encoder.set_bytes(N, 4);
+  compute_encoder.dispatch_threads(MTL::Size(N, M, 1), get_block_dims(N, M, 1));
 }
 
 void gather_qmm(
@@ -2258,8 +2343,8 @@ void dispatch_qmv(
   // results (Qwen4ExpQ6MixedAffineTests.mixedDenseQ6LayoutsAndCompilation).
   // Other formats/shapes keep the upstream wide dispatch; matrix prefill is
   // selected before this function and is unaffected.
-  const bool exact_q6_rows = mode == "affine" && bits == 6 &&
-      x.dtype() == float32 && group_size == 64 && K % 512 == 0 && N % 8 == 0;
+  const bool exact_q6_rows = exact_q6_f32_rows(
+      mode == "affine", bits, x.dtype(), group_size, K, N);
   // Small batch so route to qmv_wide, which reuses each weight group across the
   // M vectors.
   if (M >= 2 && use_qmv_wide(mode, d) && !global_scale && !exact_q6_rows) {
@@ -2286,7 +2371,18 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  // Return 0s if x is empty
+  if (inputs[0].size() == 0) {
+    array zero = array(0, out.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
+
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // Make sure the last two dims of x and w, s, b are contiguous. This should
   // be relaxed for x.
@@ -2308,9 +2404,10 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto mode = quantization_mode_to_string(mode_);
 
   // For few rows use qmv_mma when N/K is large enough.
-  if (transpose_ && non_batched && (M >= 6) && (M <= 16) &&
-      use_qmv_mma(x, w, scales, mode_, M, N, K, d)) {
-    qmv_mma(x, w, scales, out, group_size_, bits_, M, N, K, d, s, mode);
+  if (transpose_ && non_batched && (M <= 16) &&
+      use_qmv_mma(
+          x, w, scales, biases, mode_, group_size_, bits_, M, N, K, d)) {
+    qmv_mma(x, w, scales, biases, out, group_size_, bits_, M, N, K, d, s, mode);
     return;
   }
 
@@ -2399,7 +2496,18 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = metal::device(s.device);
 
+  // Return 0s if x is empty
+  if (inputs[0].size() == 0) {
+    array zero = array(0, out.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
+
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   array x = ensure_row_contiguous_matrix(inputs[0], d, s);
   array w = ensure_row_contiguous_matrix(inputs[1], d, s);
@@ -2520,6 +2628,9 @@ void QQMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto mode = quantization_mode_to_string(mode_);
 
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // - 2 inputs: x, w (non-quantized w)
   // - 3 inputs: x, w, scales_w (quantized w)
@@ -2601,6 +2712,9 @@ void GatherQQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto mode = quantization_mode_to_string(mode_);
 
   out.set_data(allocator::malloc(out.nbytes()));
+  if (out.size() == 0) {
+    return;
+  }
 
   // - 4 inputs: x, w (non-quantized w)
   // - 5 inputs: x, w, scales_w (quantized w)
@@ -2716,6 +2830,9 @@ void GatherQQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 void fast::Quantize::eval_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
+  for (auto& out : outputs) {
+    out.set_data(allocator::malloc(out.nbytes()));
+  }
   quantize_impl(
       inputs, outputs, mode_, group_size_, bits_, dequantize_, stream());
 }

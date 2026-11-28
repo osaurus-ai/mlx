@@ -32,9 +32,12 @@ def gated_delta_oracle(
         k: [B, T, H, K]
         v: [B, T, H, V]
         beta: [B, T, H]
-        g: [B, T, H]                    <--- Difference: with out kernel: this is expected as a log.
-        scale: float, optional          <--- Difference: This is done by the qwen3_5 model.
-        initial_state: [B, H, K, V], optional <- Difference: last two dimensions are transposed.
+        g: [B, T, H] or [B, T, H, K]    <--- Difference: with out kernel:
+                                            this is expected as a log.
+        scale: float, optional          <--- Difference: This is done by the
+                                            qwen3_5 model.
+        initial_state: [B, H, K, V], optional <- Difference: last two dimensions
+                                                are transposed.
         output_final_state: bool
 
     Returns:
@@ -57,7 +60,12 @@ def gated_delta_oracle(
         b_q = q[:, :, i]
         b_k = k[:, :, i]
         b_v = v[:, :, i].clone()
-        h = h.clone() * g[:, :, i].exp()[..., None, None]
+        gate = g[:, :, i].exp()
+        if gate.ndim == 3:
+            gate = gate[..., None]
+        else:
+            gate = gate[..., None, None]
+        h = h.clone() * gate
         b_beta = beta[:, :, i]
         b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
         b_v = b_v * b_beta[..., None]
@@ -70,7 +78,7 @@ def gated_delta_oracle(
     return o, h
 
 
-def runner(dims, stream=mx.gpu, reference=True):
+def runner(dims, stream=mx.gpu, reference=True, vectorized_g=False):
     B, Hk, Hv, T, Dk, Dv = dims
 
     assert Hv % Hk == 0
@@ -80,7 +88,8 @@ def runner(dims, stream=mx.gpu, reference=True):
     k = mx.random.normal(shape=(B, T, Hk, Dk))
     k = k / (mx.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
     v = mx.random.normal(shape=(B, T, Hv, Dv))
-    g = mx.random.uniform(shape=(B, T, Hv))
+    g_shape = (B, T, Hv, Dk) if vectorized_g else (B, T, Hv)
+    g = mx.random.uniform(shape=g_shape)
     b = mx.sigmoid(mx.random.normal(shape=(B, T, Hv)))
     h0 = mx.random.normal((B, Hv, Dv, Dk), dtype=mx.float32)
 
@@ -254,6 +263,17 @@ class TestGatedDelta(mlx_tests.MLXTestCase):
             self.assertTrue(
                 mx.allclose(hf_ref, hf, atol=1e-4, rtol=1e-4), msg="State " + msg
             )
+
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_gated_delta_vectorized_g(self):
+        for dims in self.gpu_dims:
+            mx.random.seed(0)
+            (out, hf), (out_ref, hf_ref) = runner(
+                dims, reference=has_torch, vectorized_g=True
+            )
+            mx.eval(out, hf, out_ref, hf_ref)
+            self.assertTrue(mx.allclose(out_ref, out, atol=1e-4, rtol=1e-4))
+            self.assertTrue(mx.allclose(hf_ref, hf, atol=1e-4, rtol=1e-4))
 
     @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
     def test_gated_delta_simdgroup(self):

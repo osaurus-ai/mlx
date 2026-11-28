@@ -1287,7 +1287,17 @@ void gemv_axbpy(
   std::ostringstream kname;
 
   if (transpose_mat) {
-    if (in_vector_len >= 8192 && out_vector_len >= 2048) {
+    // Specialized kernel for very small outputs
+    tn = out_vector_len < tn ? 1 : tn;
+
+    // A long K with few outputs launches too few simdgroups to fill the GPU,
+    // so split K or use smaller threadgroups
+    bool large_mat = in_vector_len >= 8192 && out_vector_len >= 2048;
+    size_t n_simdgroups =
+        batch_size_out * ceildiv(out_vector_len, (large_mat ? 8 : 4) * tn);
+    bool few_simdgroups = tn == 4 && in_vector_len >= 256 && n_simdgroups < 128;
+
+    if (large_mat && !few_simdgroups) {
       sm = 4;
       sn = 8;
     } else {
@@ -1295,16 +1305,18 @@ void gemv_axbpy(
       sn = 4;
     }
 
-    if (out_vector_len >= 2048) {
+    if (few_simdgroups && out_vector_len < 1024) {
+      bm = 4;
+      bn = 2;
+    } else if (few_simdgroups && large_mat) {
+      bn = 8;
+    } else if (out_vector_len >= 2048) {
       bn = 16;
     } else if (out_vector_len >= 512) {
       bn = 4;
     } else {
       bn = 2;
     }
-
-    // Specialized kernel for very small outputs
-    tn = out_vector_len < tn ? 1 : tn;
 
     n_out_per_tgp = bn * sn * tn;
     kname << "gemv_t_" << type_to_name(out);
@@ -2989,6 +3001,11 @@ void GatherMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& lhs_indices = inputs[2];
   auto& rhs_indices = inputs[3];
 
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return;
+  }
+
   // Return 0s if either input is empty
   if (a.size() == 0 || b.size() == 0) {
     array zero = array(0, a.dtype());
@@ -3212,6 +3229,19 @@ void SegmentedMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& a = inputs[0];
   auto& b = inputs[1];
   auto& segments = inputs[2];
+
+  if (out.size() == 0) {
+    out.set_data(allocator::malloc(0));
+    return;
+  }
+
+  // Return 0s if either input is empty
+  if (a.size() == 0 || b.size() == 0) {
+    array zero = array(0, a.dtype());
+    fill_gpu(zero, out, s);
+    metal::get_command_encoder(s).add_temporary(std::move(zero));
+    return;
+  }
 
   out.set_data(allocator::malloc(out.nbytes()));
 

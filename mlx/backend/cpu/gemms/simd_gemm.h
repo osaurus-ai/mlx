@@ -37,7 +37,7 @@ void load_block(
 }
 
 // lda and ldb are the row strides of a and b as stored (K x M for a
-// transposed a). c is dense, with row stride N.
+// transposed a). ldc is the row stride of c.
 template <typename T, typename AccT>
 void simd_gemm(
     const T* a,
@@ -50,6 +50,7 @@ void simd_gemm(
     int K,
     int lda,
     int ldb,
+    int ldc,
     float alpha,
     float beta) {
   constexpr int block_size = 16;
@@ -128,7 +129,7 @@ void simd_gemm(
       // Store
       for (int ii = 0; ii < block_size && i * block_size + ii < M; ++ii) {
         for (int jj = 0; jj < block_size && j * block_size + jj < N; ++jj) {
-          auto c_idx = (i * block_size + ii) * N + j * block_size + jj;
+          auto c_idx = (i * block_size + ii) * ldc + j * block_size + jj;
           if (beta != 0) {
             c[c_idx] = static_cast<T>(
                 alpha * c_block[ii * block_size + jj] + beta * c[c_idx]);
