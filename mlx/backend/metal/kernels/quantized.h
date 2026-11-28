@@ -1372,6 +1372,7 @@ template <
     const int group_size,
     const int bits,
     const bool aligned_N,
+    typename U = T,
     const int BM = 32,
     const int BK = 32,
     const int BN = 32>
@@ -1380,7 +1381,7 @@ METAL_FUNC void qmm_t_impl(
     const device T* scales,
     const device T* biases,
     const device T* x,
-    device T* y,
+    device U* y,
     threadgroup T* Xs,
     threadgroup T* Ws,
     const constant int& K,
@@ -1405,7 +1406,7 @@ METAL_FUNC void qmm_t_impl(
 
   // Instantiate the appropriate BlockMMA and Loader
   using mma_t = mlx::steel::
-      BlockMMA<T, T, BM, BN, BK, WM, WN, false, true, BK_padded, BK_padded>;
+      BlockMMA<T, U, BM, BN, BK, WM, WN, false, true, BK_padded, BK_padded>;
   using loader_x_t =
       mlx::steel::BlockLoader<T, BM, BK, BK_padded, 1, WM * WN * SIMD_SIZE>;
   using loader_w_t = QuantizedBlockLoader<
@@ -2284,7 +2285,7 @@ template <
         b_strides,
         tid);
   }
-  qmm_t_impl<T, group_size, bits, aligned_N, BM, BK, BN>(
+  qmm_t_impl<T, group_size, bits, aligned_N, T, BM, BK, BN>(
       w,
       scales,
       biases,
@@ -2315,7 +2316,7 @@ template <
     const device T* scales [[buffer(1)]],
     const device T* biases [[buffer(2)]],
     const device T* x [[buffer(3)]],
-    device T* y [[buffer(4)]],
+    device float* y [[buffer(4)]],
     const constant int& K [[buffer(5)]],
     const constant int& N [[buffer(6)]],
     const constant int& M [[buffer(7)]],
@@ -2343,7 +2344,7 @@ template <
   biases += k_start / group_size;
   y += tid.z * static_cast<int64_t>(split_k_partition_stride);
 
-  qmm_t_impl<T, group_size, bits, aligned_N, BM, BK, BN>(
+  qmm_t_impl<T, group_size, bits, aligned_N, float, BM, BK, BN>(
       (const device uint32_t*)wl,
       scales,
       biases,
@@ -2737,7 +2738,7 @@ template <
       s_strides,
       b_strides,
       tid);
-  qmm_t_impl<T, group_size, bits, aligned_N, BM, BK, BN>(
+  qmm_t_impl<T, group_size, bits, aligned_N, T, BM, BK, BN>(
       w,
       scales,
       biases,
