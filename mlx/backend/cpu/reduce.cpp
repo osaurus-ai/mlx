@@ -95,6 +95,7 @@ struct ReductionAccumulator {
 constexpr int sum_block = 4096;
 
 struct SumReduce;
+struct ProdReduce;
 
 template <typename U, typename Op>
 constexpr bool cascade_sum =
@@ -194,6 +195,18 @@ A contiguous_accumulate(const T* x, int size, Op op, A acc, A init) {
     for (; size > sum_block; size -= sum_block, x += sum_block) {
       acc = contiguous_accumulate_block(x, sum_block, op, acc, init);
     }
+  }
+  if constexpr (
+      std::is_same_v<Op, ProdReduce> &&
+      (std::is_same_v<T, bfloat16_t> || std::is_same_v<T, float16_t>)) {
+    // Multiply half precision values one at a time, in order, in float. The
+    // CPU backend without Highway does the same, because it has no bfloat16
+    // vectors. A lane that takes each Nth value can overflow or underflow
+    // when the product in order does not.
+    for (; size > 0; size--, x++) {
+      acc = op(acc, static_cast<A>(*x));
+    }
+    return acc;
   }
   return contiguous_accumulate_block(x, size, op, acc, init);
 }

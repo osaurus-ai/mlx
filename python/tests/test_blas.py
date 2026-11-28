@@ -925,6 +925,19 @@ class TestBlas(mlx_tests.MLXTestCase):
                 out = mx.addmm(c, a, mx.swapaxes(b, -1, -2), 0.125, 0.0)
                 self.assertTrue(np.allclose(out.astype(mx.float32), 12800.0))
 
+    def test_matmul_large_output(self):
+        if not mx.cuda.is_available() or mx.default_device() == mx.cpu:
+            self.skipTest("CUDA only")
+
+        # M * N = 2**32 does not fit in int32
+        a = mx.ones((16384, 64), mx.float16)
+        b = mx.ones((64, 262144), mx.float16)
+        c = mx.ones((262144,), mx.float16)
+        out = a @ b
+        self.assertEqual(out[-1, -1].item(), 64.0)
+        out = mx.addmm(c, a, b, 1.0, 2.0)
+        self.assertEqual(out[-1, -1].item(), 66.0)
+
     def test_addmm_grad(self):
         def make_ref_addmm(alpha, beta):
             return lambda c, a, b: alpha * (a @ b) + beta * c
