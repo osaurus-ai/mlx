@@ -1343,6 +1343,26 @@ class TestOps(mlx_tests.MLXTestCase):
         with self.assertRaises(ValueError):
             mx.erfinv(z)
 
+    def test_erf_relative_accuracy(self):
+        # Near 0, erf(x) is about 1.128 x: 1 - erfc(x) is not accurate there.
+        x = np.logspace(-30, 1, 2000, dtype=np.float64).astype(np.float32)
+        x = np.concatenate([-x[::-1], [-0.0, 0.0], x])
+        expected = np.array([math.erf(float(v)) for v in x])
+        ulp = np.spacing(np.abs(expected).astype(np.float32)).astype(np.float64)
+        out = np.array(mx.erf(mx.array(x))).astype(np.float64)
+        self.assertLessEqual(np.max(np.abs(out - expected) / ulp), 4.0)
+
+        x16 = x.astype(np.float16)
+        expected = np.array([math.erf(float(v)) for v in x16])
+        ulp = np.spacing(np.abs(expected).astype(np.float16)).astype(np.float64)
+        out = np.array(mx.erf(mx.array(x16))).astype(np.float64)
+        self.assertLessEqual(np.max(np.abs(out - expected) / ulp), 1.0)
+
+        special = mx.erf(mx.array([float("inf"), -float("inf"), float("nan")]))
+        self.assertEqual(special[0].item(), 1.0)
+        self.assertEqual(special[1].item(), -1.0)
+        self.assertTrue(math.isnan(special[2].item()))
+
     def test_erfinv(self):
         inputs = [-5.0, -1.0, 0.5, 0.0, 0.5, 1.0, 5.0]
         x = mx.array(inputs)

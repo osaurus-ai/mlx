@@ -199,40 +199,31 @@ Simd<T, N> erf(Simd<T, N> x) {
       out[i] = std::erf(x[i]);
     }
     return out;
+  } else {
+    // The float erf of metal/kernels/erf.h (error at most 1 ulp). 1 - erfc(x)
+    // loses the relative accuracy near 0, where erf(x) is about 1.128 x.
+    Simd<float, N> a = x;
+    auto t = abs(a);
+    auto s = a * a;
+    // |x| <= 0.927734375
+    auto p = fma(Simd<float, N>(-5.96761703e-4f), s, 4.99119423e-3f);
+    p = fma(p, s, -2.67681349e-2f);
+    p = fma(p, s, 1.12819925e-1f);
+    p = fma(p, s, -3.76125336e-1f);
+    p = fma(p, s, 1.28379166e-1f);
+    p = fma(p, a, a);
+    // |x| > 0.927734375
+    auto r = fma(Simd<float, N>(-1.72853470e-5f), t, 3.83197126e-4f);
+    auto u = fma(Simd<float, N>(-3.88396438e-3f), t, 2.42546219e-2f);
+    r = fma(r, s, u);
+    r = fma(r, t, -1.06777877e-1f);
+    r = fma(r, t, -6.34846687e-1f);
+    r = fma(r, t, -1.28717512e-1f);
+    r = fma(r, t, -t);
+    r = -expm1(r);
+    r = select(a < 0.0f, -r, r);
+    return Simd<T, N>(select(t > 0.927734375f, r, p));
   }
-  // https://github.com/pytorch/pytorch/blob/abf28982a8cb43342e7669d859de9543fd804cc9/aten/src/ATen/cpu/vec/vec256/vec256_float.h#L175
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-  Simd<float, N> v = x;
-  auto t = recip(fma(Simd<float, N>(0.3275911f), abs(v), 1.0f));
-  auto r = fma(Simd<float, N>(1.061405429f), t, -1.453152027f);
-  r = fma(r, t, 1.421413741f);
-  r = fma(r, t, -0.284496736f);
-  r = fma(r, t, 0.254829592f);
-#else
-  // Use explicit ComputeT so half-type Simd (float16/bfloat16) promotes to
-  // float32 and bare float literals don't cause template deduction ambiguity
-  // in fma(). For float/double T, ComputeT == T so behavior is unchanged.
-  using ComputeT = std::conditional_t<
-      std::is_same_v<T, float16_t> || std::is_same_v<T, bfloat16_t>,
-      float,
-      T>;
-  Simd<ComputeT, N> v = x;
-  auto t = recip(
-      fma(Simd<ComputeT, N>(ComputeT(0.3275911f)), abs(v), ComputeT(1.0f)));
-  auto r = fma(
-      Simd<ComputeT, N>(ComputeT(1.061405429f)), t, ComputeT(-1.453152027f));
-  r = fma(r, t, ComputeT(1.421413741f));
-  r = fma(r, t, ComputeT(-0.284496736f));
-  r = fma(r, t, ComputeT(0.254829592f));
-#endif // MLX_USE_HIGHWAY_KERNELS
-  auto e = -exp(-v * v);
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-  auto result = Simd<T, N>(fma(e * t, r, 1.0f));
-  return select(x > 0, result, -result);
-#else
-  auto result = Simd<T, N>(fma(e * t, r, ComputeT(1.0f)));
-  return select(x > ComputeT(0), result, -result);
-#endif // MLX_USE_HIGHWAY_KERNELS
 }
 
 template <typename T, int N>
