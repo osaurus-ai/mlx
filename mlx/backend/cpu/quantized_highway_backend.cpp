@@ -24,82 +24,7 @@
 // ISA-specific SIMD implementations (int8 kernels, dequant, LUT lookups).
 // Highway kernels are compiled as runtime-dispatched translation units when
 // MLX_USE_HIGHWAY_KERNELS is defined.
-#if defined(MLX_USE_HIGHWAY_KERNELS)
 #include "mlx/backend/cpu/quantized_highway.h"
-#else
-// No ISA-specific SIMD available. Provide no-op stubs to fall through to the
-// generic SIMD paths in quantized.cpp which work on any platform via the
-// portable Simd<T,N> layer.
-#include "mlx/backend/cpu/quantized.h"
-namespace mlx::core {
-
-template <typename T, int bits, int group_size, int NC>
-int try_batch_extract_multi_col(
-    const T*& x_local,
-    const uint32_t* w_ptrs[NC],
-    simd::Simd<float, simd::max_size<float>> g_acc[NC],
-    int group_size_val) {
-  return 0;
-}
-
-template <typename T, int bits, int group_size>
-bool try_int8_simd_row(
-    T* result,
-    const T* x,
-    const uint32_t* w,
-    const T* scales,
-    const T* biases,
-    int n_start,
-    int n_end,
-    int K,
-    int groups_per_col,
-    int packs_per_col,
-    float* x_group_sums,
-    const PreqAct* preq) {
-  return false;
-}
-
-template <typename T, int bits, int group_size>
-bool try_int8_preq_parallel(
-    T* result,
-    const T* x,
-    const uint32_t* w,
-    const T* scales,
-    const T* biases,
-    int N,
-    int K,
-    int n_threads,
-    int n_chunks,
-    std::atomic<int>& steal_counter,
-    int CHUNK_COLS) {
-  return false;
-}
-
-template <int S>
-simd::Simd<float, S> fp4_lut_lookup_simd(
-    const simd::Simd<uint32_t, S>& wi,
-    const float* FP4_LUT_ptr) {
-  alignas(32) float tmp[S];
-  for (int i = 0; i < S; ++i) {
-    tmp[i] = FP4_LUT_ptr[wi[i]];
-  }
-  return simd::load<float, S>(tmp);
-}
-
-template <int S>
-simd::Simd<float, S> fp8_lut_gather_simd(
-    const uint32_t* w,
-    const float* FP8_LUT_ptr) {
-  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(w);
-  alignas(32) float tmp[S];
-  for (int i = 0; i < S; ++i) {
-    tmp[i] = FP8_LUT_ptr[bytes[i]];
-  }
-  return simd::load<float, S>(tmp);
-}
-
-} // namespace mlx::core
-#endif // ISA dispatch
 
 namespace mlx::core {
 
@@ -831,7 +756,6 @@ void _qmm_t_simd(
   static_assert(
       S % pack_factor == 0 || pack_factor % S == 0,
       "SIMD size and pack factor must be divisible");
-#if defined(MLX_USE_HIGHWAY_KERNELS)
   if constexpr (bits == 4 || bits == 8) {
     if (qmm_t_int8_highway(
             result,
@@ -848,7 +772,6 @@ void _qmm_t_simd(
       return;
     }
   }
-#endif
   auto& pool = cpu::ThreadPool::instance();
 
   // N-parallel threading: split columns across threads.
@@ -1015,13 +938,11 @@ void _dequant_row_for_blas(
     const float* biases_row,
     float* out,
     int K) {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
   if constexpr (bits == 4 || bits == 8) {
     _dequant_row_highway<bits, group_size>(
         w_row, scales_row, biases_row, out, K);
     return;
   }
-#endif
   _dequant_row<bits, group_size>(w_row, scales_row, biases_row, out, K);
 }
 
@@ -1194,12 +1115,10 @@ void _qmm_dispatch_transpose(
         return;
       }
     }
-#if defined(MLX_USE_HIGHWAY_KERNELS)
     if constexpr (bits == 4 || bits == 8) {
       _qmm_t_simd<T, bits, group_size>(result, x, w, scales, biases, M, N, K);
       return;
     }
-#endif
     // SIMD path: S must be >= 4 and must divide pack_factor or vice versa
     constexpr int pack_factor = 32 / bits;
     constexpr int S = simd::max_size<float>;
@@ -1521,128 +1440,6 @@ void fp_qmm_t(
   }
 }
 
-#if !defined(MLX_USE_HIGHWAY_KERNELS)
-template <int S, int bits>
-simd::Simd<float, S> fp_extract_bits_simd(const uint32_t* w, int elem_off = 0) {
-  if constexpr (S == 1 && bits == 4) {
-    // Scalar: extract single 4-bit FP4 value
-    return simd::Simd<float, 1>(FP4_LUT[(*w >> (elem_off * 4)) & 0xf]);
-  } else if constexpr (S == 1 && bits == 8) {
-    // Scalar: extract single 8-bit FP8 value via LUT
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(w);
-    return simd::Simd<float, 1>(FP8_LUT[bytes[elem_off]]);
-  } else if constexpr (S == 4 && bits == 4) {
-    // 4-lane path: extract 4 FP4 values from part of one uint32_t word.
-    uint32_t word = *w;
-    if (elem_off == 1) {
-      word >>= 16;
-    }
-    alignas(16) constexpr uint32_t shifts_[] = {0, 4, 8, 12};
-    auto shifts = simd::load<uint32_t, S>(shifts_);
-    auto wi = simd::Simd<uint32_t, S>(word);
-    wi = wi >> shifts;
-    wi = wi & 0xf;
-    // Scalar LUT lookup for this fallback path.
-    alignas(16) float tmp[S];
-    for (int i = 0; i < S; ++i) {
-      tmp[i] = FP4_LUT[wi[i]];
-    }
-    return simd::load<float, S>(tmp);
-  } else if constexpr (S == 4 && bits == 8) {
-    // 4-lane path: load 4 FP8 values from one uint32_t word via LUT.
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(w);
-    alignas(16) float tmp[S];
-    for (int i = 0; i < S; ++i) {
-      tmp[i] = FP8_LUT[bytes[i]];
-    }
-    return simd::load<float, S>(tmp);
-  } else if constexpr (S == 8 && bits == 4) {
-    // Extract 8 4-bit indices, then SIMD LUT lookup
-    constexpr std::array<uint32_t, 8> shifts_ = {{0, 4, 8, 12, 16, 20, 24, 28}};
-    auto shifts(*(simd::Simd<uint32_t, S>*)&shifts_);
-    auto wi = simd::Simd<uint32_t, S>(*w);
-    wi = wi >> shifts;
-    wi = wi & 0xf;
-    return fp4_lut_lookup_simd<S>(wi, FP4_LUT);
-  } else if constexpr (S == 8 && bits == 8) {
-    // 8 FP8 values via SIMD LUT gather
-    return fp8_lut_gather_simd<S>(w, FP8_LUT);
-  } else {
-    // Appease compiler.. but should never get here
-    throw std::runtime_error("Unsupported combination for simd qmm.");
-  }
-}
-
-// Process NC output columns simultaneously for FP quantized matmul.
-// Loads x once per SIMD chunk and reuses across all columns.
-template <typename T, int group_size, int bits, int NC>
-void fp_qmm_t_simd_multi_col(
-    T* result,
-    const T* x,
-    const uint32_t* w_ptrs[NC],
-    const uint8_t* scales_ptrs[NC],
-    int K,
-    float scale_factor) {
-  constexpr int pack_factor = get_pack_factor(bits, 32);
-  constexpr int S = simd::max_size<float>;
-  constexpr int iters_per_word = (S >= pack_factor) ? 1 : (pack_factor / S);
-  constexpr int words_per_iter = (S >= pack_factor) ? (S / pack_factor) : 0;
-
-  simd::Simd<float, S> acc[NC];
-  for (int c = 0; c < NC; c++)
-    acc[c] = simd::Simd<float, S>(0);
-
-  auto x_local = x;
-  for (int k = 0; k < K; k += group_size) {
-    // Load and dequantize scale for each column
-    float scale_f[NC];
-    for (int c = 0; c < NC; c++) {
-      scale_f[c] = static_cast<float>(
-                       dequantize_scale<T, group_size>(*scales_ptrs[c]++)) *
-          scale_factor;
-    }
-
-    simd::Simd<float, S> g_acc[NC];
-    for (int c = 0; c < NC; c++)
-      g_acc[c] = simd::Simd<float, S>(0);
-
-    for (int elem = 0; elem < group_size; elem += S) {
-      // Load x once, reuse for all NC columns
-      simd::Simd<float, S> x_simd = load_as_float<T, S>(x_local);
-      x_local += S;
-
-      int elem_off = 0;
-      if constexpr (S < pack_factor) {
-        elem_off = (elem / S) % iters_per_word;
-      }
-
-      // Process each column with the same x_simd
-#pragma clang loop unroll(full)
-      for (int c = 0; c < NC; c++) {
-        auto wf = fp_extract_bits_simd<S, bits>(w_ptrs[c], elem_off);
-        if constexpr (S >= pack_factor) {
-          w_ptrs[c] += words_per_iter;
-        } else {
-          if (elem_off == iters_per_word - 1) {
-            w_ptrs[c] += 1;
-          }
-        }
-        g_acc[c] = simd::fma(x_simd, wf, g_acc[c]);
-      }
-    }
-
-    // Accumulate group results: acc += scale * g_acc
-#pragma clang loop unroll(full)
-    for (int c = 0; c < NC; c++) {
-      acc[c] = simd::fma(simd::Simd<float, S>(scale_f[c]), g_acc[c], acc[c]);
-    }
-  }
-
-  for (int c = 0; c < NC; c++) {
-    result[c] = T(simd::sum(acc[c]));
-  }
-}
-#endif
 
 // Helper for FP quantized matmul row processing (used by parallel version).
 // Processes multiple output columns, using multi-column kernel where possible.
@@ -1656,7 +1453,6 @@ void fp_qmm_t_simd_row(
     int n_end,
     int K,
     float scale_factor) {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
   fp_qmm_t_highway_row(
       result,
       x,
@@ -1672,80 +1468,6 @@ void fp_qmm_t_simd_row(
       FP4_LUT,
       FP8_LUT);
   return;
-#else
-
-  constexpr int pack_factor = get_pack_factor(bits, 32);
-  constexpr int packs_in_group = group_size / pack_factor;
-  constexpr int S = simd::max_size<float>;
-  constexpr int iters_per_word = (S >= pack_factor) ? 1 : (pack_factor / S);
-  constexpr int words_per_iter = (S >= pack_factor) ? (S / pack_factor) : 0;
-  constexpr int NC = 4; // Process 4 columns at once
-
-  // Compute stride per output column
-  int groups_per_col = K / group_size;
-  int packs_per_col = groups_per_col * packs_in_group;
-
-  // Advance pointers to starting column
-  const uint32_t* w_base = w + n_start * packs_per_col;
-  const uint8_t* scales_base = scales + n_start * groups_per_col;
-
-  int n = n_start;
-
-  // Process NC columns at a time
-  for (; n + NC <= n_end; n += NC) {
-    const uint32_t* wp[NC];
-    const uint8_t* sp[NC];
-    for (int c = 0; c < NC; c++) {
-      wp[c] = w_base + c * packs_per_col;
-      sp[c] = scales_base + c * groups_per_col;
-    }
-    fp_qmm_t_simd_multi_col<T, group_size, bits, NC>(
-        result + (n - n_start), x, wp, sp, K, scale_factor);
-    w_base += NC * packs_per_col;
-    scales_base += NC * groups_per_col;
-  }
-
-  // Handle remaining columns one at a time
-  for (; n < n_end; n++) {
-    const uint32_t* w_local = w_base;
-    const uint8_t* scales_local = scales_base;
-
-    simd::Simd<float, S> acc(0);
-    auto x_local = x;
-    for (int k = 0; k < K; k += group_size) {
-      T scale = static_cast<T>(
-          static_cast<float>(dequantize_scale<T, group_size>(*scales_local++)) *
-          scale_factor);
-
-      simd::Simd<float, S> g_acc(0);
-      for (int elem = 0; elem < group_size; elem += S) {
-        int elem_off = 0;
-        if constexpr (S < pack_factor) {
-          elem_off = (elem / S) % iters_per_word;
-        }
-        auto wf = fp_extract_bits_simd<S, bits>(w_local, elem_off);
-        if constexpr (S >= pack_factor) {
-          w_local += words_per_iter;
-        } else {
-          if (elem_off == iters_per_word - 1) {
-            w_local += 1;
-          }
-        }
-        simd::Simd<float, S> x_simd = load_as_float<T, S>(x_local);
-        g_acc = simd::fma(x_simd, wf, g_acc);
-        x_local += S;
-      }
-      acc = simd::fma(
-          simd::Simd<float, S>(static_cast<float>(scale)), g_acc, acc);
-    }
-
-    result[n - n_start] = T(simd::sum(acc));
-
-    // Move to next column
-    w_base += packs_per_col;
-    scales_base += groups_per_col;
-  }
-#endif
 }
 
 template <typename T, int group_size, int bits>
@@ -1758,7 +1480,6 @@ void fp_qmm_t_simd(
     int N,
     int K,
     float scale_factor) {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
   fp_qmm_t_highway(
       result,
       x,
@@ -1774,59 +1495,6 @@ void fp_qmm_t_simd(
       FP4_LUT,
       FP8_LUT);
   return;
-#else
-  constexpr int pack_factor = get_pack_factor(bits, 32);
-  constexpr int S = simd::max_size<float>;
-  static_assert(
-      S % pack_factor == 0 || pack_factor % S == 0,
-      "SIMD size and pack factor must be divisible");
-  constexpr int iters_per_word = (S >= pack_factor) ? 1 : (pack_factor / S);
-  constexpr int words_per_iter = (S >= pack_factor) ? (S / pack_factor) : 0;
-
-  auto& pool = cpu::ThreadPool::instance();
-
-  // N-parallel threading: split columns across threads.
-  // Each thread processes ALL M rows for its column chunk.
-  // Weight data per thread fits in L2 cache for much better locality.
-  int min_cols_per_thread = (M == 1) ? 128 : 64;
-  int n_threads =
-      std::min(pool.max_threads(), std::max(1, N / min_cols_per_thread));
-
-  if (n_threads > 1) {
-    // Work stealing: 64-column chunks for dynamic load balancing.
-    // Local counter -- safe for concurrent parallel_for from multiple streams.
-    constexpr int CHUNK_COLS = 64;
-    int n_chunks = (N + CHUNK_COLS - 1) / CHUNK_COLS;
-    alignas(64) std::atomic<int> steal_counter{0};
-    steal_counter.store(n_threads, std::memory_order_relaxed);
-    pool.parallel_for(n_threads, [&](int tid, int /*nth*/) {
-      int my_chunk = tid;
-      while (my_chunk < n_chunks) {
-        int n_start = std::min(my_chunk * CHUNK_COLS, N);
-        int n_end = std::min(n_start + CHUNK_COLS, N);
-        if (n_start < n_end) {
-          for (int m = 0; m < M; m++) {
-            fp_qmm_t_simd_row<T, group_size, bits>(
-                result + m * N + n_start,
-                x + m * K,
-                w,
-                scales,
-                n_start,
-                n_end,
-                K,
-                scale_factor);
-          }
-        }
-        my_chunk = steal_counter.fetch_add(1, std::memory_order_relaxed);
-      }
-    });
-  } else {
-    for (int m = 0; m < M; m++) {
-      fp_qmm_t_simd_row<T, group_size, bits>(
-          result + m * N, x + m * K, w, scales, 0, N, K, scale_factor);
-    }
-  }
-#endif
 }
 
 template <typename T, int group_size, int bits>
@@ -1841,13 +1509,11 @@ void fp_qmm_dispatch_transpose(
     bool transposed_w,
     float scale_factor) {
   if (transposed_w) {
-#if defined(MLX_USE_HIGHWAY_KERNELS)
     if constexpr (bits == 4 || bits == 8) {
       fp_qmm_t_simd<T, group_size, bits>(
           result, x, w, scales, M, N, K, scale_factor);
       return;
     }
-#endif
     // SIMD path: S must be >= 4 and must divide pack_factor or vice versa
     constexpr int fp_pack_factor = get_pack_factor(bits, 32);
     constexpr int S = simd::max_size<float>;
